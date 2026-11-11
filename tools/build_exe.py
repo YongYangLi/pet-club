@@ -3,8 +3,8 @@
 
 打出来的是 `dist/pet-club.exe`：双击即用，目标机器上不需要 Python、不需要
 pip install、不需要旁边放 assets 目录 —— 立绘全部塞进 exe，启动时解到临时目录
-（config.assets_dir() 认 _MEIPASS）。代价是首次解压约一两秒，换来的是「拷一个
-文件过去就能用」。
+（config.assets_dir() 认 _MEIPASS）。代价是首次解压要几秒（Qt 自己就一百多兆，
+解压比纯 Tk 版慢），换来的是「拷一个文件过去就能用」。
 
 素材只需要 assets/：素材/ 那 80 多兆原图是给我们自己做图的，跟运行无关。
 
@@ -95,6 +95,22 @@ def main():
         '--exclude-module', 'server',
         '--exclude-module', 'numpy',
         '--exclude-module', 'pytest',
+        '--exclude-module', 'tkinter',        # 老版本用过，别让残留的引用拖进来
+        '--exclude-module', 'unittest',
+        '--exclude-module', 'pydoc',
+        # 只用到 QtCore / QtGui / QtWidgets：剩下那些模块每个都几十兆
+        '--exclude-module', 'PySide6.QtNetwork',
+        '--exclude-module', 'PySide6.QtQml',
+        '--exclude-module', 'PySide6.QtQuick',
+        '--exclude-module', 'PySide6.QtSql',
+        '--exclude-module', 'PySide6.QtTest',
+        '--exclude-module', 'PySide6.QtMultimedia',
+        '--exclude-module', 'PySide6.QtWebEngineCore',
+        '--exclude-module', 'PySide6.QtWebEngineWidgets',
+        '--exclude-module', 'PySide6.QtOpenGL',
+        '--exclude-module', 'PySide6.QtOpenGLWidgets',
+        '--exclude-module', 'PySide6.QtPdf',
+        '--exclude-module', 'PySide6.QtPrintSupport',
         '--distpath', os.path.join(ROOT, 'dist'),
         '--workpath', os.path.join(build, 'work'),
         '--specpath', build,

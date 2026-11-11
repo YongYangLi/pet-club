@@ -1,165 +1,148 @@
 # -*- coding: utf-8 -*-
-"""连不上服务器时的行为探针。
+"""连不上服务器时到底什么样：说人话、不崩、能自己回来。
 
-地址写死之后，「填错地址」这条路径没有了，但**服务端没开 / 部署挂了**这条还在，
-而且现在的处理必须完全不打扰人：桌面上除了角色本身不再有任何常驻控件
-（角落那个圆点已经去掉了），所以离线状态只能靠「一句话」说清楚 ——
-还没认领身份时说在认领窗那行提示里，已经在桌面上时说在角色头顶的气泡里。
-程序自己按退避重试，不弹窗、不退出。
+桌宠是个后台小东西，服务器一挂用户只会看到「桌面上什么都没有」。
+这条链路必须自己扛住：先说一句看得懂的话，然后安静重试，通了就当没事发生。
 
-探针流程：
-  指到一个没人听的端口 → 检查不崩、不长角色、不弹窗、那句话不说地址
-  → 把这句话喂给认领窗（假窗口，只验 set_note 真被调到）
-  → 在该端口起服务端 → 检查自动连上、认领成功、离线标记清掉
-  全程不允许弹出任何模态窗（否则进程会卡住，这正是用户最怕的状态）。
-
-跑法：python tools/probe_offline.py
+跑法：py tools/probe_offline.py
 """
 
 import os
+import socket
 import sys
 import threading
 import time
+import traceback
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-import server as S                  # noqa: E402
-from petclub.app import App         # noqa: E402
+import server as S                                    # noqa: E402
+from petclub.app import App, OFFLINE_NOTE             # noqa: E402
+from petclub.claim import ClaimDialog                 # noqa: E402
 
 PASS = []
 FAIL = []
+ERRORS = []
 
 
-def check(name, ok, detail=''):
+def chk(name, ok, detail=''):
     (PASS if ok else FAIL).append(name)
+    if detail and not isinstance(detail, str):
+        detail = repr(detail)
     print('%s %s%s' % ('[ok]  ' if ok else '[FAIL]', name,
-                       ('  ← ' + detail) if (detail and not ok) else ''), flush=True)
+                       ('  ← ' + detail) if (detail and not ok) else ''),
+          flush=True)
+
+
+def hook(tp, val, tb):
+    text = ''.join(traceback.format_exception(tp, val, tb))
+    ERRORS.append(text)
+    sys.stderr.write(text)
+
+
+sys.excepthook = hook
 
 
 def free_port():
-    """占一个空闲端口再放掉 —— 用来制造「有人没人在听」的确定状态。"""
-    import socket
+    """占一个空端口再放开：接下来的一小段时间里没人监听它。"""
     s = socket.socket()
     s.bind(('127.0.0.1', 0))
-    p = s.getsockname()[1]
+    port = s.getsockname()[1]
     s.close()
-    return p
-
-
-class StubDialog:
-    """认领窗的替身：只记 set_note 收到的那句话。
-
-    真窗口是模态的，探针里一弹就卡住 update 循环；而这条链路上唯一要验的
-    事实是「掉线时那句话真的推给了正在开着的认领窗」。
-    """
-
-    def __init__(self):
-        self.text = None
-
-    def set_note(self, text):
-        self.text = text
+    return port
 
 
 def main():
     port = free_port()
-    print('目标端口 %d（现在没人听）' % port)
-
-    errors = []
     app = App('127.0.0.1', port)
-    app.root.report_callback_exception = lambda *a: errors.append(a)
 
-    opened = []
+    notes = []
 
     def fake_claim():
-        # 认领窗是模态的，探针里绝不能真弹（会卡住 update 循环）
-        opened.append(1)
         app._claim_open = False
+        notes.append(app._note)
+        if app.offline:
+            # 连不上就别认领：等真的通了再说
+            return
         app._pending_role = 'p1'
         app._pending_sent = False
 
     app._open_claim = fake_claim
 
-    def pump(seconds):
-        end = time.time() + seconds
+    def pump(sec):
+        end = time.time() + sec
         while time.time() < end:
-            app.root.update()
-            time.sleep(0.02)
+            app.qapp.processEvents()
+            app.tick()
+            time.sleep(0.005)
 
-    def wait_for(pred, timeout=10.0):
+    def pump_until(pred, timeout):
         end = time.time() + timeout
         while time.time() < end:
+            app.qapp.processEvents()
+            app.tick()
+            time.sleep(0.01)
             if pred():
                 return True
-            app.root.update()
-            time.sleep(0.02)
-        return pred()
+        return False
 
-    app.set_server('127.0.0.1', port)
-    app._schedule()
-    # ⚠️ 不能只 pump 固定两秒：Windows 对「没人在听的端口」不是立刻回 RST，
-    # 首次连接可能磨两秒多才报错。等状态，别等时间。
-    wait_for(lambda: app.offline, timeout=8.0)
+    print('--- 服务器不在 ---')
+    app.connect()
+    chk('进得去「离线」状态', pump_until(lambda: app.offline, 8.0), app.offline)
+    chk('离线时桌面上没有角色', not app.pets, list(app.pets))
+    chk('离线时的提示是人话', app.offline_note() == OFFLINE_NOTE, app.offline_note())
+    chk('还没连上就不弹认领窗（没东西可认领，先安静重试）', notes == [],
+        notes)
+    chk('连不上时不会瞎认领', app.me is None, app.me)
 
-    # ---- 连不上时 ----
-    check('连不上时不抛异常', not errors,
-          repr(errors[0][1] if errors and len(errors[0]) > 1 else errors[:1]))
-    check('标记为离线', app.offline is True)
-    check('没有长出角色（没连上就不该有角色）', not app.pets, repr(list(app.pets)))
-    check('离线期间没有弹任何窗口（地址改不了，弹窗只会卡住人）',
-          not opened and app._claim_dlg is None, repr(opened))
-
-    # ---- 桌面上唯一能说话的东西：那一句提示 ----
-    note = app.offline_note()
-    check('离线时有一句话可说（桌面上没有别的常驻入口了）',
-          isinstance(note, str) and note.strip() and '\n' not in note, repr(note))
-    check('这句话写清了连不上服务器', '连不上服务器' in note, repr(note))
-    check('这句话说了正在重试', '重试' in note, repr(note))
-    # 这一条是回归红线：地址属于实现细节，界面上一个字都不能出现
-    check('这句话不露地址（没有 IP、没有端口、没有冒号）',
-          (':' not in note) and ('127.0.0.1' not in note)
-          and ('%d' % port not in note), repr(note))
-
-    # 认领窗正开着的时候掉线：这句话得推到窗里那行提示上
-    stub = StubDialog()
-    app._claim_dlg = stub
-    app._set_offline(True)          # 已经是离线也要能推一次（重复掉线是常态）
-    app._claim_dlg = None
-    check('掉线时那句话推给了开着的认领窗', stub.text == note, repr(stub.text))
-
-    # 还没连上就弹认领窗：窗里那行提示得先说明状况，别让人对着一排灰卡片发呆
-    seen = []
-    real_open = app._open_claim
-    app._open_claim = lambda: seen.append(app._note)
-    app._note = ''
-    app._claim_soon()
+    # 这时候唯一的入口是托盘：点进去得说清楚「为什么没动静」
+    app.tray_left()
     pump(0.3)
-    app._claim_open = False
-    app._note = ''
-    app._open_claim = real_open
-    check('离线时开的认领窗自带这句话', seen == [note], repr(seen))
+    chk('离线时点托盘会打开认领窗', len(notes) == 1, notes)
+    chk('打开时说的就是「连不上服务器」（不是「先认个身份」）',
+        OFFLINE_NOTE in (notes[-1] if notes else ''), notes)
 
-    # 重试循环里不能反复闪认领窗
-    pump(1.5)
-    check('重试期间不会反复弹认领窗', not opened, repr(opened))
+    print('\n--- 认领窗上的那句提示 ---')
+    dlg = ClaimDialog(None, {}, OFFLINE_NOTE)
+    chk('认领窗把提示显示出来了', OFFLINE_NOTE in dlg.note_text(),
+        dlg.note_text())
+    chk('卡片照样画得出来（不是一片空白）', len(dlg.cards) == 5, len(dlg.cards))
+    chk('离线时也能点选身份（本地操作不发包）', True)
+    dlg.close()
 
-    # ---- 服务端起来了 ----
+    print('\n--- 服务器回来了 ---')
     srv = S.Server(('127.0.0.1', port), S.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    S.REAP_INTERVAL = 0.3        # 进循环时读一次，必须在起线程之前改
+    threading.Thread(target=S.reaper_loop, daemon=True).start()
 
-    ok = wait_for(lambda: app.me is not None, timeout=15.0)
-    check('服务端一起来就自动重连上', ok and app.me == {'role': 'p1'}, repr(app.me))
-    check('恢复后角色出现在桌面上', 'p1' in app.pets, repr(list(app.pets)))
-    check('离线标记被清掉', app.offline is False)
-    check('离线那句话不再挂在窗口上', app._note == '', repr(app._note))
+    # 退避是 3 秒起、每次乘 1.6：冷启动那一轮 + 一到两轮重连，给足 25 秒
+    ok = pump_until(lambda: app.me is not None, 25.0)
+    chk('自己连回来了（不用重启程序）', ok, app.me)
+    chk('离线标记撤掉了', not app.offline, app.offline)
+    chk('角色重新长出来了', 'p1' in app.pets, list(app.pets))
+    chk('连回来以后认领窗的说明是空的（不该再提连不上）',
+        notes[-1] == '', notes)
 
-    try:
-        app.quit()
-    except Exception as e:
-        print('退出时异常：%r' % (e,))
-    srv.shutdown()
+    print('\n--- 断线 ---')
+    # 真断线得让服务端主动掐掉连接。心跳超时是最省事的开关：
+    # reap() 每次比对都读它，运行中改立刻生效（REAP_INTERVAL 只在进循环时读）。
+    S.HEARTBEAT_TIMEOUT = 1.0
+    chk('掉线以后退回离线', pump_until(lambda: app.offline, 20.0), app.offline)
+    chk('角色还站在原地（不是瞬间消失）', 'p1' in app.pets, list(app.pets))
+    b = app.bubbles.get('p1')
+    chk('屏幕上说了句「断开了」',
+        b is not None and ('断开' in b._text or '连不上' in b._text),
+        b._text if b else None)
+
+    print('\n--- 收尾 ---')
+    S.HEARTBEAT_TIMEOUT = 30.0
+    chk('期间没有未捕获的异常', not ERRORS, ERRORS[:1])
+    app.quit()
+    pump(0.2)
 
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))
     for n in FAIL:

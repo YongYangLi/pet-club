@@ -57,9 +57,12 @@ def test_no_override():
     for name in ('ENV_HOST', 'ENV_PORT', 'DEFAULT_HOST', 'DEFAULT_PORT'):
         check('%s 已经没有了' % name, not hasattr(C, name))
 
-    from petclub import ui
-    check('界面上没有服务器输入框', not hasattr(ui, 'ServerDialog'))
-    check('界面上没有「改地址」小窗', not hasattr(ui, 'ask_server'))
+    from petclub import claim, theme
+    for mod in (theme, claim):
+        check('%s 里没有服务器输入框' % mod.__name__.rsplit('.', 1)[-1],
+              not hasattr(mod, 'ServerDialog'))
+        check('%s 里没有「改地址」小窗' % mod.__name__.rsplit('.', 1)[-1],
+              not hasattr(mod, 'ask_server'))
 
 
 def test_app_uses_it():

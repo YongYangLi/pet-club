@@ -13,7 +13,7 @@
 - 桌面上除了角色本身**没有任何常驻控件**，不占地方也不碍眼
 - **托盘图标**是唯一的常驻入口：有未读时闪红点，左键直接落到那条消息，右键有图层、检查更新、退出
 - 一台电脑**只跑一个**：再点一次不会开第二个，第二个进程安静退出
-- 纯标准库 + Pillow，客户端不引入任何额外依赖
+- 界面用 Qt（PySide6）自己画，没有任何网页壳；图片处理只用 Pillow
 
 ## 目录
 
@@ -22,21 +22,21 @@ pet-club/
 ├─ server.py            服务端（纯标准库单文件，可本地跑也可部署到公网）
 ├─ run.py               客户端入口
 ├─ petclub/             客户端
-│   ├─ surface.py       逐像素透明的分层窗口渲染层
+│   ├─ win32.py         工作区 / 前台窗口 / z 序（Qt 没有等价物的那几件事）
+│   ├─ windows.py       角色窗口与气泡（逐像素透明 + 按 alpha 的点击穿透）
+│   ├─ theme.py         配色、全局样式表、卡片窗、按钮、圆头像
 │   ├─ net.py           网络层（子线程收发 + 队列投递给主线程）
 │   ├─ sprites.py       素材加载与循环帧对齐
 │   ├─ actors.py        桌面上的角色（天降出场 / 待机动作 / 抓起与掉落）
 │   ├─ actions.py       动作目录 + 三套台词（加玩法只改这里）
 │   ├─ cooldown.py      动作冷却（纯逻辑，时间由外部传入，好测）
 │   ├─ single.py        单实例锁（一台电脑只跑一个，第二个安静退出）
-│   ├─ menu.py          自己画的右键菜单（倒计时能自己刷新）
-│   ├─ chat.py          聊天面板（群聊 + 每人一个单聊，文字/图片/表情/文件）
-│   ├─ media.py         图片压缩编码、表情渲染（PIL → 位图）、文件与缩略图缓存、剪贴板
-│   ├─ tray.py          托盘图标（ctypes 直调 Shell_NotifyIcon）+ 左键小面板
+│   ├─ chat.py          聊天面板（群聊 + 每人一个单聊，文字/图片/表情/表情包/文件）
+│   ├─ claim.py         认领身份的五张卡片
+│   ├─ media.py         图片压缩编码、缩略图缓存、文件与表情包路径（纯 PIL，不碰 Qt）
+│   ├─ tray.py          托盘图标（QSystemTrayIcon）+ 菜单铺设
 │   ├─ update.py        自动更新（拉清单 → 下载校验 → 换 exe）
-│   ├─ petwin.py        宠物窗口与气泡窗口
-│   ├─ ui.py            启动界面与小对话框
-│   └─ app.py           主程序与 tick 循环
+│   └─ app.py           主程序：网络、动作、冷却、聊天记录、更新、窗口生命周期
 ├─ assets/roles/        五个角色的素材（p1~p5 × 11 个姿势）
 ├─ assets/stickers/     角色表情包（tools/make_stickers.py 生成）
 ├─ assets/app.ico       exe 图标（由 tools/make_icon.py 生成）
@@ -144,8 +144,8 @@ python run.py
 冷却只做在客户端，它是礼貌约束，不是安全边界。
 
 菜单里那个「（3 秒）」会**自己往下走**：菜单弹着、冷却一过，那一行当场从灰变黑、
-直接能点 —— 不用关掉再右键一次。原生 `tk.Menu` 做不到这件事（Windows 上它弹出
-期间占住事件循环），所以菜单是自己画的，见 `petclub/menu.py`。
+直接能点 —— 不用关掉再右键一次。做法是挂一个 200ms 的定时器改 `QAction.setText()`，
+弹出菜单照样重画（`app._refresh_menu`）。
 
 ## 托盘
 
@@ -196,9 +196,9 @@ python run.py
 同一趟巡检里还要把聊天面板的层级跟着前台走（`ChatWindow.follow`）——
 **人物一直置顶、聊天框会让人**，这是两件事。
 
-图标是 `ctypes` 直调 `Shell_NotifyIcon`，**没有引入 pystray 之类的依赖**：
-pystray 要多装一个包、多一条 PyInstaller 隐藏依赖，而它干的事就是三行调用。
-托盘只管收点击，开什么窗是 `app.py` 的事 —— 所以 `tray.py` 里一行 tkinter 都没有。
+托盘用 Qt 自己的 `QSystemTrayIcon`，**没有引入 pystray 之类的依赖**：
+它还要自己维护一个隐藏窗口收消息，而 Qt 这层已经给了。
+托盘只管收点击（`Trigger` = 左键、`Context` = 右键），开什么窗是 `app.py` 的事。
 
 > 托盘图标只在 Windows 上有意义。`PETCLUB_NO_TRAY=1` 可以让探针不挂它
 > （一次跑好几个 App，右下角会闪个不停）。
@@ -232,8 +232,8 @@ pystray 要多装一个包、多一条 PyInstaller 隐藏依赖，而它干的�
 ![表情包（角色卡片）](docs/preview/chat_cards.png)
 
 - **表情**用的是 Windows 自带的 emoji 字体（`seguiemj.ttf`），**一个字节的素材都不打包**。
-  发的时候只传那个字符，对面用自己机器上的字体渲同一张脸。
-  Tk 8.6 自己画不了这些字符（会变成豆腐块），所以走 PIL 渲染成位图再贴到画布上。
+  发的时候只传那个字符，对面用自己机器上的字体渲同一张脸 ——
+  Qt 在 Windows 上走 DirectWrite，彩色字形直接画得出来，不用我们再渲染位图。
 - **表情包**是五个角色各自的八张卡片（`tools/make_stickers.py` 用姿势图 + 一句话生成）。
   分三页放：`表情` 是通用反应，`我的` 是我自己那张脸，`他人` 是另外四个角色的 32 张
   —— 想替别人演一下、或者单纯觉得那张图好笑，都能直接发（发出去就是一张图片）。
@@ -314,17 +314,18 @@ pet-club 走的是**自定义协议 + 裸 TCP**，不是 HTTP，也不是 WebSoc
 python tools/test_config.py     # 固定地址 + 打包路径：没有任何可配后门（24 项）
 python tools/test_server.py     # 服务端逻辑（32 项：身份唯一性、并发抢占、断开释放、事件/附件转发…）
 python tools/test_actions.py    # 动作目录 / 台词 / 冷却（32 项，纯逻辑不开窗口）
-python tools/test_media.py      # 图片/文件/表情的编解码与缓存（31 项）
-python tools/test_tray.py       # 托盘图标与图层开关（18 项）
+python tools/test_media.py      # 图片/文件/表情包的编解码与缩略图缓存（31 项）
 python tools/test_update.py     # 自动更新：版本号、清单、下载校验、换文件脚本（67 项）
-python tools/probe_live.py      # 真 Tk + 真分层窗口的端到端探针（194 项：认领、天降、菜单倒计时与避让、聊天面板四会话、图片表情文件、Ctrl+V 粘贴、互动痕迹、拖动、冷却、边距、心跳与掉线提示、托盘左键开聊天与右键菜单、图层切换）
-python tools/probe_offline.py   # 连不上时的重试与恢复（15 项）
+python tools/probe_live.py      # 真 Qt 窗口 + 真服务器（本地）的端到端探针（108 项：
+                                #   认领与天降、别人加入/离开、互动与镜像、菜单与冷却倒计时、
+                                #   拖动、聊天面板五会话、未读与托盘闪烁、图片/表情/表情包/文件、搜索）
+python tools/probe_offline.py   # 连不上时的重试、点托盘看到的说明、掉线提示（18 项）
 python tools/probe_single.py    # 单实例锁：第二个进程拿不到、立刻退出（9 项）
-python tools/probe_exe.py       # 打好的 exe：能起来、托盘起得来、第二次双击无效（9 项）
+python tools/probe_exe.py       # 打好的 exe：能起来、Qt 运行时真的冻进去了、第二次双击无效（10 项）
 python tools/probe_update.py    # 换文件端到端：不弹黑窗、老进程在时不动手、退出后真的换掉（6 项）
 python tools/probe_relaunch.py  # 更新脚本拉起新版本：不被老进程的解包环境带沟里（7 项）
-python tools/probe_tray.py      # 未读：谁算未读、闪烁节拍、点开落在最新那条（26 项）
-python tools/probe_topmost.py   # 置顶巡检查 + 聊天面板让位：别人盖得住、点回来又置顶（17 项）
+python tools/probe_tray.py      # 托盘：图标、闪烁、左右键路由、菜单铺设（24 项）
+python tools/probe_topmost.py   # 置顶开关 + 巡检节流 + 遮挡判定（18 项；锁屏时自动跳过 3 项）
 
 python tools/shot_ui.py         # 生成界面预览图到 docs/preview/
 python tools/probe_protocol.py  # 证明走的是裸 TCP 而非 HTTP（解释为什么 https 隧道不能用）
@@ -335,7 +336,7 @@ python tools/probe_protocol.py  # 证明走的是裸 TCP 而非 HTTP（解释为
 ```bash
 python tools/make_icon.py       # 生成 assets/app.ico（角色立绘 → 多尺寸 ico）
 python tools/make_stickers.py   # 生成 assets/stickers/（4 角色 × 8 张表情包）
-python tools/build_exe.py       # → dist/pet-club.exe（单文件，约 23 MB）
+python tools/build_exe.py       # → dist/pet-club.exe（单文件，约 57 MB：Qt 自己就一百多兆，压完这些）
 python tools/probe_exe.py       # 验：起得来、开得出窗口、第二次双击无效
 
 # 发版（打包 + 写 latest.json + 打印上传命令）
@@ -413,15 +414,21 @@ systemd 配置、排错顺序）见 [docs/部署服务端.md](docs/部署服务�
 ## 依赖
 
 ```
+PySide6>=6.6
 Pillow>=9.1
 ```
 
-Python 3.10+，Windows（逐像素透明依赖 Win32 分层窗口）。
+装依赖：`pip install -r requirements.txt`；要打包再加 `pip install -r requirements-build.txt`。
+
+Python 3.9+，Windows（逐像素透明、置顶、点击穿透都靠 Win32 那几件事）。
 服务端只用标准库，Python 3.8+ 即可，Linux 也能跑。
 
 ## 与 desk-pet-lite 的关系
 
 pet-club 是**独立的新项目**，不是 desk-pet-lite 的改造分支。
-复用的只有两样：`surface.py` 那套分层窗口渲染（踩过坑的核心资产）
-和角色的美术素材。行为模型、UI、网络、状态机全部为新玩法重写 ——
+复用的只有角色的美术素材。行为模型、UI、网络、状态机全部为新玩法重写 ——
 单机的「三只自己玩」和「一台服务器上一起玩」是两套完全不同的逻辑。
+
+界面这一层先是 Tk 自绘（逐像素靠 `WS_EX_LAYERED` + `UpdateLayeredWindow`），
+后来整体换成了 Qt：透明、点击穿透、DPI 缩放都有现成的做法，
+省下来的代码都花在玩法上。**业务逻辑一行没改**，这也是当初把窗口和逻辑分开的回报。

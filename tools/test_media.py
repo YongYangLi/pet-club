@@ -7,10 +7,8 @@
 面板的行为在 probe_live.py 里，那边要开真窗口。
 """
 
-import io
 import os
 import sys
-import tkinter as tk
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -120,41 +118,26 @@ def main():
     except ValueError as e:
         check('超过 2MB 会被拒', True, str(e))
 
-    print('\n--- 表情（Windows 自带字体渲染）---')
-    im0 = media.emoji_image('😀', 44)
-    check('表情能渲成位图', im0 is not None, im0.size if im0 else None)
-    check('表情装得进方框', im0 is not None and max(im0.size) <= 44)
-    check('表情是彩色的（不止一种颜色）',
-          im0 is not None and len(set(im0.convert('RGB').getdata())) > 3,
-          len(set(im0.convert('RGB').getdata())) if im0 else 0)
-    ok_all = [ch for ch in media.EMOJI_CHARS if media.emoji_image(ch, 44)]
-    check('内置的每个表情都能渲出来', len(ok_all) == len(media.EMOJI_CHARS),
-          '%d/%d' % (len(ok_all), len(media.EMOJI_CHARS)))
+    print('\n--- 缩略图缓存 ---')
+    t1 = media.thumb(b64, limit=220)
+    check('能从 base64 出缩略图', t1 is not None, t1.size if t1 else None)
+    check('缩略图不超过 limit 宽', t1 is not None and t1.width <= 220, t1.width if t1 else 0)
+    t2 = media.thumb(b64, limit=220)
+    check('同一张图第二次直接命中缓存', t2 is t1)
+    t3 = media.thumb(b64, limit=120)
+    check('换了尺寸就是新的一份', t3 is not t1 and t3.width <= 120,
+          t3.width if t3 else 0)
+    t4 = media.thumb('', small, 220)
+    check('能从本地路径出缩略图', t4 is not None and t4.width == 120,
+          t4.size if t4 else None)
+    check('坏的 base64 返回 None', media.thumb('这不是base64', '', 220) is None)
+    check('路径不存在返回 None', media.thumb('', os.path.join(TMP, 'nope.png'), 220) is None)
+    check('两个都空返回 None', media.thumb('', '', 220) is None)
+
+    print('\n--- 表情字符表 ---')
     check('表情不少于 12 个（够用但不啰嗦）', len(media.EMOJI_CHARS) >= 12,
           len(media.EMOJI_CHARS))
-    check('不认识的字符不会崩',
-          media.emoji_image('\u0000', 44) is None
-          or isinstance(media.emoji_image('\u0000', 44), Image.Image))
-
-    print('\n--- 缓存 ---')
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        p1 = media.emoji_photo('😀', 44)
-        p2 = media.emoji_photo('😀', 44)
-        check('同一表情同一尺寸复用同一个对象', p1 is p2)
-        p3 = media.emoji_photo('😀', 22)
-        check('换尺寸是新对象', p3 is not None and p3 is not p1)
-        ph1 = media.photo(b64, 200)
-        ph2 = media.photo(b64, 200)
-        check('同一张图复用 PhotoImage', ph1 is ph2 and ph1 is not None)
-        check('缩略图读得出来',
-              media.thumb(media.sticker_paths(assets_dir(), 'p1')[0], 44)
-              is not None)
-        check('缩略图读不出来时返回 None',
-              media.thumb(os.path.join(TMP, 'not-image.txt'), 44) is None)
-    finally:
-        root.destroy()
+    check('表情没有重复', len(set(media.EMOJI_CHARS)) == len(media.EMOJI_CHARS))
 
     print('\n--- 角色表情包素材 ---')
     for role in ROLES:

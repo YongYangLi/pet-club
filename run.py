@@ -17,11 +17,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from petclub import single, update   # noqa: E402
-from petclub.app import App          # noqa: E402
 
 
 def main():
-    # 先抢锁再建窗口：第二个实例连 Tk 都不该碰，更不能短暂闪一下再消失
+    # 先抢锁再建窗口：第二个实例连 QApplication 都不该建，更不能闪一下再消失
     if not single.acquire():
         return
     # 上次下好的新版本：这一次启动就换掉它。放在建窗口之前 ——
@@ -29,7 +28,10 @@ def main():
     update.cleanup()
     if update.apply_pending():
         return
-    App().run()
+    from petclub.app import App
+
+    app = App()          # 必须留个引用：run() 返回后 App 被回收，
+    app.run()            # QApplication 跟着析构，解释器退出时会崩
 
 
 if __name__ == '__main__':

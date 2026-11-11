@@ -37,7 +37,7 @@ POLL_MS = 33               # 主循环节拍（约 30fps）
 # 发版时 tools/make_release.py 再把同一个号写进 COS 上的 latest.json。
 # 三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
-VERSION = '1.3.7'
+VERSION = '1.4.0'
 
 # latest.json 的公网地址。**留空 = 关掉自动更新**（源码模式、内网都是这个状态）。
 # 形状：https://<桶名>.cos.<地域>.myqcloud.com/<目录>/latest.json

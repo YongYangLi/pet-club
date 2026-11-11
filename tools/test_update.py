@@ -226,7 +226,6 @@ def main():
 
         # apply() 起脚本时也得带上干净环境 —— 脚本里那三句是兜底，
         # 这一步才是「默认就对」
-        import types
         captured = {}
 
         class FakePopen(object):

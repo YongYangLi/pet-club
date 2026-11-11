@@ -22,10 +22,10 @@ class Pet:
     GRAVITY = 2400.0        # 像素/秒²，从屏幕顶落到地面大约 1 秒，够快但不突兀
     HOLD_POSE = 'drag'      # 被抓着时用素材里的 drag.png（提溜着的样子）
 
-    def __init__(self, root, sp, x, ground_y, drop=True):
-        from .petwin import PetWindow
+    def __init__(self, sp, win, x, ground_y, drop=True):
+        # 窗口由调用方造好再传进来：角色只关心「怎么动」，不关心窗口是谁家的。
         self.sp = sp
-        self.win = PetWindow(root, sp)
+        self.win = win
         self.x = float(x)
         self.ground = float(ground_y)
         self.vy = 0.0

@@ -2,9 +2,12 @@
 """打包出来的 exe 的探针：能起来，且第二次双击不起作用。
 
 只验「在源码里测不到」的那部分：
-  · 单文件 exe 能不能自己解出 assets（起不来就说明 _MEIPASS 那条路断了）
-  · 真的开出了窗口（进程活着但没窗口 = 卡在启动里，同样不算成功）
+  · 单文件 exe 能不能自己解出 assets 和 Qt 插件（起不来就说明 _MEIPASS 那条路断了）
+  · Qt 的运行时真的被冻进去了（模块列表里有 Qt6Widgets / qwindows）
   · 再启一个 exe，第二个必须自己退出，第一个不受影响
+
+⚠️ 这里**不数窗口**：客户端连不上服务器时本来就没有窗口（不认领就没角色，
+认领窗要等服务端回话）。窗口该长什么样是 probe_live.py 的事。
 
 跑法：python tools/probe_exe.py
 """
@@ -20,6 +23,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 EXE = os.path.join(ROOT, 'dist', 'pet-club.exe')
 
+TH32CS_SNAPMODULE = 0x00000008
+TH32CS_SNAPMODULE32 = 0x00000010
+INVALID_HANDLE = ctypes.c_void_p(-1).value
+
 PASS = []
 FAIL = []
 
@@ -27,7 +34,8 @@ FAIL = []
 def check(name, ok, detail=''):
     (PASS if ok else FAIL).append(name)
     print('%s %s%s' % ('[ok]  ' if ok else '[FAIL]', name,
-                       ('  ← ' + detail) if (detail and not ok) else ''), flush=True)
+                       ('  ← ' + detail) if (detail and not ok) else ''),
+          flush=True)
 
 
 def pids_of(name):
@@ -52,54 +60,43 @@ def pids_of(name):
     return pids
 
 
-def window_count(pids):
-    """属于这些 PID 的可见顶层窗口数。"""
-    user32 = ctypes.WinDLL('user32', use_last_error=True)
-    found = []
-
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def cb(hwnd, _l):
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        if pid.value in pids and user32.IsWindowVisible(hwnd):
-            found.append(hwnd)
-        return True
-
-    user32.EnumWindows(cb, 0)
-    return len(found)
+class MODULEENTRY32(ctypes.Structure):
+    _fields_ = [('dwSize', wintypes.DWORD),
+                ('th32ModuleID', wintypes.DWORD),
+                ('th32ProcessID', wintypes.DWORD),
+                ('GlblcntUsage', wintypes.DWORD),
+                ('ProccntUsage', wintypes.DWORD),
+                ('modBaseAddr', ctypes.c_void_p),
+                ('modBaseSize', wintypes.DWORD),
+                ('hModule', wintypes.HMODULE),
+                ('szModule', ctypes.c_char * 256),
+                ('szExePath', ctypes.c_char * 260)]
 
 
-def tray_window(pids):
-    """托盘那个隐藏窗口在不在。
-
-    打包后是 --windowed，没有控制台 —— 托盘起不来只会静默失败（图标不出现，
-    没有任何提示）。所以直接去找那个 HWND_MESSAGE 窗口：
-    类名是 pet-club-tray-<pid>，用 FindWindowEx 在消息窗口下面翻。
-    """
-    user32 = ctypes.WinDLL('user32', use_last_error=True)
-    user32.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND,
-                                     wintypes.LPCWSTR, wintypes.LPCWSTR]
-    user32.FindWindowExW.restype = wintypes.HWND
-    for pid in pids:
-        hwnd = user32.FindWindowExW(wintypes.HWND(-3), None,
-                                    'pet-club-tray-%d' % pid, None)
-        if hwnd:
-            return hwnd
-    return None
+def modules(pid):
+    """这个进程加载了哪些 DLL（要管理员权限才能看别的位数/别的用户的进程）。"""
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    snap = k32.CreateToolhelp32Snapshot(
+        TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
+    if not snap or snap == INVALID_HANDLE:
+        return []
+    out = []
+    try:
+        me = MODULEENTRY32()
+        me.dwSize = ctypes.sizeof(MODULEENTRY32)
+        if k32.Module32First(snap, ctypes.byref(me)):
+            while True:
+                out.append(me.szModule.decode('mbcs', 'replace'))
+                if not k32.Module32Next(snap, ctypes.byref(me)):
+                    break
+    finally:
+        k32.CloseHandle(snap)
+    return out
 
 
 def kill_tree(pid):
     subprocess.call(['taskkill', '/F', '/T', '/PID', str(pid)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def wait_gone(pids, timeout=15.0):
-    end = time.time() + timeout
-    while time.time() < end:
-        if not [p for p in pids if p in pids_of('pet-club.exe')]:
-            return True
-        time.sleep(0.2)
-    return False
 
 
 def main():
@@ -108,25 +105,44 @@ def main():
         return 1
     print('目标 %s（%.1f MB）' % (EXE, os.path.getsize(EXE) / 1048576.0))
 
+    first = None
     try:
         first = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
-        # 单文件 exe 要先把自己解到临时目录，冷启动一两秒是正常的
-        time.sleep(6)
-        check('exe 起来了（没在加载素材时崩掉）', first.poll() is None,
+        # 单文件 exe 要先把自己解开（这次带上了 Qt，一百多兆），冷启动几秒很正常
+        end = time.time() + 30
+        pids = []
+        while time.time() < end:
+            time.sleep(0.5)
+            pids = pids_of('pet-club.exe')
+            if pids:
+                time.sleep(5)          # 再给一会儿，让它能崩的话崩掉
+                break
+        check('exe 起来了（没在加载素材/Qt 时崩掉）', first.poll() is None,
               '退出码 %r' % (first.poll(),))
-
         pids = pids_of('pet-club.exe')
         check('进程在跑', bool(pids), repr(pids))
-        wins = window_count(pids)
-        check('真的开出了窗口（不是卡在启动里）', wins > 0, '窗口数 %d' % wins)
-        # 托盘是关掉所有窗口以后唯一入口，打包后它必须也在
-        check('托盘图标也挂上了（隐藏窗口建出来了）',
-              bool(tray_window(pids)), '找不到 pet-club-tray-* 窗口')
+
+        mods = []
+        for pid in pids:
+            mods += modules(pid)
+        low = [m.lower() for m in mods]
+        check('Qt 的运行时被冻进去了（Qt6Core/Qt6Widgets）',
+              any('qt6core' in m for m in low) and any('qt6widgets' in m
+                                                       for m in low),
+              mods[:8])
+        check('Qt 的平台插件也加载了（qwindows.dll）',
+              any(m.startswith('qwindows') for m in low),
+              [m for m in mods if 'q' in m.lower()][:8])
+        check('Python 运行时是打包进去的（不是靠机器上装的）',
+              any(m.startswith('python3') for m in low),
+              [m for m in mods if m.startswith('python')])
+        check('没有拖进来 tkinter', not any('tk8' in m or 'tcl' in m
+                                       for m in low), mods[:8])
 
         # 第二次双击：必须自己安静退出，第一个不受影响
         second = subprocess.Popen([EXE], cwd=os.path.dirname(EXE))
         try:
-            rc = second.wait(timeout=20)
+            rc = second.wait(timeout=40)
             gone = True
         except subprocess.TimeoutExpired:
             rc, gone = None, False
@@ -138,18 +154,12 @@ def main():
         alive = pids_of('pet-club.exe')
         check('第一个实例没被第二个顶掉', first.poll() is None and bool(alive),
               repr(alive))
-        # 窗口数只做「没有成倍长」的判断：这台机器连着公网服务器，
-        # 别人认领/离开时会有角色和自己的气泡冒出来又消失，数字本来就会动。
-        # 第二个实例要是真的开了窗口，至少会多一整只角色 + 认领窗，不止 +1。
-        later = window_count(alive)
-        check('桌面上没有第二个实例的窗口', later <= wins + 1,
-              '%d → %d' % (wins, later))
     finally:
-        if first.poll() is None:
+        if first is not None and first.poll() is None:
             kill_tree(first.pid)
-            wait_gone([first.pid])
         for pid in pids_of('pet-club.exe'):
             kill_tree(pid)
+        time.sleep(1)
 
     leftover = pids_of('pet-club.exe')
     check('探针结束时没留下进程', not leftover, repr(leftover))

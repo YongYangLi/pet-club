@@ -1,265 +1,205 @@
 # -*- coding: utf-8 -*-
-"""探针：置顶巡检、聊天面板的层级、群聊在线人数。
+"""置顶与遮挡判定：桌宠必须压在所有普通窗口上方，且不能被自己的面板挡住。
 
-这几个都不是「看一眼代码就知道对不对」的东西 ——
-置顶要靠真实的 z 序去验（还得有一个**别的进程**来压它），
-聊天面板要让位也得有别人来压，在线人数要靠真实的 ChatWindow 去验。
-所以单独做个能跑一遍的探针：
+这里验的是「z 序上到底谁在上面」，全靠真窗口 + 真 Win32 查询，
+不看代码里的意图。需要一块真桌面。
 
-    py -3 tools/probe_topmost.py
-
-会临时起一个独立的 Python 进程，开一个置顶窗口压住宠物，检查
-App._keep_top 有没有把它重新插回最前面；再用一个别的进程的普通窗口验
-「点微信时聊天面板会不会让位、点回来会不会重新置顶」；
-最后开一个聊天窗，检查「n/m 在线」是不是把自己算进去了。
+跑法：py tools/probe_topmost.py
 """
+
 import ctypes
-import subprocess
+import os
 import sys
 import time
-import tkinter as tk
 
-sys.path.insert(0, '.')
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
+sys.path.insert(0, ROOT)
 
-from petclub import chat as chatmod                  # noqa: E402
-from petclub import config, media, petwin, surface   # noqa: E402
-from petclub.app import App                          # noqa: E402
-from petclub.chat import ChatWindow                  # noqa: E402
-from petclub.sprites import load_all                 # noqa: E402
+from ctypes import wintypes                                    # noqa: E402
 
-FAILED = []
+from PySide6.QtCore import Qt                                 # noqa: E402
+from PySide6.QtWidgets import QApplication, QWidget            # noqa: E402
+
+import petclub.app as APP                                      # noqa: E402
+from petclub import win32                                      # noqa: E402
+from petclub.config import ROLES                                # noqa: E402
+
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
+
+PASS = []
+FAIL = []
+SKIP = []
 
 
-def reset_image_caches():
-    """一个进程里连着开好几个 Tk 根时，必须清一次图片缓存。
+def chk(name, ok, detail=''):
+    (PASS if ok else FAIL).append(name)
+    if detail and not isinstance(detail, str):
+        detail = repr(detail)
+    print('%s %s%s' % ('[ok]  ' if ok else '[FAIL]', name,
+                       ('  ← ' + detail) if (detail and not ok) else ''),
+          flush=True)
 
-    上一个根销毁会把它的 PhotoImage 一起带走，而 media / chat 的头像缓存是
-    全局的 —— 不清就会拿到「image pyimage1 does not exist」。这是探针自己的
-    毛病（真实程序只有一个根），但不清就没法连着跑几个场景。
+
+def skip(name, why=''):
+    SKIP.append(name)
+    print('[skip] %s%s' % (name, ('  ← ' + why) if why else ''), flush=True)
+
+
+def desktop_usable(qapp):
+    """桌面上到底看不看得到我们自己的窗口？
+
+    锁屏（或断开的远程桌面）时会铺一层全屏的 LockScreenBackstopFrame，
+    WindowFromPoint 永远返回它 —— 「这一点上压着谁的窗口」这类断言全都没意义。
+    所以先摆一个普通窗口在左上角，看系统还认不认得它；不认得就跳过，别拿
+    假的 other 判失败。
     """
-    media.clear_cache()
-    chatmod._PHOTO_CACHE.clear()
+    probe = QWidget(None, Qt.FramelessWindowHint | Qt.Tool)
+    probe.setStyleSheet('background: #ff00ff;')
+    probe.setGeometry(120, 120, 80, 80)
+    probe.show()
+    probe.raise_()
+    qapp.processEvents()
+    mine = int(probe.winId())
+    ok = win32.owner_at(160, 160, mine) == 'me'
+    probe.hide()
+    probe.deleteLater()
+    qapp.processEvents()
+    return ok
 
 
-def wait_until(cond, timeout=2.0, step=0.05):
-    """反复问一个条件，成立就返回 True。z 序变化是异步的，只能这么等。"""
-    end = time.time() + timeout
-    while time.time() < end:
-        if cond():
-            return True
-        time.sleep(step)
-    return bool(cond())
+def is_topmost(win):
+    """窗口当前是不是 WS_EX_TOPMOST —— 直接问系统，不看我们设了什么。"""
+    u = ctypes.WinDLL('user32', use_last_error=True)
+    u.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    u.GetWindowLongW.restype = ctypes.c_long
+    ex = u.GetWindowLongW(wintypes.HWND(int(win.winId())), GWL_EXSTYLE)
+    return bool(ex & WS_EX_TOPMOST)
 
 
-def check(name, ok, detail=''):
-    print('%s %s' % ('[ok  ]' if ok else '[FAIL]', name)
-          + ('  %s' % (detail,) if detail else ''))
-    if not ok:
-        FAILED.append(name)
+def main():
+    QApplication.instance() or QApplication([])   # App 里要用
 
+    print('--- 工作区 ---')
+    left, top, right, bottom = win32.work_area()
+    chk('工作区是个正经矩形', left < right and top < bottom,
+        (left, top, right, bottom))
+    # work_area() 给的是**物理像素**，screen.geometry() 是逻辑像素：
+    # 150% 缩放下直接比会把「工作区」判成比屏幕还大。
+    dpr = float(QApplication.primaryScreen().devicePixelRatio())
+    screen = QApplication.primaryScreen().geometry()
+    chk('工作区不比屏幕大', right - left <= int(screen.width() * dpr) + 1,
+        (right - left, int(screen.width() * dpr)))
 
-class FakePet:
-    """只带巡检需要的那个成员：win.hit_point / win.reassert_top。"""
+    # 不连服务器：这里只关心窗口，网络关掉更干净。
+    app = APP.App('127.0.0.1', 1)
+    app.players = {ROLES[0]: {'role': ROLES[0]}, ROLES[1]: {'role': ROLES[1]}}
+    app.me = {'role': ROLES[0]}
+    app.sync_pets()
+    # 位置是 tick 里由 Pet.update 写进窗口的，而角色是「从天而降」出场的：
+    # 不等它落地，命中点会落在屏幕上方 —— 那儿什么都没有。
+    end = time.time() + 5.0
+    while time.time() < end and any(p.phase != 'idle' for p in app.pets.values()):
+        app.tick()
+        app.qapp.processEvents()
+        time.sleep(0.01)
+    chk('角色都落地了', all(p.phase == 'idle' for p in app.pets.values()),
+        [p.phase for p in app.pets.values()])
+    pet = app.pets[ROLES[0]]
+    other = app.pets[ROLES[1]]
+    chk('两只角色都建出来了', len(app.pets) == 2, list(app.pets))
 
-    def __init__(self, win):
-        self.win = win
-        self.calls = 0
+    print('\n--- 默认置顶 ---')
+    chk('角色窗口默认是置顶的', is_topmost(pet.win))
+    chk('另一只也是', is_topmost(other.win))
 
+    print('\n--- 关掉置顶 ---')
+    app._top_on = False
+    pet.win.apply_top(False)
+    app.qapp.processEvents()
+    chk('关掉以后不是置顶窗口了', not is_topmost(pet.win))
 
-class CountingWin:
+    usable = desktop_usable(app.qapp)
+    hit = pet.win.hit_point()
 
-    def __init__(self, win):
-        self._win = win
-        self.calls = 0
+    print('\n--- 遮挡判定 ---')
+    chk('角色身上有一个可用的命中点', hit is not None, hit)
+    if not usable:
+        skip('被自己的面板盖住 → 判成 own',
+             '桌面上看不到自己的窗口（锁屏 / 远程桌面断开）')
+    else:
+        cover = QWidget(None, Qt.FramelessWindowHint | Qt.Tool)
+        cover.setStyleSheet('background: #ffffff;')
+        d = pet.win.dpr
+        cover.setGeometry(int(hit[0] / d), int(hit[1] / d), 40, 40)
+        cover.show()
+        cover.raise_()
+        app.qapp.processEvents()
+        who = win32.owner_at(hit[0], hit[1], int(pet.win.winId()))
+        chk('被自己的面板盖住 → 判成 own（不该抢置顶）', who == 'own', who)
+        cover.hide()
+        cover.deleteLater()
+        app.qapp.processEvents()
 
-    def hit_point(self):
-        return self._win.hit_point()
+    print('\n--- 开关置顶 ---')
+    pet.win.apply_top(True)
+    app.qapp.processEvents()
+    chk('再打开又变回置顶窗口', is_topmost(pet.win))
+    if not usable:
+        skip('命中点上压着的就是它自己', '桌面上看不到自己的窗口')
+        skip('命中点落在不透明像素上', '桌面上看不到自己的窗口')
+    else:
+        who = win32.owner_at(hit[0], hit[1], int(pet.win.winId()))
+        chk('命中点上压着的就是它自己', who == 'me', who)
+        chk('命中点落在不透明像素上（不会穿透到桌面）', who != 'other', who)
 
-    @property
-    def surface(self):
-        return self._win.surface
-
-    def reassert_top(self):
-        self.calls += 1
-        return self._win.reassert_top()
-
-
-def keeper(app, pet):
-    app.pets = {'p1': pet}
-    app._last_fg = None                     # 强制当成「刚切过前台」
-    app._top_checked = 0.0
-    App._keep_top(app, time.monotonic())
-
-
-def probe_top():
-    root = tk.Tk()
-    root.withdraw()
-    sp = load_all(config.assets_dir(), ['p1'])['p1']
-    win = petwin.PetWindow(root, sp)
-    win.show('idle', 520, 760)
-    root.update()
-    time.sleep(0.3)
-    root.update()
-
-    pt = win.hit_point()
-    hwnd = win.surface.hwnd
-    check('角色身上那个巡检点确实落在自己身上',
-          surface.owner_at(pt[0], pt[1], hwnd) == 'me', str(pt))
-
-    # 起一个别的进程的置顶窗口，正好盖住角色
-    code = (
-        "import tkinter as tk\n"
-        "r = tk.Tk()\n"
-        "r.overrideredirect(True)\n"
-        "r.geometry('420x420+%d+%d')\n"
-        "r.attributes('-topmost', True)\n"
-        "r.configure(bg='#333333')\n"
-        "r.mainloop()\n" % (pt[0] - 210, pt[1] - 210)
-    )
-    other = subprocess.Popen([sys.executable, '-c', code])
+    print('\n--- 巡检：被别人盖住时插回去 ---')
+    # 真开一个别的进程太贵，这里只验规则本身：把「被谁压着」的判定换成
+    # other，看巡检会不会去插队、会不会被节流。
+    app._top_on = True
+    real_owner = APP.owner_at
+    calls = []
+    real_top = pet.win.reassert_top
+    APP.owner_at = lambda x, y, me: 'other'
+    pet.win.reassert_top = lambda: calls.append(1)
     try:
-        time.sleep(2.0)
-        root.update()
-        check('别的进程压上来之后，命中测试认得出来',
-              surface.owner_at(pt[0], pt[1], hwnd) == 'other')
-
-        app = App.__new__(App)
-        win_counter = CountingWin(win)
-        pet = FakePet(win)
-        pet.win = win_counter
-
-        petwin.TOP_ON['on'] = True
-        keeper(app, pet)
-        time.sleep(0.8)
-        root.update()
-        check('巡检会把角色重新插回最前面', pet.win.calls == 1,
-              '调用 %d 次' % pet.win.calls)
-        check('插队之后命中测试又回到自己身上',
-              surface.owner_at(pt[0], pt[1], hwnd) == 'me')
-
-        # 关掉「始终置顶」时一次都不许抢
-        petwin.TOP_ON['on'] = False
-        pet.win.calls = 0
-        keeper(app, pet)
-        check('关掉置顶后巡检不动手', pet.win.calls == 0,
-              '调用 %d 次' % pet.win.calls)
+        app._top_checked = 0.0
+        app.tick()
+        chk('被别人的窗口盖住 → 重新插到最前面', len(calls) == 1, calls)
+        app.tick()
+        chk('3 秒内不重复插队（不然每秒抢两次焦点）', len(calls) == 1, calls)
+        app._top_checked = 0.0
+        app._top_on = False
+        app.tick()
+        chk('关掉「始终置顶」以后巡检什么都不做', len(calls) == 1, calls)
     finally:
-        petwin.TOP_ON['on'] = True
-        other.terminate()
-        win.destroy()
-        root.destroy()
+        APP.owner_at = real_owner
+        pet.win.reassert_top = real_top
 
+    print('\n--- 图层开关 ---')
+    app._top_on = True
+    chk('菜单文案说「已勾选」', app.layer_label().startswith('✓'),
+        app.layer_label())
+    on = app.layer_toggle()
+    chk('切一次变成不置顶', on is False, on)
+    chk('两只角色都不再置顶', not is_topmost(pet.win) and not is_topmost(other.win),
+        (is_topmost(pet.win), is_topmost(other.win)))
+    chk('提示文案说明了现在的状态', '挡住' in app.layer_hint(), app.layer_hint())
+    app.layer_toggle()
+    chk('再切回来又是置顶', is_topmost(pet.win) and is_topmost(other.win))
 
-def _foreign_window(x, y, w, h):
-    """在**另一个进程**里开一个普通窗口，摆在 (x, y)。返回 (进程, 顶层句柄)。
+    print('\n--- 收尾 ---')
+    app.quit()
+    chk('退出后窗口都不见了', not pet.win.isVisible() and not other.win.isVisible())
 
-    为什么非要另一个进程：同一个进程的窗口在 z 序上是一伙的，用一个进程里的
-    两个窗口验「谁盖住谁」验不出东西来。
-    """
-    code = (
-        "import tkinter as tk\n"
-        "r = tk.Tk()\n"
-        "r.overrideredirect(True)\n"
-        "r.geometry('%dx%d+%d+%d')\n"
-        "r.configure(bg='#3a3a3a')\n"
-        "r.update()\n"
-        "print(r.winfo_id(), flush=True)\n"
-        "r.mainloop()\n" % (w, h, x, y))
-    proc = subprocess.Popen([sys.executable, '-c', code],
-                            stdout=subprocess.PIPE, text=True)
-    line = (proc.stdout.readline() or '').strip()
-    hwnd = surface.root_of(int(line)) if line.isdigit() else 0
-    return proc, hwnd
-
-
-def _raise_window(hwnd):
-    """把别人那个窗口顶到普通层最前面（不抢焦点、不挪位置）。"""
-    u = ctypes.WinDLL('user32')
-    u.SetWindowPos(ctypes.c_void_p(hwnd), ctypes.c_void_p(0), 0, 0, 0, 0,
-                   0x0001 | 0x0002 | 0x0010)
-
-
-def probe_chat_top():
-    """聊天面板不许「永远置顶」：用户切到微信，它必须让位。
-
-    以前 CardWindow 一上来就 `-topmost True`，结果面板压在所有程序上面，
-    点微信也翻不上来（用户实测反馈）。现在的规矩是「只有自己在前台才置顶」，
-    这里用真窗口验三件事：认得出前台不是自己、让位之后真的被盖住、
-    点回面板又回到最前面。
-    """
-    root = tk.Tk()
-    root.withdraw()
-    # 一个进程里连着开好几个 Tk 根，上一个根销毁时会把它的 PhotoImage 一起带走，
-    # 而 media 的缓存是全局的 —— 不清就会拿到「image pyimage1 does not exist」。
-    # 这是探针自己的毛病（真实程序只有一个根），但不清就没法连着跑。
-    reset_image_caches()
-    w = ChatWindow(root, on_send=lambda *a: '', me='p1',
-                   is_online=lambda r: True)
-    w.show()
-    root.update()
-    time.sleep(0.3)
-    root.update()
-    check('面板起来时是置顶的', int(w.top.attributes('-topmost')) == 1,
-          str(w.top.attributes('-topmost')))
-
-    cx = w.top.winfo_rootx() + w.top.winfo_width() // 2
-    cy = w.top.winfo_rooty() + 140
-    other, ohwnd = _foreign_window(cx - 160, cy - 110, 320, 220)
-    try:
-        time.sleep(1.5)
-        root.update()
-        check('面板认得出「前台是我自己」', w.owns(w.hwnd()), hex(w.hwnd()))
-        check('面板认得出「前台是别的程序」',
-              ohwnd != 0 and not w.owns(ohwnd), hex(ohwnd))
-
-        # 模拟用户点微信：前台换成别人 → 让位；再把对方顶到最前，它就盖住面板了
-        w._pop = tk.Toplevel(w.top)          # 假装表情浮层还开着
-        pop = w._pop
-        check('切走之后面板让位（退回普通层）', w.follow(ohwnd) is False)
-        check('-topmost 真的被摘掉了', int(w.top.attributes('-topmost')) == 0,
-              str(w.top.attributes('-topmost')))
-        check('表情浮层跟着一起收', w._pop is None and not pop.winfo_exists())
-        _raise_window(ohwnd)
-        # z 序变化是异步的（窗口管理器那边走消息），给一段时间反复问，
-        # 别用「睡 0.4 秒问一次」—— 那玩意儿在慢机器上会偶发红。
-        covered = wait_until(lambda: surface.owner_at(cx, cy, w.hwnd()) == 'other')
-        check('别的程序确实压在面板上面', covered)
-
-        # 点回面板：必须立刻插回置顶带，不然会被一直置顶的桌宠盖住
-        check('点回面板又置顶了', w.follow(w.hwnd()) is True)
-        check('-topmost 又设回来了', int(w.top.attributes('-topmost')) == 1)
-        back = wait_until(lambda: surface.owner_at(cx, cy, w.hwnd()) == 'me')
-        check('面板重新压过那个窗口', back)
-    finally:
-        other.terminate()
-        w.top.destroy()
-        root.destroy()
-
-
-def probe_online():
-    root = tk.Tk()
-    root.withdraw()
-    reset_image_caches()         # 理由同 probe_chat_top
-    players = {'p1': True, 'p2': True}
-    w = ChatWindow(root, on_send=lambda *a: '', me='p1',
-                   is_online=lambda r: bool(players.get(r)))
-    check('两人在线时显示 2/5（自己算一个）',
-          w.state_lb.cget('text').startswith('2/5'), w.state_lb.cget('text'))
-
-    players['p3'] = True
-    w.refresh_state()
-    check('有人进来后当场变成 3/5',
-          w.state_lb.cget('text').startswith('3/5'), w.state_lb.cget('text'))
-    w.top.destroy()
-    root.destroy()
+    print('\n通过 %d 项，失败 %d 项%s'
+          % (len(PASS), len(FAIL),
+             ('，跳过 %d 项' % len(SKIP)) if SKIP else ''))
+    for n in FAIL:
+        print('  - %s' % n)
+    return 1 if FAIL else 0
 
 
 if __name__ == '__main__':
-    probe_top()
-    probe_chat_top()
-    probe_online()
-    print()
-    if FAILED:
-        print('失败 %d 项：%s' % (len(FAILED), '、'.join(FAILED)))
-        sys.exit(1)
-    print('全部通过')
+    sys.exit(main())

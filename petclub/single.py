@@ -12,7 +12,6 @@ Windows 用命名互斥体（CreateMutexW）：进程活着内核对象就在，
 """
 
 import os
-import sys
 
 NAME = 'pet-club-single-instance'
 
