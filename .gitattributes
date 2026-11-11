@@ -1,0 +1,14 @@
+# 让 git 自己判断哪些是文本、哪些是二进制。
+# 图片和 exe 必须显式声明：否则 diff / merge 会试着按行合并它们，轻则报错，
+# 重则产出一个「能 add 但打不开」的文件。
+* text=auto
+
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.exe binary
+*.dll binary
+*.pyd binary
