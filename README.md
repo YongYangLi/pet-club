@@ -314,12 +314,13 @@ pet-club 走的是**自定义协议 + 裸 TCP**，不是 HTTP，也不是 WebSoc
 ## 自测
 
 ```bash
-python tools/test_config.py     # 固定地址 + 打包路径：没有任何可配后门（24 项）
+python tools/test_config.py     # 固定地址 + 打包路径：没有任何可配后门（26 项）
 python tools/test_server.py     # 服务端逻辑（32 项：身份唯一性、并发抢占、断开释放、事件/附件转发…）
 python tools/test_actions.py    # 动作目录 / 台词 / 冷却（32 项，纯逻辑不开窗口）
 python tools/test_media.py      # 图片/文件/表情包的编解码与缩略图缓存（31 项）
 python tools/test_update.py     # 自动更新：版本号、清单、下载校验、换文件脚本（67 项）
 python tools/test_host.py       # 平台分派与退化：字体、图标、数据目录、没有 PyObjC 也不崩（27 项）
+python tools/test_lifetime.py   # Qt 对象生命周期：菜单关了引用还在、不 deleteLater、认领窗能退出（24 项）
 python tools/probe_live.py      # 真 Qt 窗口 + 真服务器（本地）的端到端探针（108 项：
                                 #   认领与天降、别人加入/离开、互动与镜像、菜单与冷却倒计时、
                                 #   拖动、聊天面板五会话、未读与托盘闪烁、图片/表情/表情包/文件、搜索）
@@ -329,7 +330,7 @@ python tools/probe_exe.py       # 打好的 exe：能起来、Qt 运行时真的
 python tools/probe_update.py    # 换文件端到端：不弹黑窗、老进程在时不动手、退出后真的换掉（6 项）
 python tools/probe_relaunch.py  # 更新脚本拉起新版本：不被老进程的解包环境带沟里（7 项）
 python tools/probe_tray.py      # 托盘：图标、闪烁、左右键路由、菜单铺设（24 项）
-python tools/probe_topmost.py   # 置顶开关 + 巡检节流 + 遮挡判定（18 项；锁屏时自动跳过 3 项）
+python tools/probe_topmost.py   # 置顶开关 + 巡检节流 + 遮挡判定（19 项；桌面被系统窗口盖住时跳过命中测试）
 
 python tools/shot_ui.py         # 生成界面预览图到 docs/preview/
 python tools/probe_protocol.py  # 证明走的是裸 TCP 而非 HTTP（解释为什么 https 隧道不能用）

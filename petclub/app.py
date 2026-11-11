@@ -96,8 +96,16 @@ class App:
         self._drag = None
         self.offline = False
 
+        # Qt 对象的所有权只能有一套：这里全部交给 Python 引用计数。
+        # 千万不要 deleteLater() 之后又把引用丢掉 —— shiboken 会立刻 delete
+        # 掉 C++ 对象，Qt 排队中的 DeferredDelete 再删一次，就是 double free
+        # （WER 里的 0xc0000374 堆损坏）。信号派发栈上更不能丢引用。
         self._menu = None
+        self._menu_prev = None      # 上一个菜单，多留一拍再让 GC 回收
+        self._menu_open = False
         self._menu_probes = []
+        self._claim_prev = None     # 刚 exec() 完的认领窗，同理
+        self._win_trash = []        # 退出前收留所有窗口，留到进程结束
         self.chat = None
         self._chat_trash = []       # 已关闭但还不能回收的面板（见 _chat_closed）
         self.chat_log = {}
@@ -349,7 +357,9 @@ class App:
         finally:
             self._claim_dlg = None
             self._claim_open = False
-            dlg.deleteLater()
+            # exec() 刚返回时 Qt 还在这个对话框的调用栈上，别在这儿析构它。
+            # 留到下一次认领覆盖，进程结束前不再碰。
+            self._claim_prev = dlg
         if not role:
             return self.quit()
         self._pending_role = role
@@ -479,24 +489,31 @@ class App:
 
     def _popup(self, menu, pos):
         self._close_menu()
-        self._menu = menu
+        # 旧菜单多留一拍：覆盖 self._menu 本身就可能发生在上一次点击的
+        # 派发栈里，直接丢引用会让 Qt 用着已经被 shiboken 删掉的对象。
+        self._menu_prev, self._menu = self._menu, menu
         self._menu_probes = getattr(menu, '_probes', [])
         menu.aboutToHide.connect(self._menu_closed)
         menu.popup(pos if isinstance(pos, QPoint) else QPoint(*pos))
+        self._menu_open = True
 
     def _close_menu(self):
-        if self._menu is not None:
-            m, self._menu = self._menu, None
-            m.close()
-            m.deleteLater()
-            self._menu_probes = []
+        m = self._menu
+        if m is not None and self._menu_open:
+            m.close()               # 触发 aboutToHide → _menu_closed
+        self._menu_open = False
+        self._menu_probes = []
+        # 不清 self._menu、也不 deleteLater：菜单可能正在派发 triggered。
 
     def _menu_closed(self):
-        self._menu = None
+        # 点菜单项时 Qt 先发 aboutToHide 再发 triggered。这里一旦把
+        # self._menu 清成 None，QMenu 的 Python 引用就归零，C++ 对象会在
+        # Qt 自己的点击栈中间被删掉 → 堆损坏。只记「关了」，不清对象。
+        self._menu_open = False
         self._menu_probes = []
 
     def _swallow_menu_click(self):
-        if self._menu is None:
+        if not self._menu_open or self._menu is None:
             return False
         self._close_menu()
         return True
@@ -1096,13 +1113,10 @@ class App:
         self._closing = True
         self._close_menu()
         if self.tray is not None:
-            self.tray.close()
-            self.tray = None
+            self.tray.close()       # 只 hide：托盘对象留到进程结束再析构
         if self.chat is not None:
-            # 只藏。close() 会触发 on_close 把引用清空，ChatWindow 立刻被
-            # Python 回收，而它的子控件还在 Qt 的对象树上 —— 解释器退出时崩。
             self.chat.hide()
-            self.chat = None
+            self._chat_trash.append(self.chat)
         self._timer.stop()
         self._menu_timer.stop()
         try:
@@ -1110,14 +1124,13 @@ class App:
         except Exception:
             pass
         self.net.stop()
-        # 退出时只藏不删：deleteLater 之后 C++ 对象已经没了，而 Python 那边
-        # 还攥着 wrapper —— 解释器退出、GC 走一遍就是段错误。
-        # 进程马上结束，窗口由系统回收。
+        # 退出时只 hide，不 deleteLater、也不丢引用：deleteLater 之后引用一断，
+        # shiboken 和 Qt 会各删一次同一个 C++ 对象。进程马上结束，
+        # 这些窗口由系统连同进程一起回收。
+        self._win_trash.extend(p.win for p in self.pets.values())
         for p in self.pets.values():
             p.win.hide()
-        self.pets.clear()
+        self._win_trash.extend(self.bubbles.values())
         for b in self.bubbles.values():
             b.hide()
-        self.bubbles.clear()
-        self._bubble_until.clear()
         self.qapp.quit()

@@ -151,6 +151,10 @@ class ClaimDialog(QDialog):
 
         foot = QHBoxLayout()
         foot.addStretch(1)
+        # 没有这个按钮，没认领的人就只能靠托盘菜单退出（窗口是 frameless，
+        # 连关闭叉都没有）。reject 会让 exec() 返回 0，App 据此退出进程。
+        foot.addWidget(RoundButton('退出', lambda: self.reject(),
+                                   primary=False, width=76))
         self.ok_btn = RoundButton('进入', self._ok, primary=True, width=104)
         self.ok_btn.set_enabled(False)
         foot.addWidget(self.ok_btn)

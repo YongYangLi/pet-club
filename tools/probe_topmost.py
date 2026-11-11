@@ -47,22 +47,23 @@ def skip(name, why=''):
     print('[skip] %s%s' % (name, ('  ← ' + why) if why else ''), flush=True)
 
 
-def desktop_usable(qapp):
-    """桌面上到底看不看得到我们自己的窗口？
+def desktop_usable(qapp, x=160, y=160):
+    """这一点上到底看不看得到我们自己的窗口？
 
     锁屏（或断开的远程桌面）时会铺一层全屏的 LockScreenBackstopFrame，
     WindowFromPoint 永远返回它 —— 「这一点上压着谁的窗口」这类断言全都没意义。
-    所以先摆一个普通窗口在左上角，看系统还认不认得它；不认得就跳过，别拿
-    假的 other 判失败。
+    所以先摆一个普通窗口在待测点上，看系统还认不认得它；不认得就跳过。
+    探测点必须和被测点是同一块区域：桌面左上角能命中，不代表屏幕底部
+    （宠物落地那一带）没被系统窗口盖住。
     """
     probe = QWidget(None, Qt.FramelessWindowHint | Qt.Tool)
     probe.setStyleSheet('background: #ff00ff;')
-    probe.setGeometry(120, 120, 80, 80)
+    probe.setGeometry(int(x) - 40, int(y) - 40, 80, 80)
     probe.show()
     probe.raise_()
     qapp.processEvents()
     mine = int(probe.winId())
-    ok = win32.owner_at(160, 160, mine) == 'me'
+    ok = win32.owner_at(int(x), int(y), mine) == 'me'
     probe.hide()
     probe.deleteLater()
     qapp.processEvents()
@@ -151,8 +152,14 @@ def main():
         skip('命中点落在不透明像素上', '桌面上看不到自己的窗口')
     else:
         who = win32.owner_at(hit[0], hit[1], int(pet.win.winId()))
-        chk('命中点上压着的就是它自己', who == 'me', who)
-        chk('命中点落在不透明像素上（不会穿透到桌面）', who != 'other', who)
+        if who == 'other' and not desktop_usable(app.qapp, hit[0], hit[1]):
+            # 同一个点连临时摆上去的探测窗都命中不了：这一块被系统窗口
+            # 占着，判宠物「被盖住」没有意义。
+            skip('命中点上压着的就是它自己', '该位置被系统窗口盖住')
+            skip('命中点落在不透明像素上', '该位置被系统窗口盖住')
+        else:
+            chk('命中点上压着的就是它自己', who == 'me', who)
+            chk('命中点落在不透明像素上（不会穿透到桌面）', who != 'other', who)
 
     print('\n--- 巡检：被别人盖住时插回去 ---')
     # 真开一个别的进程太贵，这里只验规则本身：把「被谁压着」的判定换成

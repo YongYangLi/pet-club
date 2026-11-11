@@ -176,6 +176,7 @@ class ChatWindow(CardWindow):
         self.query = ''
         self._rows = {}
         self._pop = None
+        self._pop_prev = None       # 刚关掉的弹层，别在点击栈里析构
         self._tabs = {}
         self._pick_grid = None
         self._pick_box = None
@@ -390,8 +391,8 @@ class ChatWindow(CardWindow):
             item = self.list_box.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.setParent(None)
-                w.deleteLater()
         for key, name in self.visible_convs():
             row = ConvRow(key, name, self.me, self)
             row.clicked.connect(self.switch)
@@ -443,8 +444,8 @@ class ChatWindow(CardWindow):
             item = self.msg_box.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.setParent(None)
-                w.deleteLater()
         self.msg_box.addStretch(1)
 
     def render(self, scroll=True):
@@ -620,12 +621,10 @@ class ChatWindow(CardWindow):
 
     def _on_icon(self, kind):
         if self._pop is not None and self._pop.isVisible():
-            self._pop.close()
-            self._pop = None
+            self._close_pop()
             return
-        self._pop = None
         if kind == 'emoji':
-            self._pop = self._picker_pop()
+            self._picker_pop()
         elif kind == 'image':
             path, _ = QFileDialog.getOpenFileName(
                 self, '发图片', '', '图片 (*.png *.jpg *.jpeg *.gif *.webp *.bmp)')
@@ -646,6 +645,7 @@ class ChatWindow(CardWindow):
     def _picker_pop(self):
         """表情 / 表情包拾取面板：三页，同一块格子换内容。"""
         pop = QFrame(None, Qt.Popup)
+        self._pop = pop             # 弹层没有 parent，引用必须自己先攥住
         pop.setStyleSheet(
             'QFrame { background: #ffffff; border: 1px solid %s;'
             ' border-radius: 10px; }' % BORDER)
@@ -691,8 +691,8 @@ class ChatWindow(CardWindow):
             item = self._pick_grid.takeAt(0)
             w = item.widget()
             if w is not None:
+                w.hide()
                 w.setParent(None)
-                w.deleteLater()
 
     def _fill_page(self, page):
         """换一页内容。表情是字符，表情包是素材里的卡片。"""
@@ -759,9 +759,18 @@ class ChatWindow(CardWindow):
         self._send_media('sticker', path)
 
     def _close_pop(self):
-        if self._pop is not None:
-            self._pop.close()
-            self._pop = None
+        if self._pop is None:
+            return
+        pop = self._pop
+        pop.close()
+        # 这个方法常常是从弹层里某个表情卡片的 clicked 回调进来的，
+        # 此刻 Qt 还在 QFrame 自己的派发栈上。引用一丢就会被 shiboken
+        # 删掉 C++ 对象 —— 留一拍，并把指向弹层子对象的引用一并清掉，
+        # 免得下次翻页碰到已经失效的 QGridLayout。
+        self._pop_prev, self._pop = pop, None
+        self._pick_grid = None
+        self._pick_box = None
+        self._tabs = {}
 
     def _send_media(self, mt, payload):
         if self.on_media is None:
@@ -847,7 +856,5 @@ class ChatWindow(CardWindow):
         return True
 
     def closeEvent(self, e):
-        if self._pop is not None:
-            self._pop.close()
-            self._pop = None
+        self._close_pop()
         super().closeEvent(e)

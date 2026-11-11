@@ -220,8 +220,11 @@ class PetWindow(QWidget):
             self.reassert_top()
 
     def destroy(self):
+        # 只 hide。不要 deleteLater() —— 调用方随后就丢掉 Python 引用，
+        # shiboken 会立刻删 C++ 对象，Qt 的 DeferredDelete 再删一次就是
+        # double free。引用一断，这里自然只删一次。
         self.hide()
-        self.deleteLater()
+        self.setParent(None)
 
 
 class Bubble(QWidget):
@@ -289,4 +292,4 @@ class Bubble(QWidget):
 
     def destroy(self):
         self.hide()
-        self.deleteLater()
+        self.setParent(None)
