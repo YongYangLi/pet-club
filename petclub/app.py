@@ -519,10 +519,12 @@ class App:
         return True
 
     def _refresh_menu(self):
-        """菜单弹着的时候每 200ms 刷一次文案（冷却倒计时）。"""
+        """每 200ms 刷一次冷却：托盘菜单改文案，聊天窗的快捷条改角标。"""
+        now = time.monotonic()
+        if self.chat is not None and self.chat.alive():
+            self.chat.refresh_actions()
         if self._menu is None or not self._menu_probes:
             return
-        now = time.monotonic()
         for act, key, to, label in self._menu_probes:
             left = self.cd.left(self._cd_key(key, to), now)
             act.setText(self._cd_label(label, left))
@@ -590,6 +592,15 @@ class App:
         self._fill_actions(m, role)
         return m
 
+    def action_state(self, key, to):
+        """给聊天窗的快捷互动条：文案固定，只报「能不能点」和还剩几秒。
+
+        倒计时画在按钮角标上、不写进文字，否则 chip 宽度每秒都在变，
+        整条会跟着抖，「更多」里收几个也得反复重算。
+        """
+        left = self.cd.left(self._cd_key(key, to), time.monotonic())
+        return get(key)['label'], left <= 0, int(math.ceil(left)) if left > 0 else 0
+
     # ---- 执行 ----
 
     def do_action(self, key, to=None):
@@ -629,13 +640,16 @@ class App:
         if self._closing or self.me is None:
             return None
         key = self._conv_key(to)
-        if self.chat is None or not self.chat.alive():
+        # 关窗现在只是 hide，窗口对象还活着 —— 复用它，别每次都新建一个。
+        if self.chat is None:
             self.chat = ChatWindow(None, self.send_chat, self._chat_closed,
                                    me=self.me['role'],
                                    is_online=lambda r: bool(self.players.get(r)),
                                    log=self.chat_log,
                                    on_media=self.send_media,
-                                   unread=self.unread)
+                                   unread=self.unread,
+                                   on_action=self.do_action,
+                                   action_state=self.action_state)
             self.chat.switch(key)
             self.chat.show()
         else:

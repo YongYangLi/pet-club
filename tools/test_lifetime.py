@@ -8,6 +8,7 @@ _close_menu 又 deleteLater —— shiboken 删一次、Qt 的延迟删除再删
 
 跑法：py tools/test_lifetime.py
 """
+import ast
 import glob
 import os
 import sys
@@ -38,10 +39,13 @@ def main():
     bad = []
     for path in sorted(glob.glob(os.path.join(ROOT, 'petclub', '*.py'))):
         with open(path, encoding='utf-8') as f:
-            for n, line in enumerate(f, 1):
-                code = line.split('#')[0]
-                if 'deleteLater' in code:
-                    bad.append('%s:%d' % (os.path.basename(path), n))
+            tree = ast.parse(f.read(), filename=path)
+        # 只认真实的调用节点：注释、docstring 里提到这个名字不算数，
+        # 但写在任意表达式里的 .deleteLater() 一个也跑不掉。
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == 'deleteLater'):
+                bad.append('%s:%d' % (os.path.basename(path), node.lineno))
     chk('所有 QObject 只由 Python 引用计数析构', not bad, bad)
 
     print('\n--- 菜单关掉以后引用还在 ---')

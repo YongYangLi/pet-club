@@ -40,9 +40,23 @@ SAMPLES = [
 ]
 
 
-def save(widget, name):
-    widget.adjustSize() if hasattr(widget, 'adjustSize') else None
+def save(widget, name, plain=False):
+    # 聊天窗现在可以自由改大小，adjustSize() 会把它缩回 sizeHint，
+    # 截图就不是实际尺寸了。弹层/菜单在各自创建时已经 adjustSize 过。
+    #
+    # Qt 的一个 grab() 怪癖：全局 QSS + 窗口阴影同时存在时，带 background
+    # 样式的子 QLabel 在离屏渲染里会只剩背景、丢掉文字（真实屏幕正常）。
+    # 单独抓气泡、或临时清掉全局 QSS 都能还原文字，所以截整窗时走 plain。
+    qapp = QApplication.instance()
+    qss = None
+    if plain:
+        qss = qapp.styleSheet()
+        qapp.setStyleSheet('')
+        QApplication.processEvents()
     pm = widget.grab()
+    if plain:
+        qapp.setStyleSheet(qss)
+        QApplication.processEvents()
     path = os.path.join(OUT, name)
     pm.save(path)
     print('  %s  %dx%d' % (name, pm.width(), pm.height()), flush=True)
@@ -69,9 +83,8 @@ def main():
 
     print('聊天面板')
     chat = app.open_chat(CONV_ALL)
-    chat.resize(chat.width(), chat.height())
     qapp.processEvents()
-    save(chat, 'chat_top.png')
+    save(chat, 'chat_top.png', plain=True)
 
     # 多聊几句再截一张：滚到底那版用来看气泡、时间分隔、系统提示
     for i in range(6):
@@ -81,15 +94,31 @@ def main():
             'ts': time.time() + i})
     chat.render()
     qapp.processEvents()
-    save(chat, 'chat.png')
+    chat._scroll_end()          # render 里排的是 singleShot(0)，先手动滚到底
+    qapp.processEvents()
+    save(chat, 'chat.png', plain=True)
+
+    print('快捷互动「更多」')
+    chat._more_pop.adjustSize()
+    chat._more_pop.show()
+    qapp.processEvents()
+    save(chat._more_pop, 'chat_actions.png')
+    chat._more_pop.hide()
 
     print('表情拾取面板')
     pop = chat._picker_pop()
     chat._pop = pop
+    pop.adjustSize()
     pop.show()
     qapp.processEvents()
     save(pop, 'chat_stickers.png')
+    first = chat._pick_grid.itemAt(0).widget()
+    chat._show_preview(first)
+    qapp.processEvents()
+    save(chat._preview, 'chat_preview.png')
+    chat._hide_preview()
     chat._fill_page('others')
+    pop.adjustSize()
     qapp.processEvents()
     save(pop, 'chat_cards.png')
     pop.close()
