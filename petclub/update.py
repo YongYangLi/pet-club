@@ -38,7 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from . import config
+from . import config, host
 
 EXE_NAME = 'pet-club.exe'
 NEW_SUFFIX = '.new'
@@ -113,8 +113,8 @@ def is_newer(remote, local):
 
 
 def enabled():
-    """有没有开自动更新：得配了地址，而且得是打包后的 exe。"""
-    return bool(config.UPDATE_URL) and is_frozen()
+    """有没有开自动更新：配了地址 + 是打包后的程序 + 这个平台换得掉自己。"""
+    return bool(config.UPDATE_URL) and is_frozen() and host.can_self_update()
 
 
 def is_frozen():

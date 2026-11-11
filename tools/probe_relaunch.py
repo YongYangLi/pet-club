@@ -123,7 +123,7 @@ def stale_env():
 
 def main():
     if not os.path.exists(SRC):
-        print('没有 dist/pet-club.exe —— 先跑 python tools/build_exe.py')
+        print('没有 dist/pet-club.exe —— 先跑 python tools/build_app.py')
         return 1
     kill_all()
     print('目标 %s（%.1f MB，%s）'

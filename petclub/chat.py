@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout,
                                QScrollArea, QSizePolicy, QToolButton,
                                QVBoxLayout, QWidget)
 
-from . import media
+from . import host, media
 from .config import ROLE_NAME, ROLES, assets_dir
 from .theme import (ACCENT, BORDER, FG, FIELD, LINE, MUTED, SUB, WINDOW,
                    CardWindow, avatar, font)
@@ -833,16 +833,12 @@ class ChatWindow(CardWindow):
         """
         if fg is None:
             return
-        from . import win32
-        mine = win32.root_of(int(self.winId()))
-        pop_hwnd = 0
-        if self._pop is not None:
-            pop_hwnd = win32.root_of(int(self._pop.winId()))
-        on = fg in (mine, pop_hwnd)
+        pop = self._pop if (self._pop is not None and self._pop.isVisible()) else None
+        on = host.is_foreground(fg, self, pop)
         if on == self._top_on:
             return
         self._top_on = on
-        win32.set_topmost(mine, on)
+        host.set_topmost(self, on)
         if not on and self._pop is not None:
             self._pop.close()
             self._pop = None

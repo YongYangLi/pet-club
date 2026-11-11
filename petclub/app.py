@@ -21,13 +21,13 @@ from .actions import (ORDER, get, is_local, media_line, reply_line, say_line,
 from .actors import Pet
 from .config import ROLES, ROLE_NAME, assets_dir, files_dir
 from .cooldown import Cooldown
+from .host import foreground, owner_at, tray_icons, work_area
 from .net import Net
 from .chat import CONV_ALL, ChatWindow
 from .claim import ClaimDialog
 from .theme import QSS as UI_QSS
 from .tray import Tray
 from .sprites import load_all
-from .win32 import foreground, owner_at, root_of, work_area
 
 BUBBLE_SEC = 2.6
 GROUND_MARGIN = 34
@@ -211,8 +211,7 @@ class App:
             pt = pet.win.hit_point()
             if pt is None:
                 continue
-            hwnd = root_of(int(pet.win.winId()))
-            if owner_at(pt[0], pt[1], hwnd) != 'other':
+            if owner_at(pt[0], pt[1], pet.win) != 'other':
                 continue
             pet.win.reassert_top()
 
@@ -941,8 +940,8 @@ class App:
     def start_tray(self):
         if self.tray is not None or not tray_wanted():
             return self.tray
-        t = Tray(icon=os.path.join(assets_dir(), 'app.ico'),
-                 alert=os.path.join(assets_dir(), 'app_alert.ico'),
+        icon, alert = tray_icons(assets_dir())
+        t = Tray(icon=icon, alert=alert,
                  tip='pet-club %s' % config.version(),
                  on_left=self.tray_left, on_right=self.tray_right)
         self.tray = t if t.ok else None

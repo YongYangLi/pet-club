@@ -101,7 +101,7 @@ def kill_tree(pid):
 
 def main():
     if not os.path.exists(EXE):
-        print('没有 dist/pet-club.exe —— 先跑 python tools/build_exe.py')
+        print('没有 dist/pet-club.exe —— 先跑 python tools/build_app.py')
         return 1
     print('目标 %s（%.1f MB）' % (EXE, os.path.getsize(EXE) / 1048576.0))
 

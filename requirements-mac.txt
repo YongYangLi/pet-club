@@ -1,0 +1,10 @@
+-r requirements.txt
+
+# macOS 的系统集成：窗口层级、前台窗口、遮挡检测（见 petclub/macos.py）。
+# 不装也能跑 —— 那边整个模块会退化成「不知道」，只是丢了「被盖住后自动顶回来」。
+# 但想要和 Windows 一样的行为，就得装。
+pyobjc-framework-Cocoa>=10.0
+pyobjc-framework-Quartz>=10.0
+
+# 打包用；开发环境可以不装
+pyinstaller>=6.0

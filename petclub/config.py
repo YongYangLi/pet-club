@@ -18,6 +18,8 @@ import os
 import sys
 import tempfile
 
+from . import host
+
 ROLES = ('p1', 'p2', 'p3', 'p4', 'p5')
 ROLE_NAME = {'p1': '猥琐', 'p2': '胡大神', 'p3': '杨大师', 'p4': '婧婧',
              'p5': '雷大神'}
@@ -33,9 +35,9 @@ POLL_MS = 33               # 主循环节拍（约 30fps）
 
 # ---------------- 自动更新 ----------------
 #
-# 版本号写在代码里，打包时同步进 exe 的文件属性（tools/build_exe.py 读这里），
-# 发版时 tools/make_release.py 再把同一个号写进 COS 上的 latest.json。
-# 三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
+# 版本号写在代码里，打包时同步进 exe 的文件属性 / .app 的 Info.plist
+# （tools/build_app.py 读这里），发版时 tools/make_release.py 再把同一个号写进
+# COS 上的清单。三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
 VERSION = '1.4.0'
 
@@ -80,12 +82,12 @@ def files_dir():
     """聊天里收到/发出的附件落在哪儿。
 
     打包后**不能**放 exe 旁边：那可能是 C:\\Program Files，普通用户没有写权限，
-    而且卸载时会被一起删掉。所以放 %LOCALAPPDATA%\\pet-club\\files。
+    而且卸载时会被一起删掉。所以交给 host 按平台给一个用户目录
+    （Windows: %LOCALAPPDATA%\\pet-club，macOS: ~/Library/Application Support/pet-club）。
     源码模式下放项目里的 petclub-data/，看一眼就知道刚才那张图存哪儿了。
     """
     if hasattr(sys, '_MEIPASS'):
-        base = os.environ.get('LOCALAPPDATA') or os.path.expanduser('~')
-        d = os.path.join(base, 'pet-club', 'files')
+        d = os.path.join(host.data_dir(), 'files')
     else:
         d = os.path.join(app_dir(), 'petclub-data', 'files')
     try:

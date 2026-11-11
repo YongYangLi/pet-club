@@ -1,0 +1,79 @@
+name: build
+
+# 一个仓库，两个平台产物。
+#
+# 为什么要两个 job 而不是一个：PyInstaller 不支持交叉编译，打 exe 只能用
+# Windows 的 bootloader，打 .app 只能用 macOS 的。所谓「同时生成」就是在
+# 两台机器上各跑一次同一条命令（tools/build_app.py），产物各自上传。
+#
+# 探针（probe_*.py）不在这里跑：它们要真的开窗口、点鼠标、改窗口层级，
+# 而 CI 的 runner 没有可交互桌面（Windows runner 更是 Session 0）。
+# CI 只跑纯逻辑的单元测试，行为和界面由本地那套探针保证。
+
+on:
+  push:
+    branches: [main, pyside6]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false          # 一边失败不要影响另一边，两个平台的结论要都能看到
+      matrix:
+        include:
+          - os: windows-latest
+            target: win
+            label: Windows (exe)
+            deps: requirements-build.txt
+            extra: ''
+            artifact: dist/pet-club.exe
+          # macos-latest 现在是 arm64（Apple Silicon）。
+          # 要 Intel 版就把 os 改成 macos-13，产物名记得一起改，否则两份会撞名。
+          - os: macos-latest
+            target: mac
+            label: macOS (.app)
+            deps: requirements-mac.txt
+            extra: --zip
+            artifact: dist/pet-club-mac.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 装依赖
+        run: pip install -r ${{ matrix.deps }}
+
+      - name: 单元测试
+        run: |
+          python tools/test_actions.py
+          python tools/test_config.py
+          python tools/test_media.py
+          python tools/test_server.py
+          python tools/test_update.py
+
+      - name: 打包
+        run: python tools/build_app.py --target ${{ matrix.target }} ${{ matrix.extra }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pet-club-${{ matrix.target }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+      # 打 tag 的时候顺手挂到 Release，省得再从 artifact 里手工搬
+      - name: 挂到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" "${{ matrix.artifact }}" --clobber

@@ -12,6 +12,7 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 from PySide6.QtWidgets import (QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QVBoxLayout, QWidget)
 
+from . import host
 from .config import assets_dir
 
 # ---------------- 配色 ----------------
@@ -35,7 +36,7 @@ OK_BG = '#e9f8f2'
 TAKEN_FG = '#a8aeba'
 TAKEN_BG = '#f1f2f5'
 
-FAMILY = 'Microsoft YaHei UI'
+FAMILY = host.ui_font()
 
 QSS = """
 QWidget { font-family: "%s"; font-size: 10pt; color: %s; }

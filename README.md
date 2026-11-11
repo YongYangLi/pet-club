@@ -22,7 +22,9 @@ pet-club/
 ├─ server.py            服务端（纯标准库单文件，可本地跑也可部署到公网）
 ├─ run.py               客户端入口
 ├─ petclub/             客户端
-│   ├─ win32.py         工作区 / 前台窗口 / z 序（Qt 没有等价物的那几件事）
+│   ├─ host.py          平台收口：屏幕、前台、层级、字体、数据目录（界面只问它）
+│   ├─ win32.py         Windows 实现：工作区 / 前台窗口 / z 序 / 点命中测试
+│   ├─ macos.py         macOS 实现：NSWindow 层级、CGWindowList 遮挡判定（PyObjC，可缺）
 │   ├─ windows.py       角色窗口与气泡（逐像素透明 + 按 alpha 的点击穿透）
 │   ├─ theme.py         配色、全局样式表、卡片窗、按钮、圆头像
 │   ├─ net.py           网络层（子线程收发 + 队列投递给主线程）
@@ -40,6 +42,7 @@ pet-club/
 ├─ assets/roles/        五个角色的素材（p1~p5 × 11 个姿势）
 ├─ assets/stickers/     角色表情包（tools/make_stickers.py 生成）
 ├─ assets/app.ico       exe 图标（由 tools/make_icon.py 生成）
+├─ assets/app.icns      .app 图标（由 tools/make_mac_icons.py 生成）
 ├─ docs/多人互动设计.md  多人架构、协议、分期
 ├─ docs/互动玩法设计.md  互动玩法 v2.3（两层模型、拖拽、冷却、台词、指标）
 ├─ docs/部署服务端.md    局域网 / 云服务器 / 内网穿透三种部署方式
@@ -316,6 +319,7 @@ python tools/test_server.py     # 服务端逻辑（32 项：身份唯一性、�
 python tools/test_actions.py    # 动作目录 / 台词 / 冷却（32 项，纯逻辑不开窗口）
 python tools/test_media.py      # 图片/文件/表情包的编解码与缩略图缓存（31 项）
 python tools/test_update.py     # 自动更新：版本号、清单、下载校验、换文件脚本（67 项）
+python tools/test_host.py       # 平台分派与退化：字体、图标、数据目录、没有 PyObjC 也不崩（27 项）
 python tools/probe_live.py      # 真 Qt 窗口 + 真服务器（本地）的端到端探针（108 项：
                                 #   认领与天降、别人加入/离开、互动与镜像、菜单与冷却倒计时、
                                 #   拖动、聊天面板五会话、未读与托盘闪烁、图片/表情/表情包/文件、搜索）
@@ -331,15 +335,47 @@ python tools/shot_ui.py         # 生成界面预览图到 docs/preview/
 python tools/probe_protocol.py  # 证明走的是裸 TCP 而非 HTTP（解释为什么 https 隧道不能用）
 ```
 
-## 打包成 exe
+## 打包（exe / .app）
+
+一条命令，在哪个系统上跑就出哪个系统的产物：
 
 ```bash
-python tools/make_icon.py       # 生成 assets/app.ico（角色立绘 → 多尺寸 ico）
-python tools/make_stickers.py   # 生成 assets/stickers/（4 角色 × 8 张表情包）
-python tools/build_exe.py       # → dist/pet-club.exe（单文件，约 57 MB：Qt 自己就一百多兆，压完这些）
-python tools/probe_exe.py       # 验：起得来、开得出窗口、第二次双击无效
+python tools/make_icon.py        # Windows 图标（角色立绘 → 多尺寸 ico）
+python tools/make_mac_icons.py   # macOS 图标（.icns + 菜单栏 PNG），Windows 上也能跑
+python tools/make_stickers.py    # 表情包素材
 
-# 发版（打包 + 写 latest.json + 打印上传命令）
+python tools/build_app.py                      # 当前平台的产物
+python tools/build_app.py --target mac --zip   # macOS：.app 再压一个分发用 zip
+python tools/build_app.py --target mac --dmg   # macOS：顺带做一个 dmg（要 hdiutil）
+python tools/probe_exe.py                      # 验：起得来、Qt 运行时真冻进去了、二次双击无效
+```
+
+| 平台 | 产物 | 大小 | 怎么打的 |
+|---|---|---|---|
+| Windows | `dist/pet-club.exe` | 57 MB | `--onefile --windowed` + 版本资源，拷一个文件过去双击就能用 |
+| macOS | `dist/pet-club.app` | — | onedir 打进 `.app`（启动快，不用每次解 57 MB） |
+
+**PyInstaller 不能交叉编译。** 在 Windows 上打不出 `.app`，在 Mac 上也打不出 `.exe`
+—— 它用的是目标系统的 bootloader 和动态库。所以"同时出两个平台"只能靠两边各跑一次：
+[.github/workflows/build.yml](.github/workflows/build.yml) 里就是 `windows-latest` 和
+`macos-latest` 两个 job，push / PR 时各出一份 artifact，打 tag 还会自动挂到 Release。
+
+脚本能保证的是：同一份排除清单、同一个版本号、同一套参数，谁跑都一样。两个平台真正
+不同的只有三处，都写在 `build_app.py` 里：
+
+- Windows 要 `--onefile`，并把产品名/版本号写进文件属性（任务管理器里显示 `pet-club`
+  而不是光秃秃的 `run`）；
+- macOS 要 onedir，并回填 `Info.plist`：`LSUIElement`（不进 Dock、不进 Cmd-Tab）、
+  版本号、`NSHighResolutionCapable`（不然 Retina 上整个界面是糊的）；
+- macOS 改过 `Info.plist` 之后**必须重新 ad-hoc 签名**，否则签名封条对不上，系统会
+  直接报「应用已损坏」—— 这是最容易漏的一步。
+
+其他两个共用的小事：`--exclude-module server`（客户端不 import 服务端，但项目根在
+`sys.path` 上，不排掉会被打进去）、`素材/`（80 多兆原图）不打进去。
+
+发版（Windows）：
+
+```bash
 python tools/make_release.py --base https://<桶>.cos.<地域>.myqcloud.com/pet-club --note "这次改了什么"
 ```
 
@@ -347,17 +383,38 @@ python tools/make_release.py --base https://<桶>.cos.<地域>.myqcloud.com/pet-
 `latest.json` 里，每次发版覆盖同一个对象。"当前是哪个版本"这个信息本来就属于清单，
 放进文件名里只会让地址每版都变、桶里越堆越多。代价是回退得用旧代码重打一次。
 
-拷一个 `dist/pet-club.exe` 到目标机器上双击就能用：不需要装 Python、不需要
-`pip install`、不需要旁边放 `assets` 目录 —— 立绘都塞进 exe 了，启动时解到临时
-目录（`config.assets_dir()` 认 `sys._MEIPASS`）。代价是首次启动多一两秒。
+macOS 是 `pet-club-mac.zip` + `latest-mac.json`，两份清单互不干扰（同一份的话，
+谁后发就会把对方的版本号覆盖掉）。
 
-- `--onefile --windowed`：单文件、不带控制台黑框。桌宠是挂件，多一个黑窗口很出戏。
-- `--exclude-module server`：客户端不 import 服务端，但项目根在 `sys.path` 上，不排掉会被打进去。
-- `素材/`（80 多兆原图）**不打进 exe**：那是做图用的，跟运行无关。
-- 文件属性里写好了产品名与版本号（`build/version_info.txt` 由脚本生成），
-  任务管理器里显示的是 `pet-club` 而不是光秃秃的 `run`。
+换服务器地址之后要**重新打包**（`petclub/config.py` 的两行被编进产物里了）。
 
-换服务器地址之后要**重新打包**（`petclub/config.py` 的两行被编进 exe 里了）。
+## 平台支持
+
+界面层是 Qt，所以渲染、透明、托盘、样式在两边是同一份代码。差别全在系统集成上，
+都收在 `petclub/host.py` 里，界面只问它、不直接调原生 API。
+
+| | Windows | macOS |
+|---|---|---|
+| 逐像素透明 + 点击穿透 | ✅ | ✅（Qt 原生合成，不需要分层窗口） |
+| 托盘（菜单栏）+ 未读闪烁 | ✅ | ✅ |
+| 始终置顶 | ✅ | ✅（`NSFloatingWindowLevel`） |
+| 被别的窗口盖住后自动顶回来 | ✅ | ⚠️ 需要 `pyobjc`，否则降级 |
+| 聊天面板「自己在前台才置顶」 | ✅ | ⚠️ 同上 |
+| 单实例 | ✅ 命名互斥体 | ✅ `fcntl` 锁 |
+| 自动更新 | ✅ `.bat` 换 exe | ❌ 关闭，手动下载新版本 |
+| 真机验证 | ✅ 全套探针 | ❌ **没在 Mac 上跑过** |
+
+macOS 上要注意的三件事：
+
+1. **没有"桌面级置顶"这回事。** 全屏应用独占一个 Space，`NSFloatingWindowLevel` 只在
+   同一空间里浮在普通窗口之上，做不到 Windows 那样一直压在最上面。
+2. **托盘是菜单栏图标。** 左键直接开聊天这件事在 macOS 上不保险（系统对菜单栏图标的
+   点击有自己的分发规则），实际用起来以菜单里那一项为准。
+3. **Gatekeeper。** 没有 Apple 开发者签名和公证的 `.app`，首次双击会被拦，得右键 →
+   打开，或者 `xattr -d com.apple.quarantine pet-club.app`。
+
+`petclub/macos.py` 的写法是"拿不到就退化"：没装 `pyobjc` 也能启动、位置也正确，
+只是丢掉上面那两项。所以 **`pip install -r requirements-mac.txt`** 才拿得到完整行为。
 
 ## 自动更新
 
@@ -372,7 +429,7 @@ python tools/make_release.py --base https://<桶>.cos.<地域>.myqcloud.com/pet-
 `attrib -r` → `move` 覆盖 → 重新拉起。细节和发版流程见 [docs/自动更新.md](docs/自动更新.md)。
 
 版本号只有一个来源：`petclub/config.py` 的 `VERSION`
-（`build_exe.py` 和 `make_release.py` 都读它，别手写第二份）。
+（`build_app.py` 和 `make_release.py` 都读它，别手写第二份）。
 
 ## 换姿势素材（原图 → 抠图 → 裁剪）
 
@@ -418,10 +475,13 @@ PySide6>=6.6
 Pillow>=9.1
 ```
 
-装依赖：`pip install -r requirements.txt`；要打包再加 `pip install -r requirements-build.txt`。
+装依赖：`pip install -r requirements.txt`；要打包再加 `pip install -r requirements-build.txt`
+（Windows）或 `pip install -r requirements-mac.txt`（macOS，多两个 pyobjc 包）。
 
-Python 3.9+，Windows（逐像素透明、置顶、点击穿透都靠 Win32 那几件事）。
-服务端只用标准库，Python 3.8+ 即可，Linux 也能跑。
+Python 3.9+。服务端只用标准库，Python 3.8+ 即可，Linux 也能跑。
+
+客户端：**Windows 是主力平台，全套探针都在上面跑过**。macOS 能构建、代码按同一套
+抽象写完了，但透明、置顶、菜单栏这几项**没有在真机上验证过**，见上面的「平台支持」。
 
 ## 与 desk-pet-lite 的关系
 

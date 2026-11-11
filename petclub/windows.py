@@ -18,18 +18,18 @@
 
 【坐标】对外一律用**屏幕逻辑坐标**（= Qt 的坐标），脚底中心对齐。
 """
-import sys
-
 from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtGui import (QBitmap, QColor, QFont, QFontMetrics, QImage,
                            QPainter, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QApplication, QWidget
 
+from . import host
+
 # 气泡配色，和认领窗/聊天面板同一套
 BUBBLE_BG = '#ffffff'
 BUBBLE_FG = '#111827'
 BUBBLE_EDGE = '#e4e7ef'
-BUBBLE_FONT = 'Microsoft YaHei UI'
+BUBBLE_FONT = host.ui_font()
 
 
 def to_qimage(im):
@@ -207,23 +207,17 @@ class PetWindow(QWidget):
 
     def reassert_top(self):
         """重新插回置顶带：置顶窗口是一个共享带，谁最后激活谁在上面。"""
-        if sys.platform == 'win32':
-            from . import win32
-            win32.raise_top(int(self.winId()))
-        else:
+        if not host.raise_top(self):
             self.raise_()
 
     def apply_top(self, on):
         """切「始终置顶」：只改 z 序属性，不重建窗口（保住 mask 和位置）。"""
-        if sys.platform == 'win32':
-            from . import win32
-            win32.set_topmost(int(self.winId()), on)
-            if on:
-                self.reassert_top()
-        else:
+        if not host.set_topmost(self, on):
+            # 拿不到原生改层级的办法（没有 PyObjC、也不是 Windows）：
+            # 退回 Qt 的 flag，代价是会重建窗口
             self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
-            if on:
-                self.raise_()
+        if on:
+            self.reassert_top()
 
     def destroy(self):
         self.hide()
@@ -290,10 +284,7 @@ class Bubble(QWidget):
                   int(round(cy / self.dpr - self.height())))
 
     def apply_top(self, on):
-        if sys.platform == 'win32':
-            from . import win32
-            win32.set_topmost(int(self.winId()), on)
-        else:
+        if not host.set_topmost(self, on):
             self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
 
     def destroy(self):
