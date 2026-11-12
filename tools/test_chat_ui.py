@@ -1,28 +1,35 @@
 # -*- coding: utf-8 -*-
 """聊天窗口重排版的防回归检查。
 
-覆盖：微信式一体化结构（直角窗口 / 右侧标题+消息+输入同一平面）、
+覆盖：圆角不透明外框（标题带与会话栏同色）、右侧白色会话平面、
 窗口三按钮（关窗 ≠ 退程序）、可缩放与最大化、微信式多行输入区、
-工具与发送都在输入区内、表情悬停高清预览、无底板的快捷互动圆角按钮。
+工具与发送都在输入卡片内、表情悬停高清预览、输入卡片里的快捷互动，
+以及「文件先落进输入框、点发送才发」这条待发附件的路。
 
 跑法：py tools/test_chat_ui.py
 """
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-from PySide6.QtCore import QEvent, QPoint, Qt, QUrl                  # noqa: E402
-from PySide6.QtGui import QFontMetrics, QKeyEvent                # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl          # noqa: E402
+from PySide6.QtGui import (QColor, QFontMetrics, QKeyEvent, QMouseEvent,  # noqa: E402
+                           QPalette, QPixmap, QWheelEvent)
+from PySide6.QtTest import QTest                                 # noqa: E402
 from PySide6.QtWidgets import QApplication                       # noqa: E402
+from PIL import Image                                            # noqa: E402
 
 from petclub import actions, media                               # noqa: E402
 from petclub.app import App                                      # noqa: E402
-from petclub.chat import (CELL, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,  # noqa: E402
-                          PREVIEW_BOX, TALK_BG, ChatWindow, Composer,
-                          CONV_ALL, ToolIcon)
+from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CHIP_H,  # noqa: E402
+                          CHROME, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,
+                          PREVIEW_BOX, SEL_BG, SEL_FG, TALK_BG, BubbleText,
+                          ChatWindow, Composer, CONV_ALL, ImageViewer, MeBar,
+                          StatePill, ToolIcon)
 from petclub.config import ROLES                                 # noqa: E402
 
 PASS = []
@@ -45,17 +52,35 @@ def main():
     calls = []
 
     dpr = float(qapp.primaryScreen().devicePixelRatio())
-    print('--- 微信式一体化结构 ---')
+    print('--- 圆角外框 / 一体化结构 ---')
     chat = ChatWindow(None, me='p1', on_action=lambda k, t: calls.append((k, t)))
     chat.show()
     qapp.processEvents()
     qapp.processEvents()
-    chk('窗口是直角矩形，没有圆角卡片和阴影',
+    chk('窗口不半透明（分层窗口的任务栏缩略图会花）',
         chat._flat and chat._shadow is None
-        and 'border-radius: 0' in chat.card.styleSheet(), chat.card.styleSheet())
-    chk('窗口四周没有阴影留白', chat._outer.contentsMargins().left() == 0)
+        and not chat.testAttribute(Qt.WA_TranslucentBackground))
+    chk('外框是 12px 圆角、没有阴影留白',
+        'border-radius: 12px' in chat.card.styleSheet()
+        and chat._outer.contentsMargins().left() == 0,
+        chat.card.styleSheet())
+    chk('顶部标题带和会话栏是同一个底色',
+        CHROME in chat.side.styleSheet()
+        and 'transparent' in chat.titlebar.styleSheet())
+    chk('首帧外框就是外框色（不会停在初始化的白底）',
+        chat.card.palette().color(QPalette.Window) == QColor(CHROME)
+        and chat.grab().toImage().pixelColor(200, 20) == QColor(CHROME),
+        (chat.card.palette().color(QPalette.Window).name(),
+         chat.grab().toImage().pixelColor(200, 20).name()))
+    chk('在线状态是浅灰胶囊 + 状态点，不再是绿底标签',
+        isinstance(chat.state_lb, StatePill)
+        and chat.state_lb.styleSheet() == ''
+        and chat.state_lb.text().endswith('在线')
+        and chat.state_lb.width() > 0,
+        (type(chat.state_lb).__name__, chat.state_lb.styleSheet(),
+         chat.state_lb.text()))
     chk('顶部是一条横跨窗口的标题带',
-        chat.titlebar is not None and chat.titlebar.height() >= 30
+        chat.titlebar is not None and chat.titlebar.height() >= 36
         and chat.titlebar.width() >= chat.width() - 4)
     chk('三颗窗口按钮都在标题带上',
         all(w.parentWidget() is chat.titlebar
@@ -64,35 +89,28 @@ def main():
         chat.side.width() == LIST_W
         and chat.side.x() + chat.side.width() == chat.talk.x(),
         (chat.side.geometry(), chat.talk.geometry()))
-    chk('会话栏有搜索框和「发起会话」加号',
-        chat.search is not None and chat.add_btn is not None
-        and len(chat._add_menu.actions()) == len(chat.convs()))
-    chat._add_menu.actions()[1].trigger()
-    qapp.processEvents()
-    chk('加号菜单里的会话能直接切过去', chat.key == 'p2', chat.key)
-    chat.switch(CONV_ALL)
-    qapp.processEvents()
-    chk('右侧标题 / 消息 / 输入挂在同一个平面上',
-        chat.head_bar.parentWidget() is chat.talk
-        and chat.scroll.parentWidget() is chat.talk
-        and chat.field.parentWidget().parentWidget() is chat.talk)
-    chk('右侧三段共用同一个底色',
-        all(TALK_BG in w.styleSheet() for w in
-            (chat.talk, chat.head_bar, chat.scroll, chat.field.parentWidget())))
+    chk('搜索框旁边没有多余的「+」发起会话按钮',
+        not hasattr(chat, 'add_btn') and not hasattr(chat, '_add_menu'))
+    chk('右侧是一块白色会话平面',
+        TALK_BG in chat.talk.styleSheet()
+        and 'transparent' in chat.head_bar.styleSheet()
+        and TALK_BG in chat.scroll.styleSheet()
+        and TALK_BG in chat.inbox.styleSheet())
     chk('会话标题行只有底部一条细线',
         'border-bottom' in chat.head_bar.styleSheet()
         and 'border-radius' not in chat.head_bar.styleSheet())
-    chk('消息区不再是圆角卡片',
+    chk('消息区不是圆角卡片',
         'border-radius' not in chat.scroll.styleSheet()
         and 'border: none' in chat.scroll.styleSheet())
-    inbox_css = chat.field.parentWidget().styleSheet()
-    chk('输入区没有独立白框，只有顶部一条细线',
-        'border-radius: 0' in inbox_css
-        and 'border-top: 1px solid' in inbox_css
-        and 'border: 1px' not in inbox_css, inbox_css)
-    chk('会话行铺满侧栏宽度（整行直角）',
-        chat._rows[CONV_ALL].width() == chat.side.width(),
+    chk('输入区只有顶部一条细线',
+        'border-radius: 0' in chat.inbox.styleSheet()
+        and 'border-top: 1px solid' in chat.inbox.styleSheet()
+        and 'border: 1px' not in chat.inbox.styleSheet(),
+        chat.inbox.styleSheet())
+    chk('会话行铺满侧栏（左右各 8px 留白，圆角胶囊）',
+        chat._rows[CONV_ALL].width() == chat.side.width() - 16,
         (chat._rows[CONV_ALL].width(), chat.side.width()))
+    chk('会话栏底部有「我是谁」', not chat.me_av.pixmap().isNull())
 
     print('\n--- 微信式输入区 / 工具图标 ---')
     b = chat.send_btn
@@ -142,20 +160,23 @@ def main():
         all(isinstance(v, ToolIcon) for v in chat.icon_btn.values()))
     chk('工具图标不小于 30px', chat.icon_btn['emoji'].width() >= 30)
 
-    inbox = chat.field.parentWidget()
-    emo = chat.icon_btn['emoji'].mapTo(inbox, QPoint(0, 0))
-    fil = chat.icon_btn['file'].mapTo(inbox, QPoint(0, 0))
-    snd = b.mapTo(inbox, QPoint(0, 0))
-    fld = chat.field.mapTo(inbox, QPoint(0, 0))
-    chk('表情和文件都在同一个输入区里',
-        inbox is chat.icon_btn['file'].parentWidget() and inbox is b.parentWidget())
+    card = chat.composer_card
+    emo = chat.icon_btn['emoji'].mapTo(card, QPoint(0, 0))
+    fil = chat.icon_btn['file'].mapTo(card, QPoint(0, 0))
+    snd = b.mapTo(card, QPoint(0, 0))
+    fld = chat.field.mapTo(card, QPoint(0, 0))
+    chk('输入区是一张浅灰圆角卡片',
+        'border-radius: 14px' in card.styleSheet()
+        and CARD_BG in card.styleSheet(), card.styleSheet())
+    chk('表情和文件都在同一张输入卡片里',
+        card is chat.icon_btn['file'].parentWidget() and card is b.parentWidget())
     chk('两颗图标在左下角',
-        emo.y() > inbox.height() * 0.5 and fil.y() > inbox.height() * 0.5
-        and emo.x() < inbox.width() * 0.3 and fil.x() < inbox.width() * 0.3,
-        (emo, fil, inbox.size()))
+        emo.y() > card.height() * 0.5 and fil.y() > card.height() * 0.5
+        and emo.x() < card.width() * 0.3 and fil.x() < card.width() * 0.3,
+        (emo, fil, card.size()))
     chk('发送在右下角',
-        snd.y() > inbox.height() * 0.5 and snd.x() > inbox.width() * 0.6,
-        (snd, inbox.size()))
+        snd.y() > card.height() * 0.5 and snd.x() > card.width() * 0.6,
+        (snd, card.size()))
     chk('多行文本框在图标上方', fld.y() < emo.y() and fld.y() >= 0)
 
     sent_media = []
@@ -181,22 +202,52 @@ def main():
     chat.field.dragEnterEvent(drop)
     chat.field.dropEvent(drop)
     qapp.processEvents()
-    chk('拖到输入框的文件走发附件',
-        sent_media == [('img', 'a.png'), ('file', 'b.txt')], sent_media)
+    chk('拖进来的文件先落进输入框（不立刻发）',
+        sent_media == [] and len(chat._attach) == 2
+        and [it['mt'] for it in chat._attach] == ['img', 'file'],
+        (sent_media, chat._attach))
+    chk('附件条显示出来了', chat.attach_host.isVisible()
+        and len(chat._attach_chips) == 2)
     chk('输入框没把文件路径当文字插进去', chat.field.text() == '')
+    chat.field.setText('一起看')
+    chat.send()
+    qapp.processEvents()
+    chk('点发送才真的发出去，文字在前附件在后',
+        sent == ['你好', '第二段', '一起看']
+        and sent_media == [('img', 'a.png'), ('file', 'b.txt')],
+        (sent, sent_media))
+    chk('发完附件条清空', chat._attach == [] and not chat.attach_host.isVisible())
+
+    sent_media[:] = []
+    chat.stage_paths(['a.png', 'b.txt'])
+    chat.send()
+    qapp.processEvents()
+    chk('只发附件也全部照发（没有冷却挡着）',
+        sent_media == [('img', 'a.png'), ('file', 'b.txt')], sent_media)
+
+    chat.stage_paths(['c.txt'])
+    chk('附件可以单独移除',
+        len(chat._attach) == 1 and sent_media[-1] != ('file', 'c.txt'))
+    chat._unstage(chat._attach[0])
+    qapp.processEvents()
+    chk('移除后附件条收起', chat._attach == [] and not chat.attach_host.isVisible())
+
+    chk('文件按钮直接开系统文件框（没有二级菜单）',
+        hasattr(chat, '_pick_files') and not hasattr(chat, '_file_menu'))
 
     bar = chat.act_bar
-    bar_pos = bar.mapTo(chat, QPoint(0, 0))
-    inbox_pos = inbox.mapTo(chat, QPoint(0, 0))
-    chk('快捷按钮浮在输入框正上方',
-        bar_pos.y() + bar.height() <= inbox_pos.y() + 2,
-        (bar_pos.y(), bar.height(), inbox_pos.y()))
+    chk('快捷互动在输入卡片里，输入框上方',
+        bar.parentWidget() is card
+        and bar.mapTo(card, QPoint(0, 0)).y() < fld.y(),
+        (bar.geometry(), fld))
     chk('快捷条没有底层背景色', 'background: transparent' in bar.styleSheet()
         and 'border' not in bar.styleSheet(), bar.styleSheet())
     chk('快捷条没有阴影 / 没有边框卡片', bar.graphicsEffect() is None)
-    chk('快捷条里只有按钮，没有标题标签',
-        not [w for w in bar.findChildren(type(chat.title))
-             if w is not chat.title and w.parentWidget() is bar])
+    chip = chat._chips['wave']
+    chk('快捷互动是紧凑的小药丸',
+        chip.height() == CHIP_H and chip.width() < 60
+        and chip.font().pointSize() <= 8,
+        (chip.size(), chip.font().pointSize()))
 
     print('\n--- 窗口按钮：只关窗，不退程序 ---')
     app = App('127.0.0.1', 1)
@@ -237,24 +288,23 @@ def main():
     qapp.processEvents()
     live._reflow_actions()
     narrow = len(visible_chips(live))
-    chk('窄窗口下摆了若干快捷按钮', narrow > 0, narrow)
-    chk('窄窗口下剩下的收进更多', len(live._more_keys) == 10 - narrow,
-        (narrow, len(live._more_keys)))
-    chk('「更多」按钮可见', live.more_btn.isVisible())
-    live._show_more()
-    qapp.processEvents()
-    chk('「更多」浮层弹出来了', live._more_pop.isVisible())
-    chk('浮层里的按钮数 = 收起来的个数',
-        live._more_grid.count() == len(live._more_keys),
-        (live._more_grid.count(), len(live._more_keys)))
-    live._more_pop.hide()
+    chk('窄窗口下所有互动都摆出来（不再藏进「更多」）',
+        narrow == len(actions.CHAT_ORDER), (narrow, len(actions.CHAT_ORDER)))
+    chk('没有「更多」按钮了', not hasattr(live, 'more_btn'))
+    rows = [r.count() - 1 for r in live._act_rows]
+    chk('窄窗口下分成两行', len([n for n in rows if n > 0]) == 2, rows)
+    chk('两行时工具行变高', live.act_bar.height() == CHIP_H * 2 + 4,
+        live.act_bar.height())
 
     live.resize(1500, 820)
     qapp.processEvents()
     live._reflow_actions()
     wide = len(visible_chips(live))
-    chk('窗口拉宽后快捷按钮变多', wide > narrow, (narrow, wide))
-    chk('拉宽后「更多」收得更少', len(live._more_keys) < 10 - narrow)
+    chk('窗口拉宽后全部摆得下', wide == len(actions.CHAT_ORDER), wide)
+    rows = [r.count() - 1 for r in live._act_rows]
+    chk('宽窗口收成一行', len([n for n in rows if n > 0]) == 1, rows)
+    chk('一行时工具行只有一颗药丸高', live.act_bar.height() == CHIP_H,
+        live.act_bar.height())
 
     live.toggle_max()
     qapp.processEvents()
@@ -267,32 +317,60 @@ def main():
     chk('再点一次还原', not live.isMaximized() and live.max_btn.kind == 'max')
 
     print('\n--- 快捷互动真的发出去 ---')
-    chk('快捷条覆盖全部互动指令', set(live._chips) == set(actions.ORDER))
+    chk('快捷条覆盖除「传个话」以外的全部指令',
+        set(live._chips) == set(actions.CHAT_ORDER), set(live._chips))
+    chk('快捷条里没有「传个话」（人已经在窗口里了）',
+        'say' not in live._chips)
     chk('快捷条接的是 App 的互动执行', live.on_action == app.do_action)
-    chk('快捷条接的是 App 的冷却状态', live.action_state == app.action_state)
     chk('群聊下目标提示正确', '全体群聊' in live.target_lb.text())
     live.switch('p2')
     qapp.processEvents()
     chk('切到单聊后目标提示跟着变', '胡大神' in live.target_lb.text())
     chk('切会话后快捷条刷新目标', live._action_target() == 'p2')
 
-    print('\n--- 冷却状态 ---')
-    state = {'on': False, 'cd': 4}
-    cool = ChatWindow(None, me='p1', on_action=lambda k, t: calls.append((k, t)),
-                      action_state=lambda k, t: ('X', state['on'], state['cd']))
+    print('\n--- 没有冷却：点了就动 ---')
+    calls2 = []
+    nocd = ChatWindow(None, me='p1',
+                      on_action=lambda k, t: calls2.append((k, t)))
     qapp.processEvents()
-    chk('冷却中的 chip 不可点', not cool._chips['wave'].isEnabled())
-    chk('剩余秒数画成角标', cool._chips['wave']._cd == 4)
-    chk('角标不算进文字宽度（文字仍是原标签）',
-        cool._chips['wave'].text() == actions.get('wave')['label'])
-    state.update(on=True, cd=0)
-    cool.refresh_actions()
-    chk('冷却结束恢复可点', cool._chips['wave'].isEnabled())
-    cool._on_action('heart')
-    chk('私聊/群聊目标透传正确', calls[-1] == ('heart', None), calls[-1:])
-    cool.switch('p3')
-    cool._on_action('pat')
-    chk('切到单聊后目标变成对方', calls[-1] == ('pat', 'p3'), calls[-1:])
+    chk('快捷键一律可点（没有禁用态）',
+        all(b.isEnabled() for b in nocd._chips.values()))
+    chk('chip 上没有倒计时角标', not hasattr(nocd._chips['wave'], '_cd'))
+    chk('chip 不再有 set_cd 接口', not hasattr(nocd._chips['wave'], 'set_cd'))
+    nocd._on_action('heart')
+    chk('私聊/群聊目标透传正确', calls2[-1] == ('heart', None), calls2[-1:])
+    nocd.switch('p3')
+    nocd._on_action('pat')
+    chk('切到单聊后目标变成对方', calls2[-1] == ('pat', 'p3'), calls2[-1:])
+    chk('点互动不在提示行上写「已发送」', nocd.note.text() == '', nocd.note.text())
+    nocd._on_action('sleep')
+    nocd._on_action('jump')
+    chk('连点两次都真的下发（不排队也不拦）',
+        [k for k, _t in calls2[-2:]] == ['sleep', 'jump'], calls2[-2:])
+
+    print('\n--- 左下角头像：换身份 / 退出 ---')
+    seen = []
+    me_win = ChatWindow(None, me='p1',
+                        on_leave=lambda: seen.append('leave'),
+                        on_quit=lambda: seen.append('quit'))
+    qapp.processEvents()
+    chk('「我是谁」那一条点得动', isinstance(me_win.me_bar, MeBar))
+    chk('鼠标样式是手指（看得出能点）',
+        me_win.me_bar.cursor().shape() == Qt.PointingHandCursor)
+    press = QMouseEvent(QEvent.MouseButtonPress, QPointF(6, 6),
+                        Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+    me_win.me_bar.mousePressEvent(press)
+    chk('点一下弹出菜单，里面是换身份 + 退出',
+        me_win._me_menu is not None and me_win._me_menu.isVisible(),
+        me_win._me_menu)
+    chk('菜单第一项写清当前身份',
+        me_win._me_menu.actions()[0].text().startswith('猥琐'),
+        me_win._me_menu.actions()[0].text())
+    me_win._me_menu.hide()
+    me_win._on_leave()
+    chk('换身份接到 App.do_leave', seen == ['leave'], seen)
+    me_win._on_quit()
+    chk('退出接到 App.quit', seen == ['leave', 'quit'], seen)
 
     print('\n--- 表情放大与悬停预览 ---')
     pop = chat._picker_pop()
@@ -344,11 +422,134 @@ def main():
     chk('聊天记录里的 emoji 用大字号', lb.font().pointSize() >= 28,
         lb.font().pointSize())
 
-    chk('「更多」浮层常驻引用', chat._more_pop is not None)
+    print('\n--- 长文字换行与选中配色 ---')
+    url = 'https://example.com/' + 'a' * 160
+    bub = BubbleText(url, False)
+    bub.ensurePolished()
+    chk('没有空格的长串也会换行（宽度封顶）',
+        bub.width() <= BUBBLE_MAX
+        and bub.height() > QFontMetrics(bub.font()).height() * 2,
+        (bub.size(), BUBBLE_MAX))
+    bp = bub.palette()
+    chk('气泡选中背景是浅紫',
+        bp.color(QPalette.ColorRole.Highlight).name() == SEL_BG,
+        bp.color(QPalette.ColorRole.Highlight).name())
+    chk('气泡选中文字保持深色',
+        bp.color(QPalette.ColorRole.HighlightedText).name() == SEL_FG,
+        bp.color(QPalette.ColorRole.HighlightedText).name())
+
+    # 一句二十来字的中文，放宽后应该还是一行（旧版到 10 个字就折了）
+    roomy = BubbleText('稳，AI在开发代码呢，你先忽略我发的话', True)
+    one_line = QFontMetrics(roomy.font()).height() + 20
+    chk('二十来字的中文一句话放得进一行', roomy.height() <= one_line,
+        (roomy.size(), one_line))
+    chk('气泡上限已经从 320 放宽', BUBBLE_MAX >= 400, BUBBLE_MAX)
+    roomy.set_max_width(220)
+    chk('窗口变窄时气泡跟着收（不横着戳出去）',
+        roomy.width() <= 220 and roomy.height() > one_line,
+        (roomy.size(), one_line))
+    fp = chat.field.palette()
+    chk('输入框选中文字也不会被染成白色',
+        fp.color(QPalette.ColorRole.HighlightedText).name() == SEL_FG,
+        fp.color(QPalette.ColorRole.HighlightedText).name())
+
+    print('\n--- 图片预览：原图 + 置顶 ---')
+    src = Image.new('RGB', (1200, 800), (30, 40, 60))
+    b64img, _w, _h = media.encode_pil(src)
+    full_im = media.full(b64img)
+    chk('点开的图按原始尺寸解码（不是 240 的缩略图）',
+        full_im is not None and full_im.width == 1200,
+        full_im.size if full_im else None)
+    chk('气泡里的缩略图仍然只缩到 240',
+        media.thumb(b64img, limit=240).width == 240,
+        media.thumb(b64img, limit=240).size)
+    viewer = ImageViewer()
+    chk('预览窗自带置顶（不会被聊天窗/人物压住）',
+        bool(viewer.windowFlags() & Qt.WindowStaysOnTopHint))
+    viewer._pix = QPixmap(400, 300)
+    viewer._base, viewer._zoom = 1.0, 1.0
+    viewer.resize(400, 300)
+    wheel = QWheelEvent(QPointF(200, 150), QPointF(200, 150), QPoint(0, 0),
+                        QPoint(0, 120), Qt.NoButton, Qt.NoModifier,
+                        Qt.ScrollPhase.ScrollUpdate, False)
+    viewer.wheelEvent(wheel)
+    chk('滚轮能放大预览', viewer._zoom > 1.0, viewer._zoom)
+    for _ in range(30):
+        viewer.wheelEvent(wheel)
+    chk('放大有上限（不会糊成马赛克）',
+        viewer._zoom <= ImageViewer.MAX_ZOOM, viewer._zoom)
+    viewer.hide()
+
+    print('\n--- 表情面板翻页后的排版 ---')
+    p2 = chat._picker_pop()
+    qapp.processEvents()
+    emoji_h = p2.height()
+    emoji_box = chat._pick_box.size()
+    chat._fill_page('mine')
+    qapp.processEvents()
+    mine_box = chat._pick_box.size()
+    first = chat._pick_grid.itemAt(0).widget()
+    chk('「我的」页格子区跟着缩到一行', mine_box.height() == CELL,
+        (emoji_box, mine_box))
+    chk('「我的」页第一格从左上角开始（不贴着底边）',
+        first.geometry().topLeft() == QPoint(0, 0), first.geometry())
+    chk('「我的」页弹层跟着收矮', p2.height() < emoji_h,
+        (p2.height(), emoji_h))
+    chat._fill_page('others')
+    qapp.processEvents()
+    chk('「他人」页恢复四行', chat._pick_box.height() == CELL * 4 + 6,
+        chat._pick_box.size())
+    chat._fill_page('emoji')
+    qapp.processEvents()
+    chk('翻回表情页尺寸复原',
+        chat._pick_box.size() == emoji_box and p2.height() == emoji_h,
+        (chat._pick_box.size(), p2.height(), emoji_box, emoji_h))
+    chat._close_pop()
+
+    chk('点图之前没有预览窗（用的时候才建）', chat._viewer is None)
     chk('预览浮层常驻引用', chat._preview is not None)
 
+    print('\n--- 消息区贴底滚动 ---')
+    tall_log = {CONV_ALL: [{'kind': 'msg', 'mt': 'text', 'who': 'me',
+                            'text': '第 %d 条消息' % i,
+                            'ts': time.time() + i} for i in range(30)]}
+    tall = ChatWindow(None, me='p1', log=tall_log, is_online=lambda r: True)
+    tall.resize(720, 480)
+    tall.lift()
+    tall.render()
+    QTest.qWait(150)
+    sb = tall.scroll.verticalScrollBar()
+    chk('打开就停在最新一条', sb.value() == sb.maximum() and sb.maximum() > 0,
+        (sb.value(), sb.maximum()))
+
+    tall.field.setText('刚发出去的一条')
+    tall.send()
+    tall.log[CONV_ALL].append({'kind': 'msg', 'mt': 'text', 'who': 'me',
+                               'text': '刚发出去的一条', 'ts': time.time()})
+    tall.on_new(CONV_ALL)
+    QTest.qWait(150)
+    chk('发完自己那条仍然贴底（不会只露半截）',
+        sb.value() == sb.maximum(), (sb.value(), sb.maximum()))
+    tall.hide()
+
+    print('\n--- 桌宠大小三档 ---')
+    sizes = []
+    szwin = ChatWindow(None, me='p1', on_pet_size=sizes.append,
+                       pet_size='large')
+    szwin._show_me_menu()
+    sub = szwin._me_menu.actions()[2].menu()
+    labels = [a.text() for a in sub.actions()]
+    chk('头像菜单里能改桌宠大小', labels == ['小', '默认', '大'], labels)
+    chk('当前档位带勾',
+        [a.text() for a in sub.actions() if a.isChecked()] == ['大'])
+    sub.actions()[0].trigger()
+    chk('选「小」回调到 App', sizes == ['small'], sizes)
+    szwin._me_menu.close()
+    szwin.hide()
+
     chat.hide()
-    cool.hide()
+    nocd.hide()
+    me_win.hide()
     pop.hide()
     live.hide()
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))

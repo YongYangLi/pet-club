@@ -9,6 +9,7 @@
   idle  站在地面上，只跑动作计时
   fall  受重力下落 —— 出场是从屏幕上方掉下来，松手是从手里掉下来，同一套
   hold  被鼠标抓着：完全跟手，不受重力；松手回到 fall
+  rise  起飞：一路升到屏幕最上方，到顶转成 fall（就是「拎起来再松手」）
 """
 
 
@@ -20,6 +21,7 @@ class Pet:
     """
 
     GRAVITY = 2400.0        # 像素/秒²，从屏幕顶落到地面大约 1 秒，够快但不突兀
+    RISE_SPEED = 2400.0     # 起飞上升速度，和重力同量级：上去半秒、下来半秒
     HOLD_POSE = 'drag'      # 被抓着时用素材里的 drag.png（提溜着的样子）
 
     def __init__(self, sp, win, x, ground_y, drop=True):
@@ -35,10 +37,11 @@ class Pet:
         self.landed = not drop
         self.alive = True
         self.y = (-win.win_h - 40.0) if drop else float(ground_y)   # 从屏幕上方看不见的地方开始
+        self.top = -win.win_h - 40.0    # 起飞升到的最高处（整个身子刚好出屏）
 
     def act(self, pose, dur):
-        """做一个指定动作，dur 秒后自动回 idle。下落和被抓着时不接动作。"""
-        if self.phase in ('fall', 'hold'):
+        """做一个指定动作，dur 秒后自动回 idle。下落、被抓着、起飞时都不接动作。"""
+        if self.phase in ('fall', 'hold', 'rise'):
             return
         self.pose = pose
         self.timer = dur
@@ -74,9 +77,31 @@ class Pet:
         self.pose = 'fall'
         self.vy = max(0.0, float(vy))
 
+    def take_off(self):
+        """起飞：从当前位置升到屏幕最上方，到顶后原地掉落。
+
+        和「拎起来松手」是同一条路：上去只是匀速改 y，到顶把 phase 交给
+        fall，后面完全由重力接管 —— 落地那一下和拖动扔下来一模一样。
+        已经在天上（正下落/被拎着）也接指令，重新从当前位置起飞。
+        """
+        if self.y <= self.top + 1:
+            self.phase = 'fall'         # 已经在顶上了，没什么可升的，直接掉
+            self.pose = 'fall'
+            self.vy = 0.0
+            return
+        self.phase = 'rise'
+        self.pose = 'fall'              # 空中姿势
+        self.vy = 0.0
+        self.timer = 0.0
+        self.landed = False
+
     @property
     def held(self):
         return self.phase == 'hold'
+
+    @property
+    def airborne(self):
+        return self.phase in ('fall', 'rise')
 
     def update(self, dt):
         if self.phase == 'fall':
@@ -88,6 +113,14 @@ class Pet:
                 self.phase = 'idle'
                 self.pose = 'idle'
                 self.landed = True
+        elif self.phase == 'rise':
+            self.y -= self.RISE_SPEED * dt
+            if self.y <= self.top:
+                # 到顶即松手：速度归零，剩下的交给重力（和 release 同一条路）
+                self.y = self.top
+                self.phase = 'fall'
+                self.pose = 'fall'
+                self.vy = 0.0
         elif self.phase == 'hold':
             pass                    # 位置由拖动直接写入，这里不加速度
         elif self.timer > 0:

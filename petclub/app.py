@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-"""主程序：网络、动作、冷却、聊天记录、更新、认领流程 + Qt 窗口的生命周期。
+"""主程序：网络、动作、聊天记录、更新、认领流程 + Qt 窗口的生命周期。
 
 线程模型：网络在子线程，主线程的 QTimer 每 33ms 从队列里拉一次消息。
 Qt 的槽都在主线程执行，跨线程只走 `queue.Queue`，不碰控件。
 """
 import base64
-import math
 import os
 import queue
 import sys
@@ -13,14 +12,14 @@ import time
 
 from PIL import Image
 from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from . import config, media, update, windows
-from .actions import (ORDER, get, is_local, media_line, reply_line, say_line,
+from .actions import (ORDER, get, media_line, reply_line, say_line,
                       tip_text)
 from .actors import Pet
 from .config import ROLES, ROLE_NAME, assets_dir, files_dir
-from .cooldown import Cooldown
 from .host import foreground, owner_at, tray_icons, work_area
 from .net import Net
 from .chat import CONV_ALL, ChatWindow
@@ -32,10 +31,6 @@ from .sprites import load_all
 BUBBLE_SEC = 2.6
 GROUND_MARGIN = 34
 DRAG_SLOP = 4
-
-CD_SELF = 0.8
-CD_PERSON = 2.0
-CD_ALL = 5.0
 
 CHAT_HISTORY = 50
 TRAY_BLINK_SEC = 0.7
@@ -58,11 +53,21 @@ class App:
         host, port = endpoint(host, port)
         self.qapp = QApplication.instance() or QApplication(sys.argv)
         self.qapp.setQuitOnLastWindowClosed(False)   # 关掉所有窗口也要留在托盘
+        # 任务栏 / 窗口图标：不设的话源码模式下是 Python 的图标，
+        # 认领窗和聊天窗各显示各的，看着像两个程序。
+        ico = os.path.join(assets_dir(), 'app.ico')
+        if os.path.exists(ico):
+            self.qapp.setWindowIcon(QIcon(ico))
         # 全局样式：按钮、输入框、滚动条、弹出菜单。挂在 QApplication 上，
         # 所以弹出去的菜单（不是任何窗口的后代）也一样吃得到。
         self.qapp.setStyleSheet(UI_QSS)
 
         self.sprites = load_all(assets_dir(), ROLES)
+        # 本机偏好：目前只有「桌宠大小」一项。文件坏了 / 没写过都回到默认。
+        self._prefs = config.load_prefs()
+        _size = self._prefs.get('pet_size')
+        config.PET_SIZE = (_size if _size in config.PET_SIZE_FACTOR
+                           else 'default')
         left, top, right, bottom = work_area()
         self.sw = right - left
         self.sh = bottom - top
@@ -92,7 +97,6 @@ class App:
         self._top_checked = 0.0
         self._top_on = True
 
-        self.cd = Cooldown()
         self._drag = None
         self.offline = False
 
@@ -103,7 +107,6 @@ class App:
         self._menu = None
         self._menu_prev = None      # 上一个菜单，多留一拍再让 GC 回收
         self._menu_open = False
-        self._menu_probes = []
         self._claim_prev = None     # 刚 exec() 完的认领窗，同理
         self._win_trash = []        # 退出前收留所有窗口，留到进程结束
         self.chat = None
@@ -128,9 +131,6 @@ class App:
         self._timer = QTimer(self.qapp)
         self._timer.setInterval(max(16, int(config.POLL_MS)))
         self._timer.timeout.connect(self.tick)
-        self._menu_timer = QTimer(self.qapp)
-        self._menu_timer.setInterval(200)
-        self._menu_timer.timeout.connect(self._refresh_menu)
 
     # ---------------- 启动 ----------------
 
@@ -141,7 +141,6 @@ class App:
             QTimer.singleShot(int(config.UPDATE_START_DELAY * 1000),
                               self.check_update)
         self._timer.start()
-        self._menu_timer.start()
         return self.qapp.exec()
 
     def connect(self):
@@ -296,11 +295,30 @@ class App:
         elif self.me:
             self.say_role(self.me['role'], msg)
 
+    @staticmethod
+    def _what(spec):
+        """这条指令要让角色「做什么」：起飞的 launch，其余是姿势名。"""
+        return 'launch' if spec.get('launch') else spec.get('pose')
+
+    def _play(self, pet, what, dur=None):
+        """让一只角色动一下。
+
+        `what` 一般是姿势名（wave/drink/jump…），直接丢给 Pet.act；
+         'launch' 是起飞 —— 它不是姿势，是把角色从当前位置升到最高处再
+        掉下来，走 Pet.take_off 的物理，落地手感和拖动松手完全一样。
+        """
+        if pet is None:
+            return
+        if what == 'launch':
+            pet.take_off()
+        elif what and dur:
+            pet.act(what, dur)
+
     def on_event(self, m):
         kind = m.get('kind')
         spec = get(kind)
         actor = m.get('from')
-        if spec is None or is_local(kind) or actor not in self.pets:
+        if spec is None or actor not in self.pets:
             return
         target = m.get('to') if isinstance(m.get('to'), str) else None
         key = CONV_ALL if not target else actor
@@ -308,7 +326,7 @@ class App:
         mt = m.get('mt') if isinstance(m.get('mt'), str) else 'text'
         img = m.get('img') if isinstance(m.get('img'), str) else ''
 
-        self.pets[actor].act(spec['pose'], spec['dur'])
+        self._play(self.pets[actor], self._what(spec), spec.get('dur'))
         if kind == 'say':
             self.say_role(actor, (text if mt == 'text' else '')
                           or media_line(mt, actor))
@@ -319,11 +337,21 @@ class App:
 
         me = self.me['role'] if self.me else None
         mirror = spec.get('mirror')
-        if mirror and me and me != actor and me in self.pets:
-            self.pets[me].act(mirror, spec['dur'])
-            reply = reply_line(kind, me)
-            if reply:
-                self.say_role(me, reply)
+        if mirror and me and me != actor:
+            # 对全员：桌上所有别人都跟着做（包括我自己），每个客户端演的是
+            # 同一件事 —— 不管看哪块屏幕，都是「一屋子人一起做」。
+            # 指定某个人：只有被点到的那位跟着做，别人站着。
+            if target:
+                peers = [me] if target == me else []
+            else:
+                peers = [r for r in self.pets if r != actor]
+            for r in peers:
+                if r in self.pets:
+                    self._play(self.pets[r], mirror, spec.get('dur'))
+            if me in peers:
+                reply = reply_line(kind, me)
+                if reply:
+                    self.say_role(me, reply)
 
     # ---------------- 认领 ----------------
 
@@ -468,15 +496,22 @@ class App:
         return x, y
 
     def on_pet_click(self):
+        """点自己那只：睡着就戳醒，否则摸一下头。
+
+        这一下是本机的悄悄话，不发 event —— 菜单里的「摸摸头」才是会传给
+        别人的指令。不然手滑点一下自己，五个人的屏幕都得跟着跳。
+        """
         role = self.me['role'] if self.me else None
         pet = self.pets.get(role) if role else None
         if pet is None or pet.held:
             return
         if pet.pose == 'sleep':
             pet.act('jump', 1.0)
-            self.say_role(role, say_line('wake', role, scope='l'))
+            self.say_role(role, say_line('wake', role))
             return
-        self.do_action('pet')
+        spec = get('pet')
+        pet.act(spec['pose'], spec['dur'])
+        self.say_role(role, say_line('pet', role))
 
     def on_pet_menu(self, win, pos):
         role = self._role_of(win)
@@ -492,7 +527,6 @@ class App:
         # 旧菜单多留一拍：覆盖 self._menu 本身就可能发生在上一次点击的
         # 派发栈里，直接丢引用会让 Qt 用着已经被 shiboken 删掉的对象。
         self._menu_prev, self._menu = self._menu, menu
-        self._menu_probes = getattr(menu, '_probes', [])
         menu.aboutToHide.connect(self._menu_closed)
         menu.popup(pos if isinstance(pos, QPoint) else QPoint(*pos))
         self._menu_open = True
@@ -502,7 +536,6 @@ class App:
         if m is not None and self._menu_open:
             m.close()               # 触发 aboutToHide → _menu_closed
         self._menu_open = False
-        self._menu_probes = []
         # 不清 self._menu、也不 deleteLater：菜单可能正在派发 triggered。
 
     def _menu_closed(self):
@@ -510,7 +543,6 @@ class App:
         # self._menu 清成 None，QMenu 的 Python 引用就归零，C++ 对象会在
         # Qt 自己的点击栈中间被删掉 → 堆损坏。只记「关了」，不清对象。
         self._menu_open = False
-        self._menu_probes = []
 
     def _swallow_menu_click(self):
         if not self._menu_open or self._menu is None:
@@ -518,65 +550,24 @@ class App:
         self._close_menu()
         return True
 
-    def _refresh_menu(self):
-        """每 200ms 刷一次冷却：托盘菜单改文案，聊天窗的快捷条改角标。"""
-        now = time.monotonic()
-        if self.chat is not None and self.chat.alive():
-            self.chat.refresh_actions()
-        if self._menu is None or not self._menu_probes:
-            return
-        for act, key, to, label in self._menu_probes:
-            left = self.cd.left(self._cd_key(key, to), now)
-            act.setText(self._cd_label(label, left))
-            act.setEnabled(left <= 0)
-
-    # ---- 冷却 ----
-
-    def _cd_key(self, key, to):
-        if is_local(key):
-            return 'local:' + key
-        return 'all' if to is None else '%s>%s' % (to, key)
-
-    def _cd_span(self, key, to):
-        if is_local(key):
-            return CD_SELF
-        return CD_ALL if to is None else CD_PERSON
-
-    @staticmethod
-    def _cd_label(label, left):
-        return label if left <= 0 else '%s（%d 秒）' % (label, math.ceil(left))
-
     # ---- 菜单构建 ----
 
     def _fill_actions(self, menu, to):
-        probes = []
         for key in ORDER:
             spec = get(key)
-            ckey = self._cd_key(key, to)
-            left = self.cd.left(ckey, time.monotonic())
-            act = menu.addAction(self._cd_label(spec['label'], left))
-            act.setEnabled(left <= 0)
+            act = menu.addAction(spec['label'])
+            act.setToolTip(spec.get('hint', ''))
             act.triggered.connect(lambda _=False, k=key, t=to: self.do_action(k, t))
-            probes.append((act, key, to, spec['label']))
-        menu._probes = probes
 
     def build_self_menu(self):
-        players = self.players or {}
-        online = sum(1 for v in players.values() if v)
         me_role = self.me['role'] if self.me else None
         m = QMenu()
         a = m.addAction('%s（我）→ 全员' % ROLE_NAME.get(me_role, ''))
         a.setEnabled(False)
         m.addSeparator()
         self._fill_actions(m, None)
-        m.addSeparator()
-        a = m.addAction('服务器成员 · %d/%d 在线' % (online, len(ROLES)))
-        a.setEnabled(False)
-        for r in ROLES:
-            tag = '（我）' if r == me_role else ('在线' if players.get(r) else '空闲')
-            act = m.addAction('%s · %s' % (ROLE_NAME[r], tag))
-            act.setEnabled(False)
         if self.offline:
+            m.addSeparator()
             act = m.addAction('连不上服务器 · 正在重试')
             act.setEnabled(False)
         m.addSeparator()
@@ -592,42 +583,44 @@ class App:
         self._fill_actions(m, role)
         return m
 
-    def action_state(self, key, to):
-        """给聊天窗的快捷互动条：文案固定，只报「能不能点」和还剩几秒。
-
-        倒计时画在按钮角标上、不写进文字，否则 chip 宽度每秒都在变，
-        整条会跟着抖，「更多」里收几个也得反复重算。
-        """
-        left = self.cd.left(self._cd_key(key, to), time.monotonic())
-        return get(key)['label'], left <= 0, int(math.ceil(left)) if left > 0 else 0
-
     # ---- 执行 ----
 
     def do_action(self, key, to=None):
+        """下一条指令：我做一个动作，同时把这条 event 发出去。
+
+        没有冷却，也不排队 —— 连点就是连点，后一个动作直接顶掉前一个
+        （Pet.act 只改姿势和一个计时器，不存在两个动作交错）。
+
+        `to` 为 None 表示对全员：每个人屏幕上我做这个动作，他自己跟着做
+        mirror；指定某个人时只有他跟着做。两边屏幕看到的是**同一件事**，
+        所以 mirror 在我这儿也要演一遍 —— 不然我这边只有自己在动，
+        看起来像「发没发出去」都不知道。
+        """
         spec = get(key)
         me = self.me['role'] if self.me else None
         if spec is None or me is None:
             return
-        if spec['scope'] == 'local':
-            return self._do_local(key, spec, to or me)
         if key == 'say':
             return self.open_chat(to)
 
-        role = me
-        pet = self.pets.get(role)
+        pet = self.pets.get(me)
         if pet is None:
             return
-        now = time.monotonic()
-        ckey = self._cd_key(key, to)
-        if not self.cd.ready(ckey, now):
-            return
-        self.cd.mark(ckey, now, self._cd_span(key, to))
         if to:
             self.net.send(t='event', kind=key, text='', to=to)
         else:
             self.net.send(t='event', kind=key, text='')
-        pet.act(spec['pose'], spec['dur'])
-        self.say_role(role, say_line(key, role))
+        self._play(pet, self._what(spec), spec.get('dur'))
+        # 对方那边他自己会做这个动作。我这边也得看得见 —— 否则
+        # 「拍一下他会跳」只有他自己知道，发起的人反而什么都没看到。
+        # 对全员时收信的是所有人，所以这边所有别人的角色都跟着做。
+        mirror = spec.get('mirror')
+        if mirror:
+            peers = [to] if to else [r for r in self.pets if r != me]
+            for r in peers:
+                if r in self.pets:
+                    self._play(self.pets[r], mirror, spec.get('dur'))
+        self.say_role(me, say_line(key, me))
         self._log_tip(key, '你', self._conv_key(to),
                       target=ROLE_NAME.get(to, to) if to else None)
 
@@ -649,7 +642,10 @@ class App:
                                    on_media=self.send_media,
                                    unread=self.unread,
                                    on_action=self.do_action,
-                                   action_state=self.action_state)
+                                   on_leave=self.do_leave,
+                                   on_quit=self.quit,
+                                   on_pet_size=self.set_pet_size,
+                                   pet_size=config.PET_SIZE)
             self.chat.switch(key)
             self.chat.show()
         else:
@@ -684,8 +680,8 @@ class App:
         self._log_msg('me', text, key)
         return ''
 
-    def send_media(self, mt, payload, free=False):
-        ok, why = self._guard_say(free=free)
+    def send_media(self, mt, payload):
+        ok, why = self._guard_say()
         if not ok:
             return why
         key = self.chat.key
@@ -730,7 +726,8 @@ class App:
         if line:
             self.say_role(me, line)
 
-    def _guard_say(self, free=False):
+    def _guard_say(self):
+        """能不能说话：得认领了身份、连着服务器、而且会话那头真的在线。"""
         me = self.me['role'] if self.me else None
         if me is None or self.chat is None:
             return False, ''
@@ -740,14 +737,6 @@ class App:
             return False, self.offline_note()
         if to and not self.players.get(to):
             return False, '「%s」不在线，这句发不出去' % ROLE_NAME.get(to, to)
-        if free:
-            return True, ''
-        now = time.monotonic()
-        ckey = self._cd_key('say', to)
-        left = self.cd.left(ckey, now)
-        if left > 0:
-            return False, '还要等 %d 秒' % int(math.ceil(left))
-        self.cd.mark(ckey, now, self._cd_span('say', to))
         return True, ''
 
     def _emit_say(self, to, mt='text', text='', img='', name='', size=0):
@@ -860,20 +849,6 @@ class App:
         except (OSError, ValueError):
             return ''
         return path
-
-    def _do_local(self, key, spec, role):
-        pet = self.pets.get(role)
-        if pet is None:
-            return
-        now = time.monotonic()
-        ckey = 'local:' + key
-        if not self.cd.ready(ckey, now):
-            return
-        self.cd.mark(ckey, now, CD_SELF)
-        pet.act(spec['pose'], spec['dur'])
-        text = say_line(key, role, scope='l')
-        if text:
-            self.say_role(role, text)
 
     # ---------------- 更新 ----------------
 
@@ -1007,17 +982,21 @@ class App:
         key = self._latest_unread() or CONV_ALL
         self.open_chat(None if key == CONV_ALL else key)
 
-    def tray_right(self):
-        if self._closing:
-            return
-        self._close_menu()
+    def tray_menu(self):
+        """托盘右键菜单。
+
+        只放「能点的东西」：一行说明文字在 QMenu 里会按最长那行把整个菜单
+        撑宽，还没法折行 —— 所以「始终置顶」的勾选状态交给 QAction 自己的
+        勾，解释文案进 tooltip；版本号在托盘悬停提示里，不占菜单空间。
+        """
         m = QMenu()
-        a = m.addAction('pet-club %s · 左键打开聊天' % config.version())
-        a.setEnabled(False)
+        m.addAction('打开聊天').triggered.connect(self.tray_left)
         m.addSeparator()
-        m.addAction(self.layer_label()).triggered.connect(self.layer_toggle)
-        a = m.addAction(self.layer_hint())
-        a.setEnabled(False)
+        act = m.addAction('始终置顶')
+        act.setCheckable(True)
+        act.setChecked(self._top_on)
+        act.setToolTip(self.layer_hint())
+        act.triggered.connect(self.layer_toggle)
         m.addSeparator()
         act = m.addAction(self.update_label())
         act.setEnabled(update.enabled())
@@ -1029,7 +1008,13 @@ class App:
             m.addAction('换一个身份').triggered.connect(self.do_leave)
         m.addSeparator()
         m.addAction('退出').triggered.connect(self.quit)
-        self._popup(m, QPoint(*self._cursor()))
+        return m
+
+    def tray_right(self):
+        if self._closing:
+            return
+        self._close_menu()
+        self._popup(self.tray_menu(), QPoint(*self._cursor()))
 
     @staticmethod
     def _cursor():
@@ -1039,18 +1024,20 @@ class App:
 
     # ---- 图层 ----
 
-    def layer_label(self):
-        return '✓ 始终置顶' if self._top_on else '　 始终置顶'
-
     def layer_hint(self):
         if self._top_on:
-            return ('当前：角色压在所有普通窗口上方。'
-                    '点击取消勾选后，其他窗口会挡住角色。')
-        return ('当前：和普通窗口同级，会被其他窗口挡住。'
-                '点击勾选后，角色始终显示在最上层。')
+            return '角色压在普通窗口上方；取消勾选后，其他窗口会挡住角色。'
+        return '和普通窗口同级，会被其他窗口挡住；勾选后角色始终在最上层。'
 
-    def layer_toggle(self):
-        on = not self._top_on
+    def layer_toggle(self, on=None):
+        """切换（或按 on 设定）是否始终置顶，返回切换后的状态。
+
+        菜单里那颗是可勾选 QAction，triggered 会把勾好的状态传进来；
+        代码里直接调 layer_toggle() 就是「反过来」。
+        """
+        on = (not self._top_on) if on is None else bool(on)
+        if on == self._top_on:
+            return on
         self._top_on = on
         for pet in self.pets.values():
             pet.win.apply_top(on)
@@ -1064,12 +1051,40 @@ class App:
     def do_leave(self):
         if self.me:
             self.net.send(t='leave')
+        # 换了身份，聊天窗里的头像、发送目标、历史都不再是这个人的了 ——
+        # 面板直接收掉。延后一拍再关：这一下可能是从面板自己的菜单点进来的，
+        # 不能在菜单派发 triggered 的栈上把窗户拆了。
+        if self.chat is not None:
+            QTimer.singleShot(0, self._close_chat)
         self.me = None
         self._pending_role = None
         self._pending_sent = False
         self._clear_pets()
         QTimer.singleShot(
             1200, lambda: self._claim_soon('已释放身份，重新认领一个吧'))
+
+    def set_pet_size(self, level):
+        """桌宠大小三档：小 / 默认 / 大。
+
+        窗口尺寸是在 PetWindow 初始化时算死的（位图设备比、蒙版、命中区都
+        跟着走），所以改档位就重建角色 —— 它们会重新落一次，看得见发生了什么。
+        位置按身份重新等分，不保留刚才拖到的位置。
+        """
+        if level not in config.PET_SIZE_FACTOR or level == config.PET_SIZE:
+            return
+        config.PET_SIZE = level
+        self._prefs['pet_size'] = level
+        config.save_prefs(self._prefs)
+        roles = [r for r in ROLES if r in self.pets]
+        self._clear_pets()
+        for r in roles:
+            self._spawn(r)
+        if self.chat is not None:
+            self.chat.pet_size = level
+
+    def _close_chat(self):
+        if self.chat is not None:
+            self.chat.close()
 
     def set_server(self, host, port):
         self.net.stop()
@@ -1085,7 +1100,6 @@ class App:
         self.net = Net(host, port)
         self.net.start()
         self._last_hb = 0.0
-        self.cd.reset()
         self._set_offline(False)
 
     # ---------------- 状态 ----------------
@@ -1132,7 +1146,6 @@ class App:
             self.chat.hide()
             self._chat_trash.append(self.chat)
         self._timer.stop()
-        self._menu_timer.stop()
         try:
             self.net.send(t='leave')
         except Exception:

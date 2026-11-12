@@ -92,20 +92,23 @@ def main():
 
     # 多聊几句再截一张：滚到底那版用来看气泡、时间分隔、系统提示
     for i in range(6):
-        app.cd.reset()
-        app.chat_log[CONV_ALL].append({
+            app.chat_log[CONV_ALL].append({
             'kind': 'msg', 'who': 'p3', 'text': '第 %d 句：这张图我发你看' % (i + 1),
             'ts': time.time() + i})
     chat.render()
     qapp.processEvents()
     save(chat, 'chat.png', plain=True, before_grab=chat._scroll_end)
 
-    print('快捷互动「更多」')
-    chat._more_pop.adjustSize()
-    chat._more_pop.show()
+    print('快捷互动（窄窗口两行）')
+    chat.resize(720, 560)
     qapp.processEvents()
-    save(chat._more_pop, 'chat_actions.png')
-    chat._more_pop.hide()
+    chat._reflow_actions()
+    qapp.processEvents()
+    save(chat.act_bar, 'chat_actions.png')
+    chat.resize(860, 620)
+    qapp.processEvents()
+    chat._reflow_actions()
+    qapp.processEvents()
 
     print('表情拾取面板')
     pop = chat._picker_pop()

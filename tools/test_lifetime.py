@@ -61,8 +61,8 @@ def main():
         app.qapp.processEvents()
         chk('第 %d 轮关掉后 App 仍攥着 QMenu' % (i + 1),
             app._menu is not None)
-        chk('第 %d 轮不再刷新已关闭菜单' % (i + 1),
-            app._menu_probes == [])
+        chk('第 %d 轮关掉后没有残留的刷新定时器' % (i + 1),
+            not hasattr(app, '_menu_timer') and not hasattr(app, '_menu_probes'))
         last = m
     chk('最后一轮的对象就是当前引用', app._menu is last)
     chk('上一份菜单多留了一拍', app._menu_prev is not None)

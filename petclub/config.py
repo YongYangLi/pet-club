@@ -14,6 +14,7 @@
 不是给用户的入口。
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -44,14 +45,26 @@ POLL_MS = 33               # 主循环节拍（约 30fps）
 #   PET_SCALE = 1.0 一比一，按素材物理像素显示（Qt 版原样）
 #   PET_SCALE = 1.75 固定放大 1.75 倍（手动锁定 175% 那台机器的旧版观感）
 #
+# 界面上不再让人改这个数字，改成三档「小 / 默认 / 大」（见下面 PET_SIZE_*），
+# 相乘在 dpr 上 —— 换一台分辨率不同的机器，档位的观感还是一致的。
+#
 # 只是放大绘制与命中区域，业务坐标（脚底中心、地面、拖动）仍是物理像素，
 # 服务端和旧客户端都不需要改。
 PET_SCALE = 0.0
 
+PET_SIZE_ORDER = ('small', 'default', 'large')
+PET_SIZE_NAME = {'small': '小', 'default': '默认', 'large': '大'}
+PET_SIZE_FACTOR = {'small': 0.78, 'default': 1.0, 'large': 1.3}
+
+# 运行时改这一项（App.set_pet_size + prefs.json 里的 pet_size）
+PET_SIZE = 'default'
+
 
 def pet_scale(dpr):
     """角色相对素材的显示倍数。dpr 用屏幕真实的 devicePixelRatio。"""
-    return float(dpr) if PET_SCALE <= 0 else float(PET_SCALE)
+    if PET_SCALE > 0:
+        return float(PET_SCALE)
+    return float(dpr) * PET_SIZE_FACTOR.get(PET_SIZE, 1.0)
 
 # ---------------- 自动更新 ----------------
 #
@@ -59,7 +72,7 @@ def pet_scale(dpr):
 # （tools/build_app.py 读这里），发版时 tools/make_release.py 再把同一个号写进
 # COS 上的清单。三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
-VERSION = '1.4.0'
+VERSION = '1.4.1'
 
 # latest.json 的公网地址。**留空 = 关掉自动更新**（源码模式、内网都是这个状态）。
 # 形状：https://<桶名>.cos.<地域>.myqcloud.com/<目录>/latest.json
@@ -118,3 +131,40 @@ def files_dir():
         d = os.path.join(tempfile.gettempdir(), 'pet-club-files')
         os.makedirs(d, exist_ok=True)
         return d
+
+
+# ---------------- 本机偏好（prefs.json） ----------------
+#
+# 只存「这台机器上的观感选择」，不存身份、不存服务器地址。
+# 场景很小，一个扁平的 JSON 就够了，坏了就当没有。
+
+PREFS_NAME = 'prefs.json'
+
+
+def prefs_path():
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(host.data_dir(), PREFS_NAME)
+    return os.path.join(app_dir(), 'petclub-data', PREFS_NAME)
+
+
+def load_prefs():
+    try:
+        with open(prefs_path(), encoding='utf-8') as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(data):
+    """写盘失败不抛：偏好丢了顶多回到默认大小，不该影响启动。"""
+    path = prefs_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False

@@ -131,6 +131,65 @@ def main():
     chk('拖动时 follow 仍然跟得上',
         near(b.x(), 700 / dpr - b.width() / 2.0), b.x())
 
+    print('\n--- 三档桌宠大小 ---')
+    config.PET_SCALE = 0.0
+    level0 = config.PET_SIZE
+    config.PET_SIZE = 'small'
+    chk('小档 = dpr × 0.78', near(config.pet_scale(1.0), 0.78, 0.01),
+        config.pet_scale(1.0))
+    config.PET_SIZE = 'default'
+    chk('默认档 = dpr', near(config.pet_scale(1.75), 1.75, 0.01),
+        config.pet_scale(1.75))
+    config.PET_SIZE = 'large'
+    chk('大档 = dpr × 1.3', near(config.pet_scale(1.0), 1.3, 0.01),
+        config.pet_scale(1.0))
+    config.PET_SIZE = level0
+
+    print('\n--- 起飞：升到最高处再掉落 ---')
+    config.PET_SCALE = 0.0
+    w = make(0.0)
+    pet = Pet(sp, w, 640, 900, drop=False)
+    ground = 900.0
+    pet.take_off()
+    chk('起飞进入上升阶段', pet.phase == 'rise' and pet.airborne, pet.phase)
+    chk('起飞时用空中姿势（不是站着）', pet.pose == 'fall', pet.pose)
+
+    # 手动步进到顶：1/60 秒一帧，最多 3 秒
+    top = -w.win_h - 40.0
+    frames = 0
+    while pet.phase == 'rise' and frames < 180:
+        pet.update(1.0 / 60.0)
+        frames += 1
+    chk('会一直升到屏幕最高处', near(pet.y, top) and frames > 0,
+        (pet.y, top, frames))
+    chk('到顶立刻转成下落', pet.phase == 'fall' and near(pet.vy, 0.0),
+        (pet.phase, pet.vy))
+    chk('上升比下落先发生（位置单调上移）', top < ground)
+
+    frames = 0
+    first_vy = None
+    while pet.phase == 'fall' and frames < 600:
+        pet.update(1.0 / 60.0)
+        frames += 1
+        if first_vy is None and pet.phase == 'fall':
+            first_vy = pet.vy
+    chk('掉回地面并恢复站立',
+        pet.phase == 'idle' and near(pet.y, ground) and pet.landed,
+        (pet.phase, pet.y, pet.landed))
+    chk('掉落有加速度（第一帧就有速度，不是匀速飘下来）',
+        first_vy is not None and first_vy > 0, first_vy)
+
+    # 已经在天上时再点起飞：从当前位置重新升
+    pet.y = ground - 120
+    pet.take_off()
+    chk('半空中再起飞：从当前位置往上', pet.phase == 'rise'
+        and near(pet.y, ground - 120), (pet.phase, pet.y))
+
+    # 起飞途中不接姿势动作（否则会被 act 顶掉，看着像没起飞）
+    pet.act('wave', 1.0)
+    chk('起飞途中不接别的动作', pet.pose == 'fall' and pet.phase == 'rise',
+        (pet.pose, pet.phase))
+
     b.hide()
     for w in made:
         w.show('idle', 0, 0)

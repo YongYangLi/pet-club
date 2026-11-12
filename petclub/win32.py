@@ -9,6 +9,7 @@ user32 —— 但**只是查询和小动作**，没有任何渲染、没有消�
   owner_at(x, y)   屏幕这一点上压着谁的窗口，用来判断角色是不是被盖住了
   raise_top(hwnd)  重新插回置顶带最前面
   set_topmost()    改置顶属性（不重建窗口）
+  round_corners()  让系统把无边框窗的四角裁圆（Win11 才有）
 
 非 Windows 一律给安全的退化值：桌面宠物只在 Windows 上有完整实现，
 但这几个函数被 import 时不至于炸。
@@ -59,6 +60,18 @@ if IS_WIN:
     _kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
     _kernel32.GetCurrentProcessId.restype = wintypes.DWORD
     MY_PID = _kernel32.GetCurrentProcessId()
+
+    # 圆角：Win11 的 DWM 会替无边框窗口裁圆角。Win10 上没有这个属性，
+    # 调用返回非 0，窗口就是直角 —— 退化成老样子，不报错。
+    DWMWA_WINDOW_CORNER_PREFERENCE = 33
+    DWMWCP_ROUND = 2
+    try:
+        _dwm = ctypes.WinDLL('dwmapi')
+        _dwm.DwmSetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
+                                               ctypes.c_void_p, wintypes.DWORD]
+        _dwm.DwmSetWindowAttribute.restype = ctypes.HRESULT
+    except OSError:
+        _dwm = None
 
     def work_area():
         """主显示器工作区（排除任务栏），失败则回退全屏。物理像素。"""
@@ -118,6 +131,24 @@ if IS_WIN:
     def visible(hwnd):
         return bool(user32.IsWindowVisible(int(hwnd)))
 
+    def round_corners(hwnd, on=True):
+        """让系统把窗口四角裁圆（Win11）。成功返回 True，Win10 返回 False。
+
+        为什么要系统来做：自己画圆角 = 窗口必须半透明（WA_TranslucentBackground），
+        而半透明窗口在 Windows 上是一条**分层窗口**，任务栏缩略图会渲染成
+        一块残缺的色块。交给 DWM 裁，窗口保持不透明，缩略图才是对的。
+        """
+        if not hwnd or _dwm is None:
+            return False
+        pref = ctypes.c_int(DWMWCP_ROUND if on else 1)   # 1 = DONOTROUND
+        try:
+            _dwm.DwmSetWindowAttribute(wintypes.HWND(int(hwnd)),
+                                       DWMWA_WINDOW_CORNER_PREFERENCE,
+                                       ctypes.byref(pref), ctypes.sizeof(pref))
+            return True
+        except OSError:
+            return False
+
 else:
     def work_area():
         return 0, 0, 1280, 720
@@ -138,4 +169,7 @@ else:
         return False
 
     def visible(hwnd):
+        return False
+
+    def round_corners(hwnd, on=True):
         return False

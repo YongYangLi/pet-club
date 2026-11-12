@@ -26,10 +26,10 @@ from collections import OrderedDict
 from PIL import Image
 
 
-MAX_SIDE = 480              # 发之前缩到这个长边（再大在气泡里也看不出来）
-MAX_BYTES = 300 * 1024      # 图片编码后的上限，和 server.MAX_IMG 对齐
+MAX_SIDE = 1280             # 发之前缩到这个长边：气泡里用不到，点开看的时候要够清楚
+MAX_BYTES = 1200 * 1024     # 图片编码后的上限（base64 后约 1.6MB，服务端 MAX_IMG 2.9MB）
 MAX_FILE = 2 * 1024 * 1024  # 文件原样传，上限 2MB（base64 后约 2.7MB，服务端收得下）
-JPEG_Q = 85
+JPEG_Q = 88
 
 # 屏幕上两种媒体的大小上限（像素）
 IMG_BOX = 200               # 普通图片：白框里的那张，长边不超过 200
@@ -62,7 +62,7 @@ def encode_pil(im, side=MAX_SIDE, png=False):
         raise ValueError('这张图是空的')
 
     data = b''
-    for s in (side, 360, 256, 160):
+    for s in (side, 960, 720, 480, 320, 240, 160):
         cur = _fit(im, s)
         data = _dump(cur, png)
         if len(data) <= MAX_BYTES:
@@ -171,6 +171,53 @@ def thumb(b64='', path='', limit=IMG_BOX):
     _CACHE[key] = im
     if len(_CACHE) > _CACHE_MAX:
         _CACHE.popitem(last=False)
+    return im
+
+
+# 点开看大图时用的「原图」：只按长边兜一个上限，避免一张 4K 截图
+# 在内存里铺成几十兆。缓存也小 —— 大图不值当多留。
+FULL_SIDE = 2560
+_FULL = OrderedDict()
+_FULL_MAX = 4
+
+
+def full(b64='', path='', side=FULL_SIDE):
+    """一条消息里的图 → 接近原始的 PIL 图（长边不超过 side）。
+
+    气泡里的缩略图是 240 宽，拿它放大就是糊的；点开预览必须重新解一次，
+    自己刚发的那张还要优先读本地原文件 —— 本地文件比编码后的副本更清楚。
+    """
+    src = path if (path and os.path.exists(path)) else b64
+    if not src:
+        return None
+    key = (zlib.crc32((src or '').encode('utf-8')), side)
+    hit = _FULL.get(key)
+    if hit is not None:
+        _FULL.move_to_end(key)
+        return hit
+
+    im = None
+    if path and os.path.exists(path):
+        try:
+            im = Image.open(path)
+            im.load()
+            im = im.convert('RGBA')
+        except (OSError, ValueError, SyntaxError):
+            im = None
+    if im is None and b64:
+        im = decode(b64)
+    if im is None:
+        return None
+
+    longest = max(im.width, im.height)
+    if longest > side:
+        k = float(side) / longest
+        im = im.resize((max(1, int(round(im.width * k))),
+                        max(1, int(round(im.height * k)))), Image.LANCZOS)
+
+    _FULL[key] = im
+    if len(_FULL) > _FULL_MAX:
+        _FULL.popitem(last=False)
     return im
 
 

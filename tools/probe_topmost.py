@@ -186,15 +186,31 @@ def main():
 
     print('\n--- 图层开关 ---')
     app._top_on = True
-    chk('菜单文案说「已勾选」', app.layer_label().startswith('✓'),
-        app.layer_label())
-    on = app.layer_toggle()
-    chk('切一次变成不置顶', on is False, on)
+    menu = app.tray_menu()
+    texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+    acts = [a for a in menu.actions() if a.text() == '始终置顶']
+    chk('托盘菜单里有「始终置顶」', len(acts) == 1, texts)
+    top_act = acts[0] if acts else None
+    chk('它是可勾选的，且当前是勾上的',
+        top_act is not None and top_act.isCheckable() and top_act.isChecked(),
+        top_act.isChecked() if top_act else None)
+    chk('解释文案进了 tooltip，不占菜单一行',
+        top_act is not None and '挡住' in top_act.toolTip(),
+        top_act.toolTip() if top_act else None)
+    chk('菜单最多 5 项（不再塞长说明）', len(texts) <= 5, texts)
+    longest = max(texts, key=len)
+    chk('最长一行不超过 30 字（不会把菜单撑宽）', len(longest) <= 30,
+        (len(longest), longest))
+
+    top_act.trigger()
+    chk('点一下变成不置顶', app._top_on is False, app._top_on)
     chk('两只角色都不再置顶', not is_topmost(pet.win) and not is_topmost(other.win),
         (is_topmost(pet.win), is_topmost(other.win)))
     chk('提示文案说明了现在的状态', '挡住' in app.layer_hint(), app.layer_hint())
-    app.layer_toggle()
-    chk('再切回来又是置顶', is_topmost(pet.win) and is_topmost(other.win))
+    top_act.trigger()
+    chk('再点回来又是置顶', app._top_on is True
+        and is_topmost(pet.win) and is_topmost(other.win),
+        (app._top_on, is_topmost(pet.win), is_topmost(other.win)))
 
     print('\n--- 收尾 ---')
     app.quit()

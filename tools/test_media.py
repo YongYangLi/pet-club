@@ -62,8 +62,9 @@ def main():
     np_path = os.path.join(TMP, 'noise.png')
     noise.save(np_path)
     nb, nw, nh = media.encode_image(np_path)
-    check('大噪声图也压到上限以内', len(nb) <= media.MAX_BYTES,
-          '%.0f KB' % (len(nb) / 1024.0))
+    # 上限说的是「编码后的二进制」；nb 是 base64，字符数会大 4/3
+    check('大噪声图也压到上限以内', len(nb) * 3 // 4 <= media.MAX_BYTES,
+          '%.0f KB' % (len(nb) * 3 / 4096.0))
     # 上限真的会逼着它继续缩尺寸：把上限临时调到 20KB，再看输出的长边
     old_cap = media.MAX_BYTES
     media.MAX_BYTES = 20 * 1024

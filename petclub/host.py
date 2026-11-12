@@ -110,6 +110,13 @@ def set_topmost(widget, on):
     return False
 
 
+def round_corners(widget, on=True):
+    """让系统替窗口裁圆角（Windows 11）。拿不到就返回 False，窗口保持直角。"""
+    if IS_WIN:
+        return win32.round_corners(_hwnd(widget), on)
+    return False
+
+
 # ---------------- 资源位置 ----------------
 
 def ui_font():

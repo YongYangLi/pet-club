@@ -8,7 +8,7 @@
 import os
 
 from PySide6.QtCore import QEvent, QPointF, QRect, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import (QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QSizeGrip, QVBoxLayout,
                                QWidget)
@@ -24,6 +24,15 @@ SUB = '#6b7280'
 MUTED = '#9ca3af'
 LINE = '#e5e7eb'
 FIELD = '#f7f8fb'
+
+# 聊天窗的「外框色」：顶部标题带和左侧会话栏共用它，中间没有分隔线，
+# 视觉上是连在一起的一整块。
+CHROME = '#f1f2f6'
+CHROME_LINE = '#e3e5ee'
+CHROME_HOVER = '#e7e9f2'
+CHROME_SEL = '#ffffff'
+CARD_BG = '#f7f8fc'
+CARD_LINE = '#eaecf4'
 
 ACCENT = '#5b5bf0'
 ACCENT_DOWN = '#4a4ade'
@@ -43,7 +52,7 @@ QSS = """
 QWidget { font-family: "%s"; font-size: 10pt; color: %s; }
 QLineEdit {
     background: %s; border: 1px solid %s; border-radius: 9px;
-    padding: 8px 10px; selection-background-color: %s;
+    padding: 8px 10px; selection-background-color: %s; selection-color: %s;
 }
 QLineEdit:focus { border-color: %s; background: #ffffff; }
 QPushButton {
@@ -61,13 +70,13 @@ QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
 QScrollBar::handle:vertical { background: #d6d9e3; border-radius: 4px; min-height: 28px; }
 QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
 QMenu {
-    background: #ffffff; border: 1px solid %s; border-radius: 8px; padding: 6px;
+    background: #ffffff; border: 1px solid %s; border-radius: 8px; padding: 5px;
 }
-QMenu::item { padding: 7px 26px 7px 20px; border-radius: 6px; }
+QMenu::item { padding: 6px 22px 6px 14px; border-radius: 6px; }
 QMenu::item:selected { background: %s; }
 QMenu::item:disabled { color: %s; }
-QMenu::separator { height: 1px; background: %s; margin: 5px 8px; }
-""" % (FAMILY, FG, FIELD, LINE, ACCENT_SOFT, ACCENT_EDGE,
+QMenu::separator { height: 1px; background: %s; margin: 4px 8px; }
+""" % (FAMILY, FG, FIELD, LINE, '#dcdfff', '#111827', ACCENT_EDGE,
        ACCENT, ACCENT_DOWN, SUB, FIELD, BORDER, ACCENT_SOFT, MUTED, LINE)
 
 
@@ -179,14 +188,25 @@ class CardWindow(QWidget):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window
                             | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._resizable = resizable
         self._flat = flat
+        self._flat_bg = WINDOW
         self._maxed = False
         self._drag = None
         self._resize = None
         self._radius = 14
         self._title = title
+
+        if flat:
+            # 聊天窗**故意不半透明**：Windows 上的半透明无边框窗口是分层窗口，
+            # 一最小化，任务栏缩略图就只剩一块残缺色块。圆角改由 DWM 裁
+            # （见 showEvent），窗口本身保持不透明，缩略图才是整张界面。
+            pal = self.palette()
+            pal.setColor(QPalette.Window, QColor(self._flat_bg))
+            self.setPalette(pal)
+            self.setAutoFillBackground(True)
+        else:
+            self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         pad = 0 if flat else 14
         outer = QVBoxLayout(self)
@@ -214,15 +234,17 @@ class CardWindow(QWidget):
         if flat:
             self.titlebar = QWidget(self.card)
             self.titlebar.setObjectName('titlebar')
-            self.titlebar.setFixedHeight(38)
+            self.titlebar.setFixedHeight(46)
+            # 透明：底色由整窗的外框色给，标题带和左边会话栏才是同一个颜色，
+            # 中间不画分隔线，看上去连成一块。
             self.titlebar.setStyleSheet(
-                '#titlebar { background: %s; border-bottom: 1px solid %s; }'
-                % (FIELD, LINE))
+                '#titlebar { background: transparent; border: none; }')
             self.card.setMouseTracking(True)
             self.titlebar.setMouseTracking(True)
             head = QHBoxLayout(self.titlebar)
-            head.setContentsMargins(12, 0, 6, 0)
+            head.setContentsMargins(16, 0, 10, 0)
             head_holder = self.titlebar
+
         else:
             self.titlebar = None
             head = QHBoxLayout()
@@ -310,6 +332,8 @@ class CardWindow(QWidget):
         """最大化时贴边：去掉阴影留白和圆角，否则四周会有一圈灰。"""
         self._maxed = self.isMaximized()
         self._sync_frame()
+        if getattr(self, '_flat', False) and self.isVisible():
+            host.round_corners(self, not self._maxed)
         if self.max_btn is not None:
             self.max_btn.set_kind('restore' if self._maxed else 'max')
         if self._grip is not None:
@@ -321,21 +345,44 @@ class CardWindow(QWidget):
         pad = 0 if (maxed or flat) else 14
         self._outer.setContentsMargins(pad, pad, pad, pad)
         if maxed:
-            css = '#card { background: %s; border: none; border-radius: 0; }' % WINDOW
+            css = ('#card { background: %s; border: none;'
+                   ' border-radius: 0; }' % self._flat_bg)
         elif flat:
             css = ('#card { background: %s; border: 1px solid %s;'
-                   ' border-radius: 0; }' % (WINDOW, BORDER))
+                   ' border-radius: 12px; }' % (self._flat_bg, CHROME_LINE))
         else:
             css = ('#card { background: %s; border: 1px solid %s;'
                    ' border-radius: 14px; }' % (WINDOW, BORDER))
         self.card.setStyleSheet(css)
+        # 构造期连续设两次样式，Qt 不会立刻重算已经算好的那一份：聊天窗
+        # 首次 show 时外框停在初始化时的白底（标题带发白），最小化再恢复
+        # 才对 —— 因为那次改动才真正触发重排。这里手动重刷一次，首帧就对。
+        st = self.card.style()
+        st.unpolish(self.card)
+        st.polish(self.card)
+        self.card.update()
         if getattr(self, '_shadow', None) is not None:
             self._shadow.setEnabled(not maxed)
+
+    def set_flat_bg(self, color):
+        """改 chat 窗那种「一整块外框色」的底。配色在外框色和白色之间切换用。"""
+        self._flat_bg = color
+        pal = self.palette()
+        pal.setColor(QPalette.Window, QColor(color))
+        self.setPalette(pal)
+        self._sync_frame()
 
     def changeEvent(self, e):
         if e.type() == QEvent.WindowStateChange:
             self._sync_state()
         super().changeEvent(e)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        # 窗口句柄要到第一次 show 才存在；圆角交给系统裁（Win11 才有，
+        # Win10 上 round_corners 返回 False，窗口就是直角）。
+        if getattr(self, '_flat', False):
+            host.round_corners(self, not self._maxed)
 
     # ---- 拖动 / 拖边缘改大小 ----
 

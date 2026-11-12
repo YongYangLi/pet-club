@@ -195,10 +195,61 @@ def main():
     pump(2.0)
     chk('动作结束后回到 idle', p2.pose == 'idle', p2.pose)
 
+    # 全员广播：不是只有「我自己」跟着做，桌上所有角色都要一起做
+    app._spawn('p3')
+    chk('临时放出第三只并落地', settle(), list(app.pets))
+    c2.drain('event')
+    c2.send(t='event', kind='drink', text='')
+    pump(0.2)
+    chk('全员喝水：发起者的角色在喝', p2.pose == 'drink', p2.pose)
+    chk('全员喝水：我也在喝', app.pets['p1'].pose == 'drink',
+        app.pets['p1'].pose)
+    chk('全员喝水：桌面上第三个角色也在喝（不只自己跟着做）',
+        app.pets['p3'].pose == 'drink', app.pets['p3'].pose)
+    app.pets.pop('p3').destroy()
+    pump(0.1)
+
+    # 起飞：不是摆姿势，是真的升空 —— 发起方和桌上其他人都得离开地面
+    c2.drain('event')
+    ground1 = app.pets['p1'].ground
+    app.do_action('fly')
+    pump(0.25)
+    chk('起飞：发起者已经离地',
+        app.pets['p1'].phase in ('rise', 'fall')
+        and app.pets['p1'].y < ground1,
+        (app.pets['p1'].phase, app.pets['p1'].y, ground1))
+    ev = c2.drain('event')
+    chk('起飞也发给对方了', ev is not None and ev.get('kind') == 'fly', ev)
+    chk('起飞：别人的角色跟着升空（不是只有自己）',
+        p2.phase in ('rise', 'fall') and p2.y < ground1,
+        (p2.phase, p2.y, ground1))
+    pump(2.5)
+    chk('起飞落地后回到 idle',
+        p2.phase == 'idle' and abs(p2.y - ground1) <= 1.5,
+        (p2.phase, p2.y, ground1))
+
     # 只做给我看的指令不传给他，他做的事也不该在「只对他」的会话里重复记
     app._log_tip('wave', '你', 'p2', target=ROLE_NAME.get('p2'))
     chk('单聊里的痕迹带「对他」的意思', '胡大神' in app.chat_log['p2'][-1]['text'],
         app.chat_log['p2'][-1]['text'])
+
+    # 以前「只在自己屏幕上」的那几条，现在也要真的传出去
+    c2.drain('event')
+    app.do_action('sleep', 'p2')
+    pump(0.2)
+    ev = c2.drain('event')
+    chk('睡觉也会发给他（不再只在自己屏幕上）',
+        ev is not None and ev.get('kind') == 'sleep' and ev.get('to') == 'p2', ev)
+    chk('他那边做的是睡姿', app.pets['p2'].pose == 'sleep', app.pets['p2'].pose)
+    c2.drain('event')
+    app.do_action('jump')
+    pump(0.2)
+    ev = c2.drain('event')
+    chk('跳一下对全员也发得出去',
+        ev is not None and ev.get('kind') == 'jump' and not ev.get('to'), ev)
+    chk('对全员时我这边也看得到他跟着跳（mirror 两边一起演）',
+        app.pets['p2'].pose == 'jump', app.pets['p2'].pose)
+    settle()
 
     # ---- 5. 他离开 → 角色从桌面消失 ----
     print('\n--- 离开 ---')
@@ -228,16 +279,24 @@ def main():
     chk('自己的菜单第一行写明「我 → 全员」',
         self_texts[0].startswith(ROLE_NAME['p1']) and '全员' in self_texts[0],
         self_texts[0])
-    probes = self_menu._probes
+
+    # 菜单里哪些项是指令：按 label 反查 key（分隔线和标题行的 text 是空串）
+    labels = {A.get(k)['label']: k for k in A.ORDER}
+
+    def actions_of(menu):
+        return [(a, labels[a.text()]) for a in menu.actions()
+                if a.text() in labels]
+
+    probes = actions_of(self_menu)
     chk('动作项数量和 ORDER 一致', len(probes) == len(A.ORDER),
         (len(probes), len(A.ORDER)))
     chk('动作项顺序和 ORDER 一致',
-        [k for _act, k, _to, _lb in probes] == list(A.ORDER))
-    chk('菜单里有一节「服务器成员」',
-        any('服务器成员' in t for t in self_texts), self_texts)
-    chk('成员节里每个人都列了状态',
-        all(any(ROLE_NAME[r] in t for t in self_texts) for r in ROLES),
-        [ROLE_NAME[r] for r in ROLES])
+        [k for _act, k in probes] == list(A.ORDER))
+    chk('菜单里不再列服务器成员（在线状态已经不在这一层看）',
+        not any('服务器成员' in t for t in self_texts), self_texts)
+    chk('菜单里没有每人一条的「在线 / 空闲」',
+        not any(t.endswith('· 在线') or t.endswith('· 空闲')
+                for t in self_texts), self_texts)
     chk('菜单里有「换一个身份」', '换一个身份' in self_texts, self_texts)
     chk('菜单里有「退出」', '退出' in self_texts, self_texts)
 
@@ -246,45 +305,23 @@ def main():
         other_texts[0])
     chk('别人的菜单不列成员', not any('服务器成员' in t for t in other_texts),
         other_texts)
-    chk('两个菜单的动作项个数一样', len(other_menu._probes) == len(probes))
+    chk('两个菜单的动作项个数一样', len(actions_of(other_menu)) == len(probes))
 
-    # 冷却：点一下挥手，动作项立刻变灰 + 带秒数
+    # 没有冷却：做过一次的动作，菜单里照样是亮的、文案没有秒数
     self_menu.close()
     other_menu.close()
     app.do_action('wave')
     pump(0.15)
     menu2 = app.build_self_menu()
-    wave_act = [a for a, k, _t, _l in menu2._probes if k == 'wave'][0]
-    chk('用完的动作立刻不可点', not wave_act.isEnabled(), wave_act.text())
-    chk('文案里带倒计时', '秒' in wave_act.text(), wave_act.text())
-    before = wave_act.text()
-    app._menu = menu2
-    app._menu_probes = menu2._probes
-    pump(1.1)
-    app._refresh_menu()
-    after = wave_act.text()
-    chk('倒计时会往下走（菜单开着也刷新）', before != after,
-        '%s → %s' % (before, after))
-    app._menu = None
-    app._menu_probes = []
-    menu2.close()
-
-    # 冷却按「对谁」分桶：全员用过的不影响「只对他」
-    m3 = app.build_other_menu('p2')
-    wave_other = [a for a, k, _t, _l in m3._probes if k == 'wave'][0]
-    chk('全员用过的动作，「只对他」的菜单还能点', wave_other.isEnabled(),
-        wave_other.text())
-    app.cd.reset()
-    app.do_action('drink', 'p2')
-    m4 = app.build_other_menu('p2')
-    drink_other = [a for a, k, _t, _l in m4._probes if k == 'drink'][0]
-    chk('对他用过的动作，在「对他」的菜单里变灰',
-        not drink_other.isEnabled(), drink_other.text())
-    m5 = app.build_self_menu()
-    drink_self = [a for a, k, _t, _l in m5._probes if k == 'drink'][0]
-    chk('但「全员」菜单不受影响（两个桶）', drink_self.isEnabled(),
-        drink_self.text())
-    for m in (m3, m4, m5):
+    wave_act = [a for a, k in actions_of(menu2) if k == 'wave'][0]
+    chk('刚做过的动作立刻还能点（没有冷却）', wave_act.isEnabled(),
+        wave_act.text())
+    chk('文案里不再带倒计时', '秒' not in wave_act.text(), wave_act.text())
+    menu3 = app.build_other_menu('p2')
+    drink_other = [a for a, k in actions_of(menu3) if k == 'drink'][0]
+    chk('「只对他」的菜单也一样亮着', drink_other.isEnabled(),
+        drink_other.text())
+    for m in (menu2, menu3):
         m.close()
 
     # ---- 8. 拖动：只有自己看得见的玩法 ----
@@ -305,10 +342,9 @@ def main():
         (pet.x, moved_x))
 
     # 点一下（不拖动）= 摸摸头
-    app.cd.reset()
     app.on_pet_press(me_win, QPoint(int(pet.x), int(pet.y - 40)))
     app.on_pet_drop(me_win, QPoint(int(pet.x), int(pet.y - 40)))
-    chk('原地按一下 = 摸摸头（jump 姿势）', pet.pose == 'jump', pet.pose)
+    chk('原地按一下 = 摸摸头（伸手的 wave 姿势）', pet.pose == 'wave', pet.pose)
 
     # 拖动不发网络消息：别人屏幕上不该有变化
     c3.drain('event')
@@ -344,8 +380,8 @@ def main():
     pump(0.2)
     chk('我发的话进了记录', chat.history_text().splitlines()[-1] == '我也在',
         chat.history_text().splitlines()[-1:])
-    chk('发言有冷却（连发会被挡）',
-        app.send_chat('再来一句') != '' and app.send_chat('再来一句') != '',
+    chk('连发几句都不拦（没有发言冷却）',
+        app.send_chat('再来一句') == '' and app.send_chat('再来一句') == '',
         app.send_chat('再来一句'))
 
     # ---- 10. 未读与托盘 ----
@@ -386,7 +422,6 @@ def main():
     # ---- 11. 媒体 ----
     print('\n--- 媒体 ---')
     app.open_chat(CONV_ALL)
-    app.cd.reset()
     why = app.send_media('emoji', '😀')
     chk('表情发得出去', why == '', why)
     e = app.chat_log[CONV_ALL][-1]
@@ -411,7 +446,6 @@ def main():
     chk('翻页时勾选状态跟着走', chat._tabs['emoji'].isChecked()
         and not chat._tabs['mine'].isChecked())
 
-    app.cd.reset()
     card = media.sticker_paths(assets_dir(), 'p1')[0]
     chat._pick_sticker(card)
     chk('点一张表情包就发出去了',
@@ -421,7 +455,6 @@ def main():
     chk('表情包记录里带得回一张图',
         media.thumb(app.chat_log[CONV_ALL][-1].get('img'), '', 140) is not None)
 
-    app.cd.reset()
     png = os.path.join(TMP, 'shot.png')
     Image.new('RGB', (900, 600), (200, 120, 90)).save(png)
     why = app.send_media('img', png)
@@ -436,7 +469,6 @@ def main():
         media.decode(e['img']).width <= media.MAX_SIDE,
         media.decode(e['img']).size)
 
-    app.cd.reset()
     txt = os.path.join(TMP, 'note.txt')
     with open(txt, 'w', encoding='utf-8') as f:
         f.write('pet-club 文件传输')
@@ -447,7 +479,6 @@ def main():
         e.get('name') == 'note.txt' and e.get('size') == os.path.getsize(txt),
         (e.get('name'), e.get('size'), os.path.getsize(txt)))
 
-    app.cd.reset()
     huge = os.path.join(TMP, 'huge.bin')
     with open(huge, 'wb') as f:
         f.write(b'\0' * (media.MAX_FILE + 10))
@@ -457,7 +488,6 @@ def main():
         '太大' in why and len(app.chat_log[CONV_ALL]) == n_before, why)
 
     # 收到别人的图片
-    app.cd.reset()
     small = os.path.join(TMP, 'p2.png')
     Image.new('RGB', (300, 200), (90, 160, 220)).save(small)
     b64, _w, _h = media.encode_image(small)
@@ -483,7 +513,6 @@ def main():
 
     # ---- 13. 单聊发不出去（对方不在线）----
     print('\n--- 离线的人 ---')
-    app.cd.reset()
     app.open_chat('p5')
     app.chat.field.setText('你在吗')
     chat.send()
