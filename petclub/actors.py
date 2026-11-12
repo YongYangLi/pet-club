@@ -34,7 +34,7 @@ class Pet:
         self.timer = 0.0
         self.landed = not drop
         self.alive = True
-        self.y = (-sp.h - 40.0) if drop else float(ground_y)   # 从屏幕上方看不见的地方开始
+        self.y = (-win.win_h - 40.0) if drop else float(ground_y)   # 从屏幕上方看不见的地方开始
 
     def act(self, pose, dur):
         """做一个指定动作，dur 秒后自动回 idle。下落和被抓着时不接动作。"""
@@ -97,8 +97,12 @@ class Pet:
         self.win.show(self.pose, int(self.x), int(self.y))
 
     def bubble_anchor(self):
-        """气泡该挂在哪个点（角色头顶上方）。"""
-        return self.x, self.y - self.sp.h - 6
+        """气泡该挂在哪个点（角色头顶上方，屏幕物理像素）。
+
+        用窗口的显示高度而不是素材高度：角色按 PET_SCALE 放大后，
+        头顶比素材高度高一截，气泡得跟着抬上去。
+        """
+        return self.x, self.y - self.win.win_h - 6
 
     def destroy(self):
         self.alive = False

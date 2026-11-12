@@ -12,18 +12,20 @@
   所以按当前姿势的 alpha 生成一个 QRegion mask：只有画到人的地方才吃鼠标。
   mask 只在换姿势时重算（缓存），不是每帧。
 
-【DPI】素材是物理像素，Qt 的窗口尺寸是逻辑像素。这里给每张图设
-  devicePixelRatio = 屏幕缩放，窗口尺寸取 物理尺寸 / 缩放 ——
-  于是 1 个图像像素永远落在一个屏幕像素上，150% 缩放下也是清楚的。
+【DPI】素材是物理像素，Qt 的窗口尺寸是逻辑像素。屏幕 dpr 负责把
+  「物理坐标」翻成「Qt 逻辑坐标」；素材位图另有一个 dpr/scale 的设备比，
+  让 1 个素材像素在屏幕上占 scale 个物理像素。scale = 1 就是一比一，
+  scale = 屏幕 dpr 就是旧 Tk 版那种「被系统再放大一次」的观感（见
+  config.PET_SCALE）。两者分开，拖动和落地用的业务坐标才不会跟着变。
 
-【坐标】对外一律用**屏幕逻辑坐标**（= Qt 的坐标），脚底中心对齐。
+【坐标】对外一律用**屏幕物理像素**，脚底中心对齐。
 """
 from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtGui import (QBitmap, QColor, QFont, QFontMetrics, QImage,
                            QPainter, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QApplication, QWidget
 
-from . import host
+from . import config, host
 
 # 气泡配色，和认领窗/聊天面板同一套
 BUBBLE_BG = '#ffffff'
@@ -60,12 +62,15 @@ class PetWindow(QWidget):
 
         screen = QApplication.primaryScreen()
         self.dpr = float(screen.devicePixelRatio()) if screen else 1.0
-        # 对外（App / Pet）一律用物理像素（和素材同一套坐标）；
-        # 只有 setFixedSize / move 这两个 Qt 接口要换成逻辑像素。
-        self.win_w = float(sp.w)
-        self.win_h = float(sp.h)
-        self._lw = sp.w / self.dpr
-        self._lh = sp.h / self.dpr
+        # scale 是「观感倍数」：1 = 一比一，dpr = 旧 Tk 版的放大观感。
+        # 位图设备比 = dpr / scale：素材像素因此被画成 scale 个屏幕物理像素。
+        # 对外（App / Pet）仍一律用物理像素；只有 Qt 接口要换成逻辑像素。
+        self.scale = max(0.01, config.pet_scale(self.dpr))
+        self.pdpr = max(0.01, self.dpr / self.scale)
+        self.win_w = float(sp.w) * self.scale      # 屏幕物理宽高
+        self.win_h = float(sp.h) * self.scale
+        self._lw = self.win_w / self.dpr          # Qt 逻辑宽高
+        self._lh = self.win_h / self.dpr
         self.setFixedSize(max(1, int(round(self._lw))),
                           max(1, int(round(self._lh))))
 
@@ -75,7 +80,7 @@ class PetWindow(QWidget):
             q = to_qimage(im)
             self._qim[name] = q                 # 物理尺寸，生成 mask 用
             pm = QPixmap.fromImage(q)
-            pm.setDevicePixelRatio(self.dpr)
+            pm.setDevicePixelRatio(self.pdpr)
             self._pix[name] = pm
         self._masks = {}
         self._hit_cache = {}
@@ -125,12 +130,12 @@ class PetWindow(QWidget):
             bm = QBitmap.fromImage(q.createAlphaMask())
             if bm.isNull():
                 return
-            # 物理像素 → 逻辑像素（和 paintEvent 里的绘制尺寸同一个换算）
-            w = max(1, int(round(q.width() / self.dpr)))
-            h = max(1, int(round(q.height() / self.dpr)))
+            # 素材像素 → 逻辑像素（和 paintEvent 里的绘制尺寸同一个换算）
+            w = max(1, int(round(q.width() / self.pdpr)))
+            h = max(1, int(round(q.height() / self.pdpr)))
             bm = QBitmap(bm.scaled(w, h))   # scaled 返回 QPixmap，包回来
             region = QRegion(bm)
-            dx = self.sp.dx.get(pose, 0) / self.dpr
+            dx = self.sp.dx.get(pose, 0) / self.pdpr
             region.translate(int(round((self._lw - w) / 2.0 + dx)),
                              int(round(self._lh - h)))
             self._masks[pose] = region
@@ -140,10 +145,10 @@ class PetWindow(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         pm = self._pix.get(self._pose) or next(iter(self._pix.values()))
-        # 底部居中；循环帧的水平修正沿用 sprites 里的 dx（物理像素 → 逻辑像素）
-        dx = self.sp.dx.get(self._pose, 0) / self.dpr
-        w = pm.width() / self.dpr
-        h = pm.height() / self.dpr
+        # 底部居中；循环帧的水平修正沿用 sprites 里的 dx（素材像素 → 逻辑像素）
+        dx = self.sp.dx.get(self._pose, 0) / self.pdpr
+        w = pm.width() / self.pdpr
+        h = pm.height() / self.pdpr
         p.drawPixmap(QPoint(int(round((self._lw - w) / 2.0 + dx)),
                             int(round(self._lh - h))), pm)
         p.end()
@@ -201,9 +206,15 @@ class PetWindow(QWidget):
             self._hit_cache[self._pose] = off
         if off is None:
             return None
+        q = self._qim.get(self._pose) or self._qim['idle']
+        # 绘制时素材图在窗口内底部居中，循环帧另有 dx 修正；这里按同一套
+        # 偏移把「素材像素」换算成「屏幕物理像素」（放大后一个像素顶 scale 个）。
+        off_x = (self.sp.w - q.width()) / 2.0 + self.sp.dx.get(self._pose, 0)
+        off_y = self.sp.h - q.height()
         left = self._x - self.win_w / 2.0
         top = self._y - self.win_h
-        return (int(left + off[0]), int(top + off[1]))
+        return (int(left + (off_x + off[0]) * self.scale),
+                int(top + (off_y + off[1]) * self.scale))
 
     def reassert_top(self):
         """重新插回置顶带：置顶窗口是一个共享带，谁最后激活谁在上面。"""
@@ -274,15 +285,16 @@ class Bubble(QWidget):
         p.end()
 
     def show_at(self, text, cx, cy):
-        """cx/cy 是气泡底部中点（角色头顶，物理像素 —— 和 Pet 的坐标系一致）。"""
+        """cx/cy 是气泡底部中点（角色头顶，屏幕物理像素）。"""
         self.set_text(text)
-        self.follow(cx, cy)
+        self.follow(cx, cy)      # 隐藏的窗口也能 move：先定位再显示
         self.show()
         self.raise_()
 
     def follow(self, cx, cy):
-        if not self.isVisible():
-            return
+        # 这里**不能**因为不可见就 return。气泡是复用的，超时只 hide()，
+        # 下次 show_at 时仍然不可见；一 return 就永远停在第一次的位置 ——
+        # Qt 给没定位过的顶层窗口一个默认位置，看上去就是「屏幕中间」。
         self.move(int(round(cx / self.dpr - self.width() / 2.0)),
                   int(round(cy / self.dpr - self.height())))
 

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """聊天面板。
 
-四块：
-  左边会话栏（搜索、头像、名字+时间、预览、未读红点）
-  右边消息流（我的绿气泡靠右、别人的白气泡靠左、系统提示居中灰字）
-  输入区正上方一排悬浮的快捷互动圆角按钮（没有底板，放不下的收进「更多」）
-  底下微信式输入区（几行高的文本框；表情 / 文件在左下，发送在右下）
+布局照微信 PC 版：整窗直角、顶部一条系统标题带；下面两栏
+  左：会话列表（搜索 + 加号、整行直角高亮）
+  右：**一整块平面**（会话标题 / 消息流 / 输入区同一个底色，只用细线分隔，
+      没有圆角卡片，也没有独立的输入框白框）
+消息流下沿浮着一排快捷互动圆角按钮（无底板，放不下收进「更多」）。
 
 数据仍然不在这个类里：`App.chat_log` 是唯一一份，窗口只是它的视图；
 未读也是 `App.unread`（共享字典），切会话时清零，托盘闪的就是它。
@@ -27,15 +27,16 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout,
 from . import actions, host, media
 from .config import ROLE_NAME, ROLES, assets_dir
 from .theme import (ACCENT, ACCENT_SOFT, BORDER, FG, FIELD, LINE, MUTED, SUB,
-                    WINDOW, CardWindow, avatar, font)
+                    CardWindow, avatar, font)
 from .windows import to_qimage
 
 CONV_ALL = 'all'
 
 WIDTH, HEIGHT = 840, 620
 MIN_W, MIN_H = 660, 460
-LIST_W = 212
-ROW_H = 62
+LIST_W = 240                # 微信的会话列表宽度
+ROW_H = 64
+TITLE_H = 52                # 右侧会话标题行
 PASTE_MAX = 3               # 一次最多发几个：多了就是刷屏，对面也来不及看
 GAP_TIME = 300.0
 BUBBLE_MAX = 320
@@ -46,13 +47,13 @@ COMPOSER_H = 78             # 多行输入框：三行半文字，够写一小�
 PREVIEW_BOX = 200           # 悬停预览的逻辑边长
 PREVIEW_DPR = 2.0           # 位图按 2x 物理像素生成，高分屏上不糊
 
-CANVAS_BG = '#f5f6f8'
+TALK_BG = '#f5f6f8'         # 右侧一整块平面：标题 / 消息 / 输入同一个底色
 BUBBLE_ME = '#95ec69'
 BUBBLE_ME_FG = '#111111'
 BUBBLE_OTH = '#ffffff'
-SIDE_BG = '#f7f7f7'
-SIDE_SEL = '#e9eaf0'
-SIDE_HOVER = '#efefef'
+SIDE_BG = '#eff0f3'         # 左侧会话栏：比右侧平面略深，分出两栏
+SIDE_SEL = '#dfe1e9'         # 选中：整行铺满，没有圆角和侧边竖条
+SIDE_HOVER = '#e7e9ee'
 
 AVATAR_COLORS = ('#5b5bf0', '#0f9d76', '#e08c2a', '#d6455d', '#2b8fd6')
 
@@ -358,7 +359,7 @@ class PreviewPopup(QFrame):
 
 
 class ConvRow(QWidget):
-    """会话栏的一行。选中底色、未读红点、头像、两行文字。"""
+    """会话栏的一行：整行直角铺满，选中/hover 整块变色（微信的做法）。"""
 
     clicked = Signal(str)
 
@@ -367,8 +368,9 @@ class ConvRow(QWidget):
         self.key = key
         self.name = name
         self.selected = False
+        self._hover = False
         self.unread = 0
-        self.pix = None if key == CONV_ALL else avatar(key, 40)
+        self.pix = None if key == CONV_ALL else avatar(key, 42)
         self.preview = ''
         self.stamp = ''
         self.setFixedHeight(ROW_H)
@@ -381,6 +383,16 @@ class ConvRow(QWidget):
         self.selected = bool(selected)
         self.update()
 
+    def enterEvent(self, e):
+        self._hover = True
+        self.update()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        self._hover = False
+        self.update()
+        super().leaveEvent(e)
+
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self.clicked.emit(self.key)
@@ -390,11 +402,11 @@ class ConvRow(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        p.fillRect(self.rect(), QColor(SIDE_SEL if self.selected else SIDE_BG))
-        if self.selected:
-            p.fillRect(QRectF(0, 10, 3, ROW_H - 20), QColor(ACCENT))
+        bg = SIDE_SEL if self.selected else (SIDE_HOVER if self._hover else SIDE_BG)
+        p.fillRect(self.rect(), QColor(bg))
+        p.fillRect(QRectF(0, ROW_H - 1, self.width(), 1), QColor(LINE))
 
-        ax, ay, s = 12, (ROW_H - 40) // 2, 40
+        ax, ay, s = 14, (ROW_H - 42) // 2, 42
         if self.pix is not None:
             p.drawPixmap(ax, ay, self.pix)
         else:
@@ -525,7 +537,8 @@ class ChatWindow(CardWindow):
                  is_online=None, log=None, on_media=None, unread=None,
                  on_action=None, action_state=None):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
-                         win_buttons=True, resizable=True, height=HEIGHT)
+                         win_buttons=True, resizable=True, height=HEIGHT,
+                         flat=True)
         self.setMinimumSize(MIN_W, MIN_H)
         self.on_send = on_send
         self.on_media = on_media
@@ -563,26 +576,57 @@ class ChatWindow(CardWindow):
     # ---------------- 构建 ----------------
 
     def _build(self):
+        """两栏：左边会话列表，右边一整块平面（标题 / 消息 / 输入）。
+
+        右侧没有圆角卡片，也没有独立的输入框白框 —— 三段共用同一个底色，
+        只靠两条 1px 细线分开，所以从上到下看起来是同一个会话窗口。
+        """
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(10)
+        body.setSpacing(0)
 
         left = QWidget()
+        left.setObjectName('side')
         left.setFixedWidth(LIST_W)
-        left.setStyleSheet('background: %s; border-radius: 12px;' % SIDE_BG)
+        left.setStyleSheet(
+            '#side { background: %s; border-right: 1px solid %s; }'
+            % (SIDE_BG, LINE))
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(9, 9, 9, 9)
-        lv.setSpacing(7)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(0)
 
-        self.search = QLineEdit()
+        search_bar = QWidget(left)
+        sb = QHBoxLayout(search_bar)
+        sb.setContentsMargins(10, 10, 10, 10)
+        sb.setSpacing(8)
+        self.search = QLineEdit(search_bar)
         self.search.setPlaceholderText('搜索会话或消息')
         self.search.setFont(font(9))
         self.search.setFixedHeight(30)
         self.search.setStyleSheet(
-            'QLineEdit { background:#ffffff; border:1px solid %s; border-radius:9px;'
+            'QLineEdit { background:#ffffff; border:1px solid %s; border-radius:6px;'
             ' padding:4px 10px; }' % LINE)
         self.search.textChanged.connect(self._on_search)
-        lv.addWidget(self.search)
+        sb.addWidget(self.search, 1)
+        self.add_btn = QToolButton(search_bar)
+        self.add_btn.setText('+')
+        self.add_btn.setFont(font(13))
+        self.add_btn.setFixedSize(30, 30)
+        self.add_btn.setCursor(Qt.PointingHandCursor)
+        self.add_btn.setToolTip('发起会话')
+        self.add_btn.setStyleSheet(
+            'QToolButton { background: #ffffff; border: 1px solid %s;'
+            ' border-radius: 6px; color: %s; padding: 0; }'
+            'QToolButton:hover { background: %s; }' % (LINE, SUB, ACCENT_SOFT))
+        # 会话是固定的五个，菜单一次性建好常驻：不在点击栈里重建 QMenu。
+        self._add_menu = QMenu(self)
+        for key, name in self.convs():
+            act = self._add_menu.addAction(name)
+            act.triggered.connect(lambda _=False, k=key: self._open_conv(k))
+        self.add_btn.setMenu(self._add_menu)
+        self.add_btn.setPopupMode(QToolButton.InstantPopup)
+        sb.addWidget(self.add_btn)
+        lv.addWidget(search_bar)
 
         self.list_box = QVBoxLayout()
         self.list_box.setContentsMargins(0, 0, 0, 0)
@@ -592,36 +636,43 @@ class ChatWindow(CardWindow):
         body.addWidget(left)
 
         right = QWidget()
+        right.setObjectName('talk')
+        right.setStyleSheet('#talk { background: %s; }' % TALK_BG)
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(6)
+        rv.setSpacing(0)
 
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
-        head.setSpacing(8)
+        self.head_bar = QFrame(right)
+        self.head_bar.setObjectName('talkhead')
+        self.head_bar.setFixedHeight(TITLE_H)
+        self.head_bar.setStyleSheet(
+            '#talkhead { background: %s; border: none;'
+            ' border-bottom: 1px solid %s; }' % (TALK_BG, LINE))
+        hh = QHBoxLayout(self.head_bar)
+        hh.setContentsMargins(20, 0, 20, 0)
+        hh.setSpacing(8)
         self.title = QLabel('')
         self.title.setFont(font(12, True))
-        head.addWidget(self.title)
+        hh.addWidget(self.title)
         self.state_lb = QLabel('')
         self.state_lb.setFont(font(8))
         self.state_lb.setStyleSheet(
             'color: %s; background: %s; border-radius: 8px; padding: 2px 8px;'
             % (SUB, FIELD))
-        head.addWidget(self.state_lb)
-        head.addStretch(1)
-        rv.addLayout(head)
+        hh.addWidget(self.state_lb)
+        hh.addStretch(1)
+        rv.addWidget(self.head_bar)
 
-        self.scroll = QScrollArea()
+        self.scroll = QScrollArea(right)
         self.scroll.setWidgetResizable(True)
         self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll.setStyleSheet(
-            'QScrollArea { background: %s; border-radius: 12px; border: none; }'
-            % CANVAS_BG)
+            'QScrollArea { background: %s; border: none; }' % TALK_BG)
         self.msg_host = QWidget()
-        self.msg_host.setStyleSheet('background: %s;' % CANVAS_BG)
+        self.msg_host.setStyleSheet('background: %s;' % TALK_BG)
         self.msg_box = QVBoxLayout(self.msg_host)
         # 底部留一条给悬浮快捷按钮，最后一条消息不会被压住
-        self.msg_box.setContentsMargins(12, 10, 12, 42)
+        self.msg_box.setContentsMargins(16, 12, 16, 42)
         self.msg_box.setSpacing(8)
         self.msg_box.addStretch(1)
         self.scroll.setWidget(self.msg_host)
@@ -630,7 +681,7 @@ class ChatWindow(CardWindow):
         # 反馈提示只有出事时才占一行；平时收起来，快捷条就紧贴输入框
         self.note = QLabel('')
         self.note.setFont(font(8))
-        self.note.setStyleSheet('color: %s;' % SUB)
+        self.note.setStyleSheet('color: %s; background: %s;' % (SUB, TALK_BG))
         self.note.setFixedHeight(14)
         self.note.hide()
         rv.addWidget(self.note)
@@ -638,8 +689,15 @@ class ChatWindow(CardWindow):
         self._build_actions(right)      # 浮层，不进布局：见 _place_actions
         rv.addWidget(self._build_inbox())
         body.addWidget(right, 1)
+        self.side = left
+        self.talk = right
         self.content.addLayout(body)
         self.setAcceptDrops(True)
+
+    def _open_conv(self, key):
+        self.search.clear()
+        self.switch(key)
+        self.focus_input()
 
     def _build_actions(self, stage):
         """输入框正上方一排圆角按钮，浮在消息画布上。
@@ -706,14 +764,15 @@ class ChatWindow(CardWindow):
         return bar
 
     def _build_inbox(self):
-        """微信式的一个白框：上面几行文字，左下工具、右下发送，全在框内。"""
+        """输入区是右侧平面的最下面一段：只有一条顶部细线，没有外框。"""
         inbox = QFrame()
         inbox.setObjectName('inbox')
         inbox.setStyleSheet(
-            '#inbox { background: %s; border: 1px solid %s; border-radius: 12px; }'
-            % (WINDOW, LINE))
+            '#inbox { background: %s; border: none;'
+            ' border-top: 1px solid %s; border-radius: 0; }'
+            % (TALK_BG, LINE))
         iv = QVBoxLayout(inbox)
-        iv.setContentsMargins(10, 8, 10, 8)
+        iv.setContentsMargins(16, 6, 16, 10)
         iv.setSpacing(2)
 
         self.field = Composer(inbox, self._paste)

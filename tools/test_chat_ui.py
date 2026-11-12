@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """聊天窗口重排版的防回归检查。
 
-覆盖：窗口三按钮（关窗 ≠ 退程序）、可缩放与最大化、微信式多行输入区、
-工具与发送都在白框内、表情悬停 2x 高清预览、无底板的快捷互动圆角按钮。
+覆盖：微信式一体化结构（直角窗口 / 右侧标题+消息+输入同一平面）、
+窗口三按钮（关窗 ≠ 退程序）、可缩放与最大化、微信式多行输入区、
+工具与发送都在输入区内、表情悬停高清预览、无底板的快捷互动圆角按钮。
 
 跑法：py tools/test_chat_ui.py
 """
@@ -19,8 +20,9 @@ from PySide6.QtWidgets import QApplication                       # noqa: E402
 
 from petclub import actions, media                               # noqa: E402
 from petclub.app import App                                      # noqa: E402
-from petclub.chat import (CELL, EMOJI_FAMILY, MIN_H, MIN_W, PREVIEW_BOX,  # noqa: E402
-                          ChatWindow, Composer, CONV_ALL, ToolIcon)
+from petclub.chat import (CELL, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,  # noqa: E402
+                          PREVIEW_BOX, TALK_BG, ChatWindow, Composer,
+                          CONV_ALL, ToolIcon)
 from petclub.config import ROLES                                 # noqa: E402
 
 PASS = []
@@ -42,11 +44,57 @@ def main():
     qapp = QApplication.instance() or QApplication([])
     calls = []
 
-    print('--- 微信式输入区 / 工具图标 ---')
+    dpr = float(qapp.primaryScreen().devicePixelRatio())
+    print('--- 微信式一体化结构 ---')
     chat = ChatWindow(None, me='p1', on_action=lambda k, t: calls.append((k, t)))
     chat.show()
     qapp.processEvents()
     qapp.processEvents()
+    chk('窗口是直角矩形，没有圆角卡片和阴影',
+        chat._flat and chat._shadow is None
+        and 'border-radius: 0' in chat.card.styleSheet(), chat.card.styleSheet())
+    chk('窗口四周没有阴影留白', chat._outer.contentsMargins().left() == 0)
+    chk('顶部是一条横跨窗口的标题带',
+        chat.titlebar is not None and chat.titlebar.height() >= 30
+        and chat.titlebar.width() >= chat.width() - 4)
+    chk('三颗窗口按钮都在标题带上',
+        all(w.parentWidget() is chat.titlebar
+            for w in (chat.min_btn, chat.max_btn, chat.close_btn)))
+    chk('左会话栏与右会话区直接相邻，中间没有间隙',
+        chat.side.width() == LIST_W
+        and chat.side.x() + chat.side.width() == chat.talk.x(),
+        (chat.side.geometry(), chat.talk.geometry()))
+    chk('会话栏有搜索框和「发起会话」加号',
+        chat.search is not None and chat.add_btn is not None
+        and len(chat._add_menu.actions()) == len(chat.convs()))
+    chat._add_menu.actions()[1].trigger()
+    qapp.processEvents()
+    chk('加号菜单里的会话能直接切过去', chat.key == 'p2', chat.key)
+    chat.switch(CONV_ALL)
+    qapp.processEvents()
+    chk('右侧标题 / 消息 / 输入挂在同一个平面上',
+        chat.head_bar.parentWidget() is chat.talk
+        and chat.scroll.parentWidget() is chat.talk
+        and chat.field.parentWidget().parentWidget() is chat.talk)
+    chk('右侧三段共用同一个底色',
+        all(TALK_BG in w.styleSheet() for w in
+            (chat.talk, chat.head_bar, chat.scroll, chat.field.parentWidget())))
+    chk('会话标题行只有底部一条细线',
+        'border-bottom' in chat.head_bar.styleSheet()
+        and 'border-radius' not in chat.head_bar.styleSheet())
+    chk('消息区不再是圆角卡片',
+        'border-radius' not in chat.scroll.styleSheet()
+        and 'border: none' in chat.scroll.styleSheet())
+    inbox_css = chat.field.parentWidget().styleSheet()
+    chk('输入区没有独立白框，只有顶部一条细线',
+        'border-radius: 0' in inbox_css
+        and 'border-top: 1px solid' in inbox_css
+        and 'border: 1px' not in inbox_css, inbox_css)
+    chk('会话行铺满侧栏宽度（整行直角）',
+        chat._rows[CONV_ALL].width() == chat.side.width(),
+        (chat._rows[CONV_ALL].width(), chat.side.width()))
+
+    print('\n--- 微信式输入区 / 工具图标 ---')
     b = chat.send_btn
     fm = QFontMetrics(b.font())
     chk('「发送」文字横向放得下',
@@ -99,7 +147,7 @@ def main():
     fil = chat.icon_btn['file'].mapTo(inbox, QPoint(0, 0))
     snd = b.mapTo(inbox, QPoint(0, 0))
     fld = chat.field.mapTo(inbox, QPoint(0, 0))
-    chk('表情和文件都在同一个输入框白框里',
+    chk('表情和文件都在同一个输入区里',
         inbox is chat.icon_btn['file'].parentWidget() and inbox is b.parentWidget())
     chk('两颗图标在左下角',
         emo.y() > inbox.height() * 0.5 and fil.y() > inbox.height() * 0.5
@@ -260,10 +308,10 @@ def main():
     chk('悬停弹出放大预览', chat._preview.isVisible())
     chk('预览里是一张真正放大的图',
         not pv.isNull() and pv.width() >= 100, pv.width())
-    chk('预览按高分屏物理像素出图（≥1.5x）',
-        pv.width() >= PREVIEW_BOX * 1.5
-        and pv.devicePixelRatio() >= 1.5,
-        (pv.width(), pv.devicePixelRatio()))
+    chk('预览按屏幕物理像素出图（不糊）',
+        pv.width() >= PREVIEW_BOX * dpr - 1
+        and pv.devicePixelRatio() >= dpr - 0.01,
+        (pv.width(), pv.devicePixelRatio(), dpr))
     chk('预览逻辑尺寸不小于 %dpx' % PREVIEW_BOX,
         pv.width() / pv.devicePixelRatio() >= PREVIEW_BOX)
     chk('emoji 走系统彩色字体而不是中文 UI 字体',
@@ -286,8 +334,8 @@ def main():
     chat._show_preview(card)
     qapp.processEvents()
     chk('贴纸也能放大预览', not chat._preview.big.pixmap().isNull())
-    chk('贴纸预览同样按高分屏像素出图',
-        chat._preview.big.pixmap().width() >= PREVIEW_BOX * 1.5)
+    chk('贴纸预览同样按屏幕物理像素出图',
+        chat._preview.big.pixmap().width() >= PREVIEW_BOX * dpr - 1)
     chat._close_pop()
     chk('关掉弹层后预览一起收起', not chat._preview.isVisible())
 

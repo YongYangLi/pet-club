@@ -118,7 +118,8 @@ def main():
                 time.sleep(5)          # 再给一会儿，让它能崩的话崩掉
                 break
         check('exe 起来了（没在加载素材/Qt 时崩掉）', first.poll() is None,
-              '退出码 %r' % (first.poll(),))
+              '退出码 %r / 启动的 PID %d / 当前进程 %r'
+              % (first.poll(), first.pid, pids))
         pids = pids_of('pet-club.exe')
         check('进程在跑', bool(pids), repr(pids))
 

@@ -161,6 +161,10 @@ class CardWindow(QWidget):
     不碰进程 —— 桌宠要留在托盘里。resizable 打开后能拖边缘和右下角把手
     改大小；关掉时仍是原来的固定宽度卡片。
 
+    flat=True 是聊天窗用的「微信式」：直角矩形、不要阴影留白、标题栏是
+    一条横跨窗口的浅灰带，内容区直接铺满卡片，由子类自己分栏。
+    认领窗等小卡片仍用默认的圆角卡片。
+
     子类往 self.content 里塞内容（QVBoxLayout 已经建好）。
     """
 
@@ -171,38 +175,59 @@ class CardWindow(QWidget):
                'tr': Qt.SizeBDiagCursor, 'bl': Qt.SizeBDiagCursor}
 
     def __init__(self, parent=None, width=520, title='', stretch=True,
-                 win_buttons=False, resizable=False, height=None):
+                 win_buttons=False, resizable=False, height=None, flat=False):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window
                             | Qt.WindowStaysOnTopHint | Qt.NoDropShadowWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self._resizable = resizable
+        self._flat = flat
         self._maxed = False
         self._drag = None
         self._resize = None
         self._radius = 14
         self._title = title
 
+        pad = 0 if flat else 14
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 14, 14, 14)     # 留给阴影
+        outer.setContentsMargins(pad, pad, pad, pad)     # 留给阴影
         self._outer = outer
         self.card = QWidget(self)
         self.card.setObjectName('card')
         outer.addWidget(self.card)
 
-        self._shadow = QGraphicsDropShadowEffect(self)
-        self._shadow.setBlurRadius(28)
-        self._shadow.setOffset(0, 6)
-        self._shadow.setColor(QColor(17, 24, 39, 46))
-        self.card.setGraphicsEffect(self._shadow)
+        if flat:
+            self._shadow = None
+        else:
+            self._shadow = QGraphicsDropShadowEffect(self)
+            self._shadow.setBlurRadius(28)
+            self._shadow.setOffset(0, 6)
+            self._shadow.setColor(QColor(17, 24, 39, 46))
+            self.card.setGraphicsEffect(self._shadow)
         self._sync_frame()
 
         lay = QVBoxLayout(self.card)
-        lay.setContentsMargins(22, 14, 22, 22)
+        lay.setContentsMargins(0 if flat else 22, 0 if flat else 14,
+                               0 if flat else 22, 0 if flat else 22)
         lay.setSpacing(0)
 
-        head = QHBoxLayout()
-        head.setContentsMargins(0, 0, 0, 0)
+        if flat:
+            self.titlebar = QWidget(self.card)
+            self.titlebar.setObjectName('titlebar')
+            self.titlebar.setFixedHeight(38)
+            self.titlebar.setStyleSheet(
+                '#titlebar { background: %s; border-bottom: 1px solid %s; }'
+                % (FIELD, LINE))
+            self.card.setMouseTracking(True)
+            self.titlebar.setMouseTracking(True)
+            head = QHBoxLayout(self.titlebar)
+            head.setContentsMargins(12, 0, 6, 0)
+            head_holder = self.titlebar
+        else:
+            self.titlebar = None
+            head = QHBoxLayout()
+            head.setContentsMargins(0, 0, 0, 0)
+            head_holder = None
         head.setSpacing(4)
         dot = QLabel()
         dot.setFixedSize(18, 18)
@@ -225,13 +250,16 @@ class CardWindow(QWidget):
         self.close_btn = WinButton('close', self)
         self.close_btn.clicked.connect(self.dismiss)
         head.addWidget(self.close_btn)
-        lay.addLayout(head)
-        lay.addSpacing(14)
+        if flat:
+            lay.addWidget(head_holder)      # 一条横跨窗口的标题带
+        else:
+            lay.addLayout(head)
+            lay.addSpacing(14)
 
         self.head = head
         self.content = QVBoxLayout()
         self.content.setContentsMargins(0, 0, 0, 0)
-        self.content.setSpacing(10)
+        self.content.setSpacing(0 if flat else 10)
         lay.addLayout(self.content)
         if stretch:
             lay.addStretch(1)
@@ -289,10 +317,14 @@ class CardWindow(QWidget):
 
     def _sync_frame(self):
         maxed = getattr(self, '_maxed', False)
-        self._outer.setContentsMargins(0 if maxed else 14, 0 if maxed else 14,
-                                       0 if maxed else 14, 0 if maxed else 14)
+        flat = getattr(self, '_flat', False)
+        pad = 0 if (maxed or flat) else 14
+        self._outer.setContentsMargins(pad, pad, pad, pad)
         if maxed:
             css = '#card { background: %s; border: none; border-radius: 0; }' % WINDOW
+        elif flat:
+            css = ('#card { background: %s; border: 1px solid %s;'
+                   ' border-radius: 0; }' % (WINDOW, BORDER))
         else:
             css = ('#card { background: %s; border: 1px solid %s;'
                    ' border-radius: 14px; }' % (WINDOW, BORDER))
