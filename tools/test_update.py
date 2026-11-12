@@ -83,8 +83,24 @@ def test_swap():
     body = open(real, 'rb').read()
     check('只读目标也能换上', body == b'NEW', body)
     check('.new 用完就没了', not os.path.exists(fresh))
-    text = open(log, encoding='mbcs', errors='replace').read() if os.path.exists(log) else ''
-    check('换了什么都记进日志', '开始更新' in text and '换好了' in text, text.strip())
+    log_text = (open(log, encoding='mbcs', errors='replace').read()
+                if os.path.exists(log) else '')
+    # 日志是 cmd 的 echo 写的，用的是**系统 ANSI 代码页**。中文 Windows（936）
+    # 下就是 GBK，能还原成中文；en-US 的 runner 是 437/1252，中文直接写成 '?'
+    # —— 那是 cmd 的限制，不是脚本的问题，所以按能不能编码决定查什么。
+    try:
+        '开始更新'.encode('mbcs')
+        can_cn = True
+    except (UnicodeEncodeError, LookupError):
+        can_cn = False
+    if can_cn:
+        check('换了什么都记进日志',
+              '开始更新' in log_text and '换好了' in log_text, log_text.strip())
+    else:
+        print('[skip] 这台机器的 ANSI 代码页写不了中文，日志正文改查行数')
+        check('日志确实写了（有时间戳的两行）',
+              len([l for l in log_text.splitlines() if l.strip()]) >= 2,
+              log_text.strip())
 
     update._clear_readonly(real)
     check('_clear_readonly 摘得掉只读位', os.access(real, os.W_OK))
@@ -267,32 +283,35 @@ def main():
 
         # apply() 起脚本时也得带上干净环境 —— 脚本里那三句是兜底，
         # 这一步才是「默认就对」
-        captured = {}
+        if sys.platform != 'win32':
+            print('[skip] apply() 起的是 Windows 批处理（STARTUPINFO / cmd），这里跳过')
+        else:
+            captured = {}
 
-        class FakePopen(object):
-            def __init__(self, argv, **kw):
-                captured.update(kw)
-                captured['argv'] = argv
+            class FakePopen(object):
+                def __init__(self, argv, **kw):
+                    captured.update(kw)
+                    captured['argv'] = argv
 
-        class FakeSubprocess(object):
-            Popen = FakePopen
-            STARTUPINFO = subprocess.STARTUPINFO
-            STARTF_USESHOWWINDOW = subprocess.STARTF_USESHOWWINDOW
-            DEVNULL = subprocess.DEVNULL
+            class FakeSubprocess(object):
+                Popen = FakePopen
+                STARTUPINFO = subprocess.STARTUPINFO
+                STARTF_USESHOWWINDOW = subprocess.STARTF_USESHOWWINDOW
+                DEVNULL = subprocess.DEVNULL
 
-        real = (update.subprocess, update.staged_valid, update.exe_path)
-        update.subprocess = FakeSubprocess
-        update.staged_valid = lambda: (True, '9.9.9', r'C:\a\pet-club.exe.new')
-        update.exe_path = lambda: r'C:\a\pet-club.exe'
-        try:
-            ok, why = update.apply(relaunch=True)
-        finally:
-            update.subprocess, update.staged_valid, update.exe_path = real
-        got = captured.get('env') or {}
-        check('apply 能安排上', ok, why)
-        check('apply 传给脚本的环境里没有启动器变量',
-              not [k for k in got if k in update.PYI_ENV_VARS])
-        check('apply 传了 env（不是继承默认值）', 'env' in captured)
+            real = (update.subprocess, update.staged_valid, update.exe_path)
+            update.subprocess = FakeSubprocess
+            update.staged_valid = lambda: (True, '9.9.9', r'C:\a\pet-club.exe.new')
+            update.exe_path = lambda: r'C:\a\pet-club.exe'
+            try:
+                ok, why = update.apply(relaunch=True)
+            finally:
+                update.subprocess, update.staged_valid, update.exe_path = real
+            got = captured.get('env') or {}
+            check('apply 能安排上', ok, why)
+            check('apply 传给脚本的环境里没有启动器变量',
+                  not [k for k in got if k in update.PYI_ENV_VARS])
+            check('apply 传了 env（不是继承默认值）', 'env' in captured)
     finally:
         for k, v in saved.items():
             if v is None:

@@ -425,7 +425,13 @@ def apply(relaunch=True):
     """把暂存的 exe 换上去。返回 (是否已经安排上了, 说明)。
 
     调用方拿到 True 之后应该**立刻退出** —— 脚本正等着我们消失才能 move。
+
+    换文件这套是 Windows 专有的（批处理 + tasklist + STARTUPINFO + 只读位），
+    macOS 上 host.can_self_update() 本来就是 False，这里再兜一道：
+    万一有人绕过判断调进来，也要给一句人话，而不是 AttributeError。
     """
+    if sys.platform != 'win32':
+        return False, '这个平台不支持自动换文件'
     ok, ver, new = staged_valid()
     exe = exe_path()
     if not exe:
