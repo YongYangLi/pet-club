@@ -17,6 +17,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# 打 tag 时要用 gh 建 Release 并上传附件。GITHUB_TOKEN 默认只有读权限，
+# 不显式声明的话那一步会报 "Resource not accessible by integration"（403）。
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.label }}
@@ -80,6 +85,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --generate-notes
+          # 两个 job 是并行的，可能同时走到这里：谁先谁建，后到的撞上
+          # 「already exists」就当成已建好。上传用 --clobber，各传各的附件。
+          gh release create "$GITHUB_REF_NAME" --generate-notes 2>/dev/null \
+            || gh release view "$GITHUB_REF_NAME" >/dev/null
           gh release upload "$GITHUB_REF_NAME" "${{ matrix.artifact }}" --clobber
