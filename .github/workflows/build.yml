@@ -70,6 +70,7 @@ jobs:
       - name: 单元测试
         run: |
           python tools/test_actions.py
+          python tools/test_gather.py
           python tools/test_config.py
           python tools/test_media.py
           python tools/test_server.py

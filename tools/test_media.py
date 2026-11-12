@@ -140,6 +140,18 @@ def main():
           len(media.EMOJI_CHARS))
     check('表情没有重复', len(set(media.EMOJI_CHARS)) == len(media.EMOJI_CHARS))
 
+    # 表情页第一格那张自定义贴图是**可选**的：有就要能正常显示（尺寸 / 透明底），
+    # 没有也不算错 —— 面板会直接少一格，不留空格子。
+    doge = media.doge_path(assets_dir())
+    check('贴图路径约定在 assets/emoji/doge.png',
+          doge.replace('\\', '/').endswith('assets/emoji/doge.png'), doge)
+    if os.path.exists(doge):
+        im = Image.open(doge)
+        check('贴图是正方形、边长够显示', im.width == im.height and im.width >= 64,
+              im.size)
+        check('贴图带透明通道（不是白底方块）',
+              im.mode == 'RGBA' and im.getextrema()[3][0] == 0, im.mode)
+
     print('\n--- 角色表情包素材 ---')
     for role in ROLES:
         paths = media.sticker_paths(assets_dir(), role)

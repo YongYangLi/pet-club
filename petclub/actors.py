@@ -5,12 +5,90 @@
 会从天而降出场、站着做动作、能被抓起来再扔掉。谁认领的、是不是自己，
 由 app 记录，角色本身只关心自己的姿势和位置。
 
-三个物理阶段（`phase`）：
-  idle  站在地面上，只跑动作计时
-  fall  受重力下落 —— 出场是从屏幕上方掉下来，松手是从手里掉下来，同一套
-  hold  被鼠标抓着：完全跟手，不受重力；松手回到 fall
-  rise  起飞：一路升到屏幕最上方，到顶转成 fall（就是「拎起来再松手」）
+五个物理阶段（`phase`）：
+  idle   站在地面上，只跑动作计时
+  fall   受重力下落 —— 出场是从屏幕上方掉下来，松手是从手里掉下来，同一套
+  hold   被鼠标抓着：完全跟手，不受重力；松手回到 fall
+  rise   起飞：一路升到屏幕最上方，到顶转成 fall（就是「拎起来再松手」）
+  crawl  集合：贴地朝目标 x 爬，crawl_1 / crawl_2 两帧循环，到位回 idle
+
+位置始终是**本机**的：集合要爬到哪儿由 App 按这块屏幕上的站位算出来，
+只把目标 x 交给 Pet，网络上一个字节都不用多传。
 """
+
+def gather_targets(anchor_x, xs, widths, anchor_w, gap, lo, hi):
+    """集合落点：给每只角色算一个 x，返回顺序和 xs 一致。
+
+    `gap` 是**两个人身体之间**的空隙（不是中心距）：按各自的宽度往外排，
+    所以高矮胖瘦不同的人，看上去的间隔也一样大。发起人同样占一格，谁都不会
+    叠到谁身上。早先的算法按「窗宽 × 0.9」算中心距、又从 ±0.5 格起排，
+    结果贴着他的两个叠在一起、再往外却是一整格 —— 看上去就是一簇 + 一大片空。
+
+    贴屏幕边缘时只做两件事，不做「逐个夹回屏内」（夹过的会挤成一摞）：
+      · 这一侧排不下就把队尾的人换到另一侧，队形不交叉；
+      · 两侧都满了（屏幕比队伍窄）就**等比收窄空隙**，间距仍然人人相等。
+    """
+    n = len(xs)
+    if not n:
+        return []
+    gap = max(0.0, float(gap))
+
+    near = sorted(range(n), key=lambda i: abs(xs[i] - anchor_x))
+    left = [i for i in near if xs[i] < anchor_x]      # 近的在前，先站里圈
+    right = [i for i in near if xs[i] >= anchor_x]
+    room_l = max(0.0, anchor_x - lo)
+    room_r = max(0.0, hi - anchor_x)
+
+    def offsets(ids, g):
+        """这一队人各自离发起人中心多远（按站队顺序，从里往外）。"""
+        cur = float(anchor_w) / 2.0
+        out = []
+        for i in ids:
+            cur += g + widths[i] / 2.0
+            out.append(cur)
+            cur += widths[i] / 2.0
+        return out
+
+    def fits(g):
+        return ((not left or offsets(left, g)[-1] <= room_l + 1e-9)
+                and (not right or offsets(right, g)[-1] <= room_r + 1e-9))
+
+    # 哪边放不下就把队尾那位换到另一边 —— 从最远的开始换，队形不交叉
+    for _ in range(n + 1):
+        if left and offsets(left, gap)[-1] > room_l + 1e-9:
+            right.append(left.pop())
+        elif right and offsets(right, gap)[-1] > room_r + 1e-9:
+            left.append(right.pop())
+        else:
+            break
+
+    g = gap
+    if not fits(g):
+        if not fits(0.0):
+            # 人挨着人也站不下：那就先按可用宽度把人数分匀，别一边挤爆、
+            # 另一边空着 —— 分完再收窄，间距照样人人相等。
+            total = room_l + room_r
+            want = int(round(n * room_l / total)) if total > 0 else 0
+            while len(left) > want:
+                right.append(left.pop())
+            while len(left) < want and right:
+                left.append(right.pop())
+        # 二分找「还能塞下所有人」的最大空隙
+        low, high = 0.0, gap
+        for _ in range(24):
+            mid = (low + high) / 2.0
+            if fits(mid):
+                low = mid
+            else:
+                high = mid
+        g = low
+
+    targets = [0.0] * n
+    for i, off in zip(left, offsets(left, g)):
+        targets[i] = anchor_x - off
+    for i, off in zip(right, offsets(right, g)):
+        targets[i] = anchor_x + off
+    return targets
 
 
 class Pet:
@@ -23,6 +101,9 @@ class Pet:
     GRAVITY = 2400.0        # 像素/秒²，从屏幕顶落到地面大约 1 秒，够快但不突兀
     RISE_SPEED = 2400.0     # 起飞上升速度，和重力同量级：上去半秒、下来半秒
     HOLD_POSE = 'drag'      # 被抓着时用素材里的 drag.png（提溜着的样子）
+    CRAWL_FRAMES = ('crawl_1', 'crawl_2')
+    CRAWL_FRAME_SEC = 0.16      # 一帧 0.16 秒：手脚交替约每秒 3 次
+    CRAWL_BODY_PER_SEC = 1.5    # 每秒爬 1.5 个身位；按窗口宽算，缩放档位下观感一致
 
     def __init__(self, sp, win, x, ground_y, drop=True):
         # 窗口由调用方造好再传进来：角色只关心「怎么动」，不关心窗口是谁家的。
@@ -38,9 +119,42 @@ class Pet:
         self.alive = True
         self.y = (-win.win_h - 40.0) if drop else float(ground_y)   # 从屏幕上方看不见的地方开始
         self.top = -win.win_h - 40.0    # 起飞升到的最高处（整个身子刚好出屏）
+        self._crawl_to = None           # 集合落点；在空中时先记着，落地再出发
+        self._crawl_t = 0.0             # 爬行循环帧的计时
+
+    # ---- 集合：贴地爬过去 ----
+
+    def start_crawl(self, target_x):
+        """朝 target_x 爬过去，到位自动站回 idle。
+
+        在空中 / 被抓着时先记下落点，落地那一刻自己出发 —— 刚出场或
+        正被拎起来的那只也不会漏掉这一声集合。
+        """
+        self._crawl_to = float(target_x)
+        if self.phase not in ('fall', 'hold', 'rise'):
+            self._begin_crawl()
+
+    def _begin_crawl(self):
+        if self._crawl_to is None or abs(self._crawl_to - self.x) < 1.0:
+            self._crawl_to = None       # 本来就在旁边，不用爬
+            return
+        self.phase = 'crawl'
+        self.pose = self.CRAWL_FRAMES[0]
+        self.timer = 0.0
+        self._crawl_t = 0.0
+
+    def _stop_crawl(self):
+        """后一个指令 / 拖动 / 起飞一律顶掉爬行：没有冷却，也不排队。"""
+        self._crawl_to = None
+        if self.phase == 'crawl':
+            self.phase = 'idle'
 
     def act(self, pose, dur):
-        """做一个指定动作，dur 秒后自动回 idle。下落、被抓着、起飞时都不接动作。"""
+        """做一个指定动作，dur 秒后自动回 idle。下落、被抓着、起飞时都不接动作。
+
+        新动作一律顶掉正在进行的爬行 —— 连点不用排队，也不会两个姿势交错。
+        """
+        self._stop_crawl()
         if self.phase in ('fall', 'hold', 'rise'):
             return
         self.pose = pose
@@ -52,7 +166,9 @@ class Pet:
         """被抓住：从这一刻起不再受重力，位置交给鼠标。
 
         出场下落到一半也能抓 —— 抓起来就停在手上，松手继续掉。
+        手一碰到人，正在爬的那段就作废：鼠标比指令优先。
         """
+        self._stop_crawl()
         if x is not None:
             self.x = float(x)
         if y is not None:
@@ -84,6 +200,7 @@ class Pet:
         fall，后面完全由重力接管 —— 落地那一下和拖动扔下来一模一样。
         已经在天上（正下落/被拎着）也接指令，重新从当前位置起飞。
         """
+        self._stop_crawl()
         if self.y <= self.top + 1:
             self.phase = 'fall'         # 已经在顶上了，没什么可升的，直接掉
             self.pose = 'fall'
@@ -103,6 +220,15 @@ class Pet:
     def airborne(self):
         return self.phase in ('fall', 'rise')
 
+    @property
+    def crawling(self):
+        return self.phase == 'crawl'
+
+    @property
+    def body_w(self):
+        """站着时人实际占多宽（窗口包含透明留白，比人宽）。集合排队按它算。"""
+        return self.win.body_w
+
     def update(self, dt):
         if self.phase == 'fall':
             self.vy += self.GRAVITY * dt
@@ -113,6 +239,8 @@ class Pet:
                 self.phase = 'idle'
                 self.pose = 'idle'
                 self.landed = True
+                if self._crawl_to is not None:
+                    self._begin_crawl()    # 排队的那声集合，落地就出发
         elif self.phase == 'rise':
             self.y -= self.RISE_SPEED * dt
             if self.y <= self.top:
@@ -123,6 +251,19 @@ class Pet:
                 self.vy = 0.0
         elif self.phase == 'hold':
             pass                    # 位置由拖动直接写入，这里不加速度
+        elif self.phase == 'crawl':
+            remain = self._crawl_to - self.x
+            step = self.win.win_w * self.CRAWL_BODY_PER_SEC * dt
+            self.x += (remain if abs(remain) <= step
+                       else (step if remain > 0 else -step))
+            self._crawl_t += dt
+            self.pose = self.CRAWL_FRAMES[
+                int(self._crawl_t / self.CRAWL_FRAME_SEC) % 2]
+            if abs(self._crawl_to - self.x) <= 0.5:
+                self.x = self._crawl_to
+                self._crawl_to = None
+                self.phase = 'idle'
+                self.pose = 'idle'
         elif self.timer > 0:
             self.timer -= dt
             if self.timer <= 0:

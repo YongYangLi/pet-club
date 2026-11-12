@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """生成表情包素材：assets/stickers/<角色>/<姿势>.png
 
-表情包不用去网上找，也不用画：四个角色本来就有十一张姿势图，挑八张，
+表情包不用去网上找，也不用画：每个角色本来就有十一张姿势图，挑八张，
 裁成 256×256 的卡片，底下配一句话，就是一套自己的表情包了。
 好处是风格和桌面上那几只完全一致 —— 发出去的「比心」就是他自己在比心。
 
@@ -37,7 +37,8 @@ CAP_H = 40                  # 底部文字区高度
 # 表情包顺序 = petclub/media.STICKER_POSES
 POSES = ('idle', 'wave', 'drink', 'heart', 'jump', 'sleep', 'knock', 'drag')
 
-# 每句话都要合角色的口吻（p1 松散、p2 干练、p3 温和、p4 撒娇）
+# 每句话都要合角色的口吻（p1 松散、p2 干练、p3 温和、p4 撒娇、
+# p5 技术流、p6 爽快）
 CAPTION = {
     'p1': {'idle': '摸鱼中', 'wave': '嗨呀', 'drink': '吨吨吨', 'heart': '比心',
            'jump': '冲鸭', 'sleep': '躺平', 'knock': '咚咚咚', 'drag': '我先溜'},
@@ -49,15 +50,17 @@ CAPTION = {
            'jump': '蹦~', 'sleep': '困了', 'knock': '咚咚', 'drag': '别拽'},
     'p5': {'idle': '挂机中', 'wave': '来了', 'drink': '补水', 'heart': '接住',
            'jump': '动一下', 'sleep': '编译中', 'knock': '叩叩', 'drag': '拎走'},
+    'p6': {'idle': '在这儿', 'wave': '来了啊', 'drink': '灌一口', 'heart': '拿着',
+           'jump': '动起来', 'sleep': '眯一觉', 'knock': '敲两下', 'drag': '拎我干嘛'},
 }
 
 CARD_BG = (255, 255, 255, 255)
 CARD_EDGE = (232, 234, 240, 255)
 
-# 文字颜色跟头像色块同一套，五个角色一眼分得开
+# 文字颜色跟头像色块同一套（petclub/chat.AVATAR_COLORS），六个角色一眼分得开
 INK = {'p1': (91, 91, 240), 'p2': (15, 157, 118),
        'p3': (224, 140, 42), 'p4': (214, 69, 93),
-       'p5': (43, 143, 214)}
+       'p5': (43, 143, 214), 'p6': (138, 79, 207)}
 
 FONT_CANDIDATES = ('C:/Windows/Fonts/msyhbd.ttc', 'C:/Windows/Fonts/msyh.ttc',
                    'C:/Windows/Fonts/simhei.ttf', '/System/Library/Fonts/PingFang.ttc')
@@ -111,7 +114,7 @@ def make_card(role, pose):
 
 
 def main(argv):
-    roles = argv[1:] or ['p1', 'p2', 'p3', 'p4']
+    roles = argv[1:] or list(CAPTION)
     total = 0
     for role in roles:
         out_dir = os.path.join(ASSETS, 'stickers', role)

@@ -4,7 +4,7 @@
 验证整条链路，不看单个函数的返回值：
 
   连服务器 → 认领身份 → 桌面上长出自己那只 → 别人认领时他的角色从天而降 →
-  收互动事件（动作 + 气泡 + 聊天记录）→ 他离开后角色消失 →
+  收互动事件（动作 + 气泡 + 聊天记录 + 集合爬行）→ 他离开后角色消失 →
   聊天面板 / 未读 / 托盘闪烁 / 媒体收发 / 拖动 / 认领窗
 
 驱动方式是手摇的：不启动 Qt 的定时器，每一轮自己调一次 `app.tick()`。
@@ -31,10 +31,11 @@ import server as S                                      # noqa: E402
 from test_server import C                               # noqa: E402
 from petclub import actions as A                        # noqa: E402
 from petclub import media                              # noqa: E402
-from petclub.app import App                            # noqa: E402
+from petclub.app import App, GATHER_GAP               # noqa: E402
 from petclub.chat import CONV_ALL                       # noqa: E402
 from petclub.claim import ClaimDialog                   # noqa: E402
-from petclub.config import ROLES, ROLE_NAME, assets_dir  # noqa: E402
+from petclub.config import (ROLES, ROLE_NAME, assets_dir,  # noqa: E402
+                            load_prefs)
 
 TMP = os.path.join(HERE, '..', '.tmp', 'probe-live')
 
@@ -251,6 +252,39 @@ def main():
         app.pets['p2'].pose == 'jump', app.pets['p2'].pose)
     settle()
 
+    # 集合：唯一一条改位置的指令，走的是 crawl 两帧而不是 mirror 姿势
+    c2.drain('event')
+    anchor_x = app.pets['p1'].x
+    before_x = p2.x
+    app.do_action('gather')
+    pump(0.25)
+    ev = c2.drain('event')
+    chk('集合也发一条 event 给对方',
+        ev is not None and ev.get('kind') == 'gather' and not ev.get('to'), ev)
+    chk('集合：发起者招手，自己不爬',
+        app.pets['p1'].pose == 'wave' and not app.pets['p1'].crawling
+        and abs(app.pets['p1'].x - anchor_x) < 1.0,
+        (app.pets['p1'].pose, app.pets['p1'].x))
+    chk('集合：别人的角色用 crawl 两帧在爬',
+        p2.crawling and p2.pose in ('crawl_1', 'crawl_2'),
+        (p2.phase, p2.pose))
+    chk('集合：x 真的在朝发起人靠近',
+        abs(p2.x - anchor_x) < abs(before_x - anchor_x),
+        (before_x, p2.x, anchor_x))
+    chk('集合：最终靠拢并站回 idle',
+        settle() and not p2.crawling and p2.pose == 'idle'
+        and abs(p2.x - anchor_x) <= p2.win.win_w,
+        (p2.x, anchor_x, p2.phase, p2.pose))
+    p1 = app.pets['p1']
+    gap_px = max(p1.body_w, p2.body_w) * GATHER_GAP
+    want = (p1.body_w + p2.body_w) / 2.0 + gap_px
+    chk('集合间距按人的宽度算（窗口那圈透明留白不算）',
+        p1.body_w < p1.win.win_w and p2.body_w < p2.win.win_w,
+        (p1.body_w, p1.win.win_w, p2.body_w, p2.win.win_w))
+    chk('站定后两人身体之间正好是那一个空隙',
+        abs(abs(p2.x - anchor_x) - want) <= 1.0,
+        (p2.x, anchor_x, want))
+
     # ---- 5. 他离开 → 角色从桌面消失 ----
     print('\n--- 离开 ---')
     c2.send(t='leave')
@@ -437,12 +471,20 @@ def main():
     chk('「我的」是自己那八张', chat._pick_grid.count() == 8,
         chat._pick_grid.count())
     chat._fill_page('others')
-    chk('「他人」是另外四个角色各八张', chat._pick_grid.count() == 32,
-        chat._pick_grid.count())
+    want = (len(ROLES) - 1) * 8
+    chk('「他人」是另外 %d 个角色各八张' % (len(ROLES) - 1),
+        chat._pick_grid.count() == want, chat._pick_grid.count())
     chat._fill_page('emoji')
-    chk('「表情」页是内置 emoji',
-        chat._pick_grid.count() == len(media.EMOJI_CHARS),
+    doge = media.doge_path(assets_dir())
+    has_doge = os.path.exists(doge)
+    chk('「表情」页 = 内置 emoji（有贴图时多一格）',
+        chat._pick_grid.count() == len(media.EMOJI_CHARS) + (1 if has_doge else 0),
         chat._pick_grid.count())
+    first = chat._pick_grid.itemAt(0).widget()
+    chk('没有贴图时第一格就是字符 emoji',
+        (first._pix is not None and first._text == '') if has_doge
+        else (first._pix is None and first._text == media.EMOJI_CHARS[0]),
+        (first._pix, first._text))
     chk('翻页时勾选状态跟着走', chat._tabs['emoji'].isChecked()
         and not chat._tabs['mine'].isChecked())
 
@@ -550,7 +592,73 @@ def main():
         app.pets['p1'].pose)
     chk('期间没有未捕获的异常', not ERRORS, ERRORS[:1])
 
-    # ---- 16. 退出 ----
+    # ---- 16. 远程互动开关 ----
+    print('\n--- 远程互动开关 ---')
+    chk('默认是开的', app.remote_on is True, app.remote_on)
+    m = app.tray_menu()
+    item = [a for a in m.actions() if a.text() == '同步远程互动']
+    chk('托盘菜单里有这一项，而且默认勾着',
+        len(item) == 1 and item[0].isCheckable() and item[0].isChecked(),
+        [a.text() for a in m.actions()])
+    app.remote_toggle(False)
+    chk('关掉后偏好落盘', load_prefs().get('remote_actions') is False,
+        load_prefs())
+    m = app.tray_menu()
+    item = [a for a in m.actions() if a.text() == '同步远程互动']
+    chk('重开菜单时勾选跟着状态走',
+        len(item) == 1 and not item[0].isChecked())
+    chk('关掉后自己的角色还在', 'p1' in app.pets and app.pets['p1'].pose == 'idle',
+        app.pets.get('p1').pose if 'p1' in app.pets else None)
+
+    settle()
+    pump(2.8)                   # 先把上一段留下的气泡等过期，下面的判断才说明问题
+    shown = [r for r, b in app.bubbles.items() if b.isVisible()]
+    chk('等了一会儿，桌面上没有气泡了', not shown, shown)
+    tips = len(app.chat_log.get(CONV_ALL) or [])
+    c3.send(t='event', kind='drink', text='')
+    pump(0.6)
+    chk('关掉后他那边发来的指令不演了',
+        app.pets['p2'].pose == 'idle', app.pets['p2'].pose)
+    chk('关掉后我这边也不跟着做', app.pets['p1'].pose == 'idle',
+        app.pets['p1'].pose)
+    shown = [r for r, b in app.bubbles.items() if b.isVisible()]
+    chk('关掉后谁都不冒泡', not shown, shown)
+    log = app.chat_log.get(CONV_ALL) or []
+    chk('但聊天记录里仍旧留一条',
+        len(log) > tips and log[-1].get('kind') == 'tip'
+        and '喝水' in log[-1].get('text', ''), log[-1:])
+
+    why = app.do_action('wave')
+    chk('自己的指令照常发得出去', why is None and app.pets['p1'].pose == 'wave',
+        (why, app.pets['p1'].pose))
+    pump(2.0)
+
+    app.remote_toggle(True)
+    chk('打开后恢复同步', app.remote_on is True
+        and load_prefs().get('remote_actions') is True)
+    c3.send(t='event', kind='drink', text='')
+    pump(0.6)
+    chk('打开后他又演了一遍', app.pets['p2'].pose == 'drink', app.pets['p2'].pose)
+    pump(3.0)
+
+    # 同一个开关也挂在聊天窗左下角的头像菜单上
+    chat._show_me_menu()
+    item = [a for a in chat._me_menu.actions() if a.text() == '同步远程互动']
+    chk('聊天窗头像菜单里也有这一项，勾选跟 App 一致',
+        len(item) == 1 and item[0].isCheckable() and item[0].isChecked(),
+        [a.text() for a in chat._me_menu.actions()])
+    item[0].trigger()
+    chk('在这里关掉，App 和 prefs 一起变',
+        app.remote_on is False and load_prefs().get('remote_actions') is False
+        and chat.remote_on is False,
+        (app.remote_on, load_prefs().get('remote_actions'), chat.remote_on))
+    chat._me_menu.hide()
+    app.remote_toggle(True)
+    chk('从托盘再打开时，聊天窗那份状态也同步回来',
+        app.remote_on is True and chat.remote_on is True,
+        (app.remote_on, chat.remote_on))
+
+    # ---- 17. 退出 ----
     print('\n--- 收尾 ---')
     c2.close()
     c3.close()

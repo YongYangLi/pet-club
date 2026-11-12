@@ -20,7 +20,9 @@ from petclub.sprites import POSES         # noqa: E402
 PASS = []
 FAIL = []
 
-# 明确不留聊天痕迹的：环境动作，动了就动了，不必在群里报一遍
+# 明确不留聊天痕迹的：环境动作，动了就动了，不必在群里报一遍。
+# 这份名单和 actions.TIP 互为对照 —— 名单里的人出现在 TIP 里、名单外的人
+# 不在 TIP 里，都算错（见 test_tips）。
 AMBIENT = ('sleep', 'jump')
 
 
@@ -85,6 +87,16 @@ def test_catalog():
           and '敲敲窗' not in {s['label'] for s in A.ACTIONS.values()},
           repr(A.ORDER))
 
+    # 集合是唯一一条「别人跟着做的是位移」的指令：不摆 mirror 姿势，
+    # 由 App._gather 单独演，排在菜单最后
+    g = A.ACTIONS.get('gather') or {}
+    check('集合：位移标记 + 没有 mirror + 排在最后',
+          g.get('gather') is True and g.get('mirror') is None
+          and A.ORDER[-1] == 'gather' and A.CHAT_ORDER[-1] == 'gather',
+          (g, A.ORDER[-1], A.CHAT_ORDER[-1]))
+    check('集合用的爬行帧在素材表里',
+          {'crawl_1', 'crawl_2'} <= set(POSES))
+
     check('get 不认识的 key 返回 None', A.get('不存在') is None)
 
 
@@ -110,6 +122,9 @@ def test_voice():
     check('起飞两边都有台词（不是单向）',
           A.reply_line('fly', 'p2') and A.say_line('fly', 'p2'),
           (A.reply_line('fly', 'p2'), A.say_line('fly', 'p2')))
+    check('集合两边都有台词（爬过来的人也要应一声）',
+          all(A.reply_line('gather', r) and A.say_line('gather', r)
+              for r in roles))
 
     # 台词挑出来的必须真的属于那个人 —— 串味比没有台词更难发现
     bad = []
@@ -143,9 +158,18 @@ def test_voice():
 def test_tips():
     """互动痕迹的文案：聊天面板靠它把「敲了一下你」写成一句人话。"""
     print('\n--- 互动痕迹 ---')
-    logged = {k for k, s in A.ACTIONS.items() if s.get('log')}
-    check('留痕的指令都在 TIP 里', logged <= set(A.TIP), repr(logged - set(A.TIP)))
-    check('TIP 里没有不留痕的指令', set(A.TIP) <= logged, repr(set(A.TIP) - logged))
+    # TIP 是留痕的唯一开关：在里面就记，不在就是环境动作。名单在这里写死，
+    # 加指令时忘了补 TIP（痕迹静默消失）或者多补一条都会红。
+    logged = set(A.ORDER) - set(AMBIENT) - {'say'}
+    check('TIP 正好覆盖「该留痕的指令」',
+          set(A.TIP) == logged,
+          '多记=%r 漏记=%r' % (sorted(set(A.TIP) - logged),
+                              sorted(logged - set(A.TIP))))
+    check('TIP 里没有指令表之外的 key', set(A.TIP) <= set(A.ACTIONS),
+          repr(sorted(set(A.TIP) - set(A.ACTIONS))))
+    check('不再有第二处留痕开关（log 之类的字段）',
+          all('log' not in s for s in A.ACTIONS.values()),
+          repr([k for k, s in A.ACTIONS.items() if 'log' in s]))
     check('环境动作不留痕（睡觉 / 跳 / 传话）',
           not (set(AMBIENT) | {'say'}) & set(A.TIP),
           repr((set(AMBIENT) | {'say'}) & set(A.TIP)))

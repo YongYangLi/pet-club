@@ -72,7 +72,10 @@ SIDE_BG = CHROME            # 会话栏 = 顶部标题带同一个颜色
 SIDE_SEL = CHROME_SEL
 SIDE_HOVER = CHROME_HOVER
 
-AVATAR_COLORS = ('#5b5bf0', '#0f9d76', '#e08c2a', '#d6455d', '#2b8fd6')
+# 头像色块按 ROLES 的顺序取色，一个身份一个颜色 —— 加角色就往后面接一个，
+# 别复用前面的：两个身份撞色时，会话栏里只能靠首字分辨人。
+AVATAR_COLORS = ('#5b5bf0', '#0f9d76', '#e08c2a', '#d6455d', '#2b8fd6',
+                 '#8a4fcf')
 
 # 系统 UI 字体（微软雅黑 / 苹方）不含彩色 emoji 字形，拿它画 😀 会落到
 # 一套很小的位图 fallback 上，放大就糊。emoji 一律走各平台自己的彩色字体。
@@ -749,9 +752,9 @@ class ConvRow(QWidget):
 class MeBar(QFrame):
     """会话栏底部那条「我是谁」：点一下弹出身份菜单。
 
-    做成可点，是因为「换一个身份 / 退出」原来只藏在桌面角色的右键里 ——
-    人坐在聊天窗里的时候，谁也想不起来去那儿找。悬停给一层浅色底，
-    不然看不出它是能点的。
+    做成可点，是因为「桌宠大小 / 同步远程互动 / 换一个身份 / 退出」原来
+    只藏在桌面角色的右键和托盘里 —— 人坐在聊天窗里的时候，谁也想不起来
+    去那儿找。悬停给一层浅色底，不然看不出它是能点的。
     """
 
     clicked = Signal()
@@ -917,12 +920,13 @@ class AttachChip(QFrame):
 
 
 class ChatWindow(CardWindow):
-    """一个窗口，五个会话。"""
+    """一个窗口，六（N）个会话。"""
 
     def __init__(self, parent=None, on_send=None, on_close=None, me=None,
                  is_online=None, log=None, on_media=None, unread=None,
                  on_action=None, on_leave=None, on_quit=None,
-                 on_pet_size=None, pet_size='default'):
+                 on_pet_size=None, pet_size='default',
+                 remote_on=True, on_remote=None, remote_hint=None):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
@@ -934,6 +938,9 @@ class ChatWindow(CardWindow):
         self.on_leave = on_leave
         self.on_quit = on_quit
         self.on_pet_size = on_pet_size
+        self.on_remote = on_remote
+        self.remote_hint = remote_hint or (lambda: '')
+        self.remote_on = remote_on
         self.pet_size = pet_size
         self.me = me
         self.is_online = is_online or (lambda r: False)
@@ -1040,7 +1047,7 @@ class ChatWindow(CardWindow):
         me_lb.setStyleSheet('color: %s; background: transparent;' % SUB)
         mb.addWidget(me_lb)
         mb.addStretch(1)
-        me_bar.setToolTip('点一下：换一个身份 / 退出')
+        me_bar.setToolTip('点一下：桌宠大小 / 同步远程互动 / 换身份 / 退出')
         me_bar.clicked.connect(self._show_me_menu)
         lv.addWidget(me_bar)
         body.addWidget(left)
@@ -1237,7 +1244,10 @@ class ChatWindow(CardWindow):
     # ---------------- 快捷互动 ----------------
 
     def _show_me_menu(self):
-        """左下角头像的菜单：桌宠大小 / 换一个身份 / 退出。
+        """左下角头像的菜单：桌宠大小 / 同步远程互动 / 换一个身份 / 退出。
+
+        「同步远程互动」和托盘里那一项是同一个开关，只是人坐在聊天窗里时
+        不必再去右下角找托盘图标。勾选状态每次开菜单时按当前值重新读。
 
         菜单没有 parent 托底，引用得自己攥着；上一个多留一拍再放 ——
         点菜单项的 triggered 还在它自己的派发栈上。
@@ -1254,6 +1264,12 @@ class ChatWindow(CardWindow):
             act.triggered.connect(
                 lambda _=False, lv=level: self._on_pet_size(lv))
         m.addSeparator()
+        act = m.addAction('同步远程互动')
+        act.setCheckable(True)
+        act.setChecked(self.remote_on)
+        act.setToolTip(self.remote_hint())
+        act.triggered.connect(self._on_remote)
+        m.addSeparator()
         m.addAction('换一个身份').triggered.connect(self._on_leave)
         m.addAction('退出').triggered.connect(self._on_quit)
         self._me_menu_prev, self._me_menu = self._me_menu, m
@@ -1267,6 +1283,16 @@ class ChatWindow(CardWindow):
         self.pet_size = level
         if self.on_pet_size is not None:
             self.on_pet_size(level)
+
+    def _on_remote(self, on=False):
+        """头像菜单里勾 / 取消「同步远程互动」。
+
+        真正落盘的是 App（托盘那一项走同一条路），这里只按它的返回值
+        更新本地状态 —— 两边都以 App.remote_on 为准，不各记一份。
+        """
+        if self.on_remote is None:
+            return
+        self.remote_on = bool(self.on_remote(on))
 
     def _on_leave(self):
         if self.on_leave is not None:
@@ -1868,6 +1894,14 @@ class ChatWindow(CardWindow):
 
         cells = []
         if page == 'emoji':
+            # 第一格留给自定义贴图（assets/emoji/doge.png）：图在就占首位、走
+            # sticker 通道发原件；图不在就只排字符，不留一个空格子。
+            doge = media.doge_path(assets_dir())
+            if os.path.exists(doge):
+                cells.append(PickerCell(
+                    QPixmap(doge), '', media.DOGE_LABEL + ' · 点一下发送',
+                    lambda _=False, p=doge: self._pick_sticker(p),
+                    self._show_preview, self._hide_preview, self._pick_box))
             for ch in media.EMOJI_CHARS:
                 cells.append(PickerCell(
                     None, ch, '表情 · 点一下发送',
@@ -1920,7 +1954,7 @@ class ChatWindow(CardWindow):
         pop.move(QPoint(int(x), int(y)))
 
     def _sticker_cards(self, page):
-        """这一页有哪些卡片：我的 = 自己八张；他人 = 另外四个角色各八张。"""
+        """这一页有哪些卡片：我的 = 自己八张；他人 = 其余每个角色各八张。"""
         if page == 'mine':
             roles = [self.me] if self.me else []
         else:

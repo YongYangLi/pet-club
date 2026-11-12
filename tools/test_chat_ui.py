@@ -25,12 +25,12 @@ from PIL import Image                                            # noqa: E402
 
 from petclub import actions, media                               # noqa: E402
 from petclub.app import App                                      # noqa: E402
-from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CHIP_H,  # noqa: E402
-                          CHROME, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,
+from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CELL_GAP, CHIP_H,  # noqa: E402
+                          CHROME, COLS, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,
                           PREVIEW_BOX, SEL_BG, SEL_FG, TALK_BG, BubbleText,
                           ChatWindow, Composer, CONV_ALL, ImageViewer, MeBar,
                           StatePill, ToolIcon)
-from petclub.config import ROLES                                 # noqa: E402
+from petclub.config import ROLES, assets_dir                     # noqa: E402
 
 PASS = []
 FAIL = []
@@ -348,11 +348,19 @@ def main():
     chk('连点两次都真的下发（不排队也不拦）',
         [k for k, _t in calls2[-2:]] == ['sleep', 'jump'], calls2[-2:])
 
-    print('\n--- 左下角头像：换身份 / 退出 ---')
+    print('\n--- 左下角头像：换身份 / 退出 / 同步远程互动 ---')
     seen = []
+    toggles = []
+
+    def _on_remote(on):
+        toggles.append(on)
+        return on                   # 和 App 一样：回传切换后的状态
+
     me_win = ChatWindow(None, me='p1',
                         on_leave=lambda: seen.append('leave'),
-                        on_quit=lambda: seen.append('quit'))
+                        on_quit=lambda: seen.append('quit'),
+                        remote_on=True, on_remote=_on_remote,
+                        remote_hint=lambda: '开关说明')
     qapp.processEvents()
     chk('「我是谁」那一条点得动', isinstance(me_win.me_bar, MeBar))
     chk('鼠标样式是手指（看得出能点）',
@@ -366,6 +374,23 @@ def main():
     chk('菜单第一项写清当前身份',
         me_win._me_menu.actions()[0].text().startswith('猥琐'),
         me_win._me_menu.actions()[0].text())
+    remote_item = [a for a in me_win._me_menu.actions()
+                   if a.text() == '同步远程互动']
+    chk('菜单里有「同步远程互动」，默认勾着',
+        len(remote_item) == 1 and remote_item[0].isCheckable()
+        and remote_item[0].isChecked(),
+        [a.text() for a in me_win._me_menu.actions()])
+    chk('这一项的说明来自 App（和托盘同一条文案）',
+        remote_item[0].toolTip() == '开关说明', remote_item[0].toolTip())
+    remote_item[0].trigger()
+    chk('点一下就交给 App 去落盘', toggles == [False], toggles)
+    chk('本地状态跟着 App 的返回值走', me_win.remote_on is False)
+    me_win._me_menu.hide()
+    me_win._show_me_menu()
+    remote_item = [a for a in me_win._me_menu.actions()
+                   if a.text() == '同步远程互动']
+    chk('重开菜单时勾选跟着状态走',
+        len(remote_item) == 1 and not remote_item[0].isChecked())
     me_win._me_menu.hide()
     me_win._on_leave()
     chk('换身份接到 App.do_leave', seen == ['leave'], seen)
@@ -376,9 +401,18 @@ def main():
     pop = chat._picker_pop()
     qapp.processEvents()
     cell = chat._pick_grid.itemAt(0).widget()
-    chk('表情页铺满内置 emoji',
-        chat._pick_grid.count() == len(media.EMOJI_CHARS),
+    # 第一格那张自定义贴图是可选的：有就多一格、而且是图片，没有就只排字符
+    doge = media.doge_path(assets_dir())
+    has_doge = os.path.exists(doge)
+    chk('表情页 = 内置 emoji（有贴图时多一格）',
+        chat._pick_grid.count() == len(media.EMOJI_CHARS) + (1 if has_doge else 0),
         chat._pick_grid.count())
+    if has_doge:
+        chk('第一格是贴图，不是字符',
+            cell._pix is not None and cell._text == '', (cell._pix, cell._text))
+    else:
+        chk('没有贴图时第一格就是字符 emoji',
+            cell._pix is None and cell._text == media.EMOJI_CHARS[0], cell._text)
     chk('表情格放大到 %dpx' % CELL, cell.width() >= 50 and cell.height() >= 50)
     chat._show_preview(cell)
     qapp.processEvents()
@@ -403,7 +437,9 @@ def main():
 
     chat._fill_page('others')
     qapp.processEvents()
-    chk('「他人」页是 32 张贴纸', chat._pick_grid.count() == 32,
+    # 他人 = 除我以外的每个身份各一套八张，人数变了这里跟着变，不写死 32
+    want = (len(ROLES) - 1) * len(media.STICKER_POSES)
+    chk('「他人」页是 %d 张贴纸' % want, chat._pick_grid.count() == want,
         chat._pick_grid.count())
     card = chat._pick_grid.itemAt(0).widget()
     chk('贴纸格子存的是原图而不是 48px 缩略图',
@@ -497,7 +533,9 @@ def main():
         (p2.height(), emoji_h))
     chat._fill_page('others')
     qapp.processEvents()
-    chk('「他人」页恢复四行', chat._pick_box.height() == CELL * 4 + 6,
+    rows = (want + COLS - 1) // COLS
+    chk('「他人」页恢复 %d 行' % rows,
+        chat._pick_box.height() == rows * CELL + (rows - 1) * CELL_GAP,
         chat._pick_box.size())
     chat._fill_page('emoji')
     qapp.processEvents()

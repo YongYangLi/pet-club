@@ -5,7 +5,7 @@ import os
 
 from PIL import Image
 
-# 这一版用得到的姿势；素材里还有 crawl，暂未使用
+# crawl_1 / crawl_2 是「集合」爬行时交替的两帧
 POSES = ('idle', 'wave', 'jump', 'sleep', 'fall', 'drag',
          'drink', 'heart', 'knock', 'crawl_1', 'crawl_2')
 
@@ -50,6 +50,11 @@ class Sprites:
             raise FileNotFoundError('缺少 idle.png：%s' % role_dir)
         self.w = max(im.width for im in self.poses.values())
         self.h = max(im.height for im in self.poses.values())
+
+        # 站着时的实际身体宽度。`w` 是所有姿势的最大包围盒 —— 横过来的
+        # crawl / 张开手的 heart 都比站立宽一大截，拿它当「一个人占多宽」
+        # 会把队伍排得稀稀拉拉（集合的间距按这个值算）。
+        self.body_w = self.poses['idle'].width
 
         # 循环帧的水平锚点修正：crawl_1 与 crawl_2 的包围盒宽度不同，
         # 直接底部居中贴会让身体在换帧时横向跳一下（看起来像"闪"）。

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 from . import config, media, update, windows
 from .actions import (ORDER, get, media_line, reply_line, say_line,
                       tip_text)
-from .actors import Pet
+from .actors import Pet, gather_targets
 from .config import ROLES, ROLE_NAME, assets_dir, files_dir
 from .host import foreground, owner_at, tray_icons, work_area
 from .net import Net
@@ -31,6 +31,7 @@ from .sprites import load_all
 BUBBLE_SEC = 2.6
 GROUND_MARGIN = 34
 DRAG_SLOP = 4
+GATHER_GAP = 0.10       # 集合后两个人**身体之间**的空隙 = 最宽那只的身宽 × 它
 
 CHAT_HISTORY = 50
 TRAY_BLINK_SEC = 0.7
@@ -63,11 +64,13 @@ class App:
         self.qapp.setStyleSheet(UI_QSS)
 
         self.sprites = load_all(assets_dir(), ROLES)
-        # 本机偏好：目前只有「桌宠大小」一项。文件坏了 / 没写过都回到默认。
+        # 本机偏好：桌宠大小、要不要同步别人发来的互动（见托盘菜单）。
+        # 文件坏了 / 没写过都回到默认：默认大小、默认开着远程互动。
         self._prefs = config.load_prefs()
         _size = self._prefs.get('pet_size')
         config.PET_SIZE = (_size if _size in config.PET_SIZE_FACTOR
                            else 'default')
+        self.remote_on = self._prefs.get('remote_actions') is not False
         left, top, right, bottom = work_area()
         self.sw = right - left
         self.sh = bottom - top
@@ -181,6 +184,13 @@ class App:
 
         for pet in list(self.pets.values()):
             pet.update(dt)
+
+        # 爬行时气泡得跟着人走，否则那句「来了」留在原地，人已经爬远了
+        for role in self._bubble_until:
+            pet = self.pets.get(role)
+            b = self.bubbles.get(role)
+            if pet is not None and pet.crawling and b is not None:
+                b.follow(*pet.bubble_anchor())
 
         self._keep_top(now)
 
@@ -314,6 +324,36 @@ class App:
         elif what and dur:
             pet.act(what, dur)
 
+    def _gather(self, anchor, only=None):
+        """让桌上别的角色爬到 anchor 身边，返回真的动起来的身份。
+
+        位置上不了网，也不该上网：每台机器按**自己屏幕上**的站位算落点，
+        所以「向发起人靠拢」在谁的屏幕上都成立，服务端一个字段都不用加。
+        `only` 是点名时那一位；广播时不传，所有在场的别人都过来。
+        """
+        host = self.pets.get(anchor)
+        if host is None:
+            return []
+        roles = [r for r in self.pets
+                 if r != anchor and (only is None or r in only)]
+        if not roles:
+            return []
+        pets = [self.pets[r] for r in roles]
+        # 间距按**人的宽度**算，不按窗口宽：窗口是所有姿势的最大包围盒，
+        # 横着爬的那两张比站着宽一大截，用它排出来的队会散掉。边界也按人的
+        # 宽度留（窗口那圈透明留白不算，它不挡人）。
+        body = max([host.body_w] + [p.body_w for p in pets])
+        half = body / 2.0
+        targets = gather_targets(host.x,
+                                 [p.x for p in pets],
+                                 [p.body_w for p in pets],
+                                 host.body_w,
+                                 body * GATHER_GAP,
+                                 half, max(half, self.sw - half))
+        for r, x in zip(roles, targets):
+            self.pets[r].start_crawl(x)
+        return roles
+
     def on_event(self, m):
         kind = m.get('kind')
         spec = get(kind)
@@ -326,6 +366,13 @@ class App:
         mt = m.get('mt') if isinstance(m.get('mt'), str) else 'text'
         img = m.get('img') if isinstance(m.get('img'), str) else ''
 
+        if not self.remote_on and kind != 'say':
+            # 关了「同步远程互动」：桌面一点不动。但聊天记录里仍旧留一条 ——
+            # 否则对方以为没发出去，我这边事后也说不清刚才为什么没反应。
+            # 传话（kind='say'）不受影响：那是聊天消息，不是互动动作。
+            self._log_tip(kind, ROLE_NAME.get(actor, actor), key)
+            return
+
         self._play(self.pets[actor], self._what(spec), spec.get('dur'))
         if kind == 'say':
             self.say_role(actor, (text if mt == 'text' else '')
@@ -336,6 +383,17 @@ class App:
             self._log_tip(kind, ROLE_NAME.get(actor, actor), key)
 
         me = self.me['role'] if self.me else None
+        if spec.get('gather') and me and me != actor \
+                and (not target or target == me):
+            # 集合没有 mirror 姿势：广播时我这边所有别人都爬向发起人，
+            # 点名时只有我自己爬过去 —— 两边屏幕上演的是同一件事。
+            moved = self._gather(actor, [me] if target else None)
+            if me in moved:
+                reply = reply_line(kind, me)
+                if reply:
+                    self.say_role(me, reply)
+            return
+
         mirror = spec.get('mirror')
         if mirror and me and me != actor:
             # 对全员：桌上所有别人都跟着做（包括我自己），每个客户端演的是
@@ -499,7 +557,7 @@ class App:
         """点自己那只：睡着就戳醒，否则摸一下头。
 
         这一下是本机的悄悄话，不发 event —— 菜单里的「摸摸头」才是会传给
-        别人的指令。不然手滑点一下自己，五个人的屏幕都得跟着跳。
+        别人的指令。不然手滑点一下自己，六个人的屏幕都得跟着跳。
         """
         role = self.me['role'] if self.me else None
         pet = self.pets.get(role) if role else None
@@ -614,12 +672,16 @@ class App:
         # 对方那边他自己会做这个动作。我这边也得看得见 —— 否则
         # 「拍一下他会跳」只有他自己知道，发起的人反而什么都没看到。
         # 对全员时收信的是所有人，所以这边所有别人的角色都跟着做。
-        mirror = spec.get('mirror')
-        if mirror:
-            peers = [to] if to else [r for r in self.pets if r != me]
-            for r in peers:
-                if r in self.pets:
-                    self._play(self.pets[r], mirror, spec.get('dur'))
+        if spec.get('gather'):
+            # 集合是位移不是姿势：别的角色朝我爬过来，点名时只有那一位动。
+            self._gather(me, [to] if to else None)
+        else:
+            mirror = spec.get('mirror')
+            if mirror:
+                peers = [to] if to else [r for r in self.pets if r != me]
+                for r in peers:
+                    if r in self.pets:
+                        self._play(self.pets[r], mirror, spec.get('dur'))
         self.say_role(me, say_line(key, me))
         self._log_tip(key, '你', self._conv_key(to),
                       target=ROLE_NAME.get(to, to) if to else None)
@@ -645,7 +707,10 @@ class App:
                                    on_leave=self.do_leave,
                                    on_quit=self.quit,
                                    on_pet_size=self.set_pet_size,
-                                   pet_size=config.PET_SIZE)
+                                   pet_size=config.PET_SIZE,
+                                   remote_on=self.remote_on,
+                                   on_remote=self.remote_toggle,
+                                   remote_hint=self.remote_hint)
             self.chat.switch(key)
             self.chat.show()
         else:
@@ -795,6 +860,11 @@ class App:
                           'ts': time.time()})
 
     def _log_tip(self, kind, actor, key, target=None):
+        """互动痕迹：**TIP 里有这条指令才记**。
+
+        sleep / jump 这些环境动作不在 TIP 里，tip_text 给空串，这里就此打住 ——
+        不留痕没有第二个开关，判断只发生在 actions.TIP 一处。
+        """
         text = tip_text(kind, actor, one=(key != CONV_ALL), target=target)
         if not text:
             return
@@ -997,6 +1067,11 @@ class App:
         act.setChecked(self._top_on)
         act.setToolTip(self.layer_hint())
         act.triggered.connect(self.layer_toggle)
+        act = m.addAction('同步远程互动')
+        act.setCheckable(True)
+        act.setChecked(self.remote_on)
+        act.setToolTip(self.remote_hint())
+        act.triggered.connect(self.remote_toggle)
         m.addSeparator()
         act = m.addAction(self.update_label())
         act.setEnabled(update.enabled())
@@ -1047,6 +1122,28 @@ class App:
             self.say_role(self.me['role'],
                           '又回到最上层了' if on else '现在会被别的窗口盖住')
         return on
+
+    def remote_hint(self):
+        if self.remote_on:
+            return '别人发来的互动会在桌面上同步演一遍；取消勾选后只在聊天记录里留一条。'
+        return '已关闭：别人发来的互动不会在桌面上演，仅聊天记录留一条；自己发的照常。'
+
+    def remote_toggle(self, on=None):
+        """切换（或按 on 设定）是否同步别人发来的互动，返回切换后的状态。
+
+        只管**收到**的那一侧：指令照样发得出去，聊天记录也照样留痕，
+        只是本机桌面不跟着动 —— 开会、演示、录屏时不想被一堆动作打断就关掉。
+        选择存进 prefs.json，重启后还是这个状态。
+
+        托盘菜单和聊天窗左下角头像菜单共用这一个入口：两处都只是把勾选
+        结果交过来，状态只有 `remote_on` 一份，切完回写给聊天窗。
+        """
+        self.remote_on = (not self.remote_on) if on is None else bool(on)
+        self._prefs['remote_actions'] = self.remote_on
+        config.save_prefs(self._prefs)
+        if self.chat is not None:
+            self.chat.remote_on = self.remote_on
+        return self.remote_on
 
     def do_leave(self):
         if self.me:

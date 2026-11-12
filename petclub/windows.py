@@ -69,6 +69,9 @@ class PetWindow(QWidget):
         self.pdpr = max(0.01, self.dpr / self.scale)
         self.win_w = float(sp.w) * self.scale      # 屏幕物理宽高
         self.win_h = float(sp.h) * self.scale
+        # 站着时人实际占多宽（素材 idle 的宽度）：窗口比人宽 —— 它是所有姿势的
+        # 最大包围盒。集合排队问的是「人有多宽」，所以另存一份。
+        self.body_w = float(getattr(sp, 'body_w', sp.w)) * self.scale
         self._lw = self.win_w / self.dpr          # Qt 逻辑宽高
         self._lh = self.win_h / self.dpr
         self.setFixedSize(max(1, int(round(self._lw))),
