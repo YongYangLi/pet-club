@@ -10,11 +10,12 @@ name: build
 # 而 CI 的 runner 没有可交互桌面（Windows runner 更是 Session 0）。
 # CI 只跑纯逻辑的单元测试，行为和界面由本地那套探针保证。
 
+# 只在打 tag 时跑。日常提交不进 CI —— 单元测试本地跑更快，
+# 而一次双平台打包要几分钟，没必要每推一版就烧两遍。
+# workflow_dispatch 是留给「不建 tag 也想先试一次」的手动入口。
 on:
   push:
-    branches: [main, pyside6]
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
 
 # 打 tag 时要用 gh 建 Release 并上传附件。GITHUB_TOKEN 默认只有读权限，
