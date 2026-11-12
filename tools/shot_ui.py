@@ -40,18 +40,22 @@ SAMPLES = [
 ]
 
 
-def save(widget, name, plain=False):
+def save(widget, name, plain=False, before_grab=None):
     # 聊天窗现在可以自由改大小，adjustSize() 会把它缩回 sizeHint，
     # 截图就不是实际尺寸了。弹层/菜单在各自创建时已经 adjustSize 过。
     #
     # Qt 的一个 grab() 怪癖：全局 QSS + 窗口阴影同时存在时，带 background
     # 样式的子 QLabel 在离屏渲染里会只剩背景、丢掉文字（真实屏幕正常）。
     # 单独抓气泡、或临时清掉全局 QSS 都能还原文字，所以截整窗时走 plain。
+    # 清 QSS 会重排一次布局，滚动位置得在这之后再定。
     qapp = QApplication.instance()
     qss = None
     if plain:
         qss = qapp.styleSheet()
         qapp.setStyleSheet('')
+        QApplication.processEvents()
+    if before_grab is not None:
+        before_grab()
         QApplication.processEvents()
     pm = widget.grab()
     if plain:
@@ -94,9 +98,7 @@ def main():
             'ts': time.time() + i})
     chat.render()
     qapp.processEvents()
-    chat._scroll_end()          # render 里排的是 singleShot(0)，先手动滚到底
-    qapp.processEvents()
-    save(chat, 'chat.png', plain=True)
+    save(chat, 'chat.png', plain=True, before_grab=chat._scroll_end)
 
     print('快捷互动「更多」')
     chat._more_pop.adjustSize()
@@ -121,6 +123,11 @@ def main():
     pop.adjustSize()
     qapp.processEvents()
     save(pop, 'chat_cards.png')
+    card = chat._pick_grid.itemAt(0).widget()
+    chat._show_preview(card)
+    qapp.processEvents()
+    save(chat._preview, 'chat_card_preview.png')
+    chat._hide_preview()
     pop.close()
     chat._pop = None
 

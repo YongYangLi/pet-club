@@ -4,8 +4,8 @@
 四块：
   左边会话栏（搜索、头像、名字+时间、预览、未读红点）
   右边消息流（我的绿气泡靠右、别人的白气泡靠左、系统提示居中灰字）
-  消息流上方一条悬浮的快捷互动条（放不下的收进「更多」）
-  底下输入区（工具图标 / 输入框 / 目标提示 + 发送）
+  输入区正上方一排悬浮的快捷互动圆角按钮（没有底板，放不下的收进「更多」）
+  底下微信式输入区（几行高的文本框；表情 / 文件在左下，发送在右下）
 
 数据仍然不在这个类里：`App.chat_log` 是唯一一份，窗口只是它的视图；
 未读也是 `App.unread`（共享字典），切会话时清零，托盘闪的就是它。
@@ -20,9 +20,9 @@ from PySide6.QtCore import (QBuffer, QIODevice, QPoint, QPointF, QRectF, Qt,
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication,
                            QPainter, QPen, QPixmap)
 from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout,
-                               QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QScrollArea, QSizePolicy,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QMenu,
+                               QPushButton, QScrollArea, QSizePolicy,
+                               QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
 from . import actions, host, media
 from .config import ROLE_NAME, ROLES, assets_dir
@@ -32,16 +32,19 @@ from .windows import to_qimage
 
 CONV_ALL = 'all'
 
-WIDTH, HEIGHT = 880, 660
-MIN_W, MIN_H = 700, 500
-LIST_W = 224
-ROW_H = 68
+WIDTH, HEIGHT = 840, 620
+MIN_W, MIN_H = 660, 460
+LIST_W = 212
+ROW_H = 62
 PASTE_MAX = 3               # 一次最多发几个：多了就是刷屏，对面也来不及看
 GAP_TIME = 300.0
-BUBBLE_MAX = 340
+BUBBLE_MAX = 320
 CELL = 56                   # 拾取面板一格；表情和贴纸都按这个放大
 COLS = 8
-MORE_W = 86                 # 「更多」占位宽度固定，显示/隐藏都不改布局
+MORE_W = 74                 # 「更多」占位宽度固定，显示/隐藏都不改布局
+COMPOSER_H = 78             # 多行输入框：三行半文字，够写一小段话
+PREVIEW_BOX = 200           # 悬停预览的逻辑边长
+PREVIEW_DPR = 2.0           # 位图按 2x 物理像素生成，高分屏上不糊
 
 CANVAS_BG = '#f5f6f8'
 BUBBLE_ME = '#95ec69'
@@ -52,6 +55,17 @@ SIDE_SEL = '#e9eaf0'
 SIDE_HOVER = '#efefef'
 
 AVATAR_COLORS = ('#5b5bf0', '#0f9d76', '#e08c2a', '#d6455d', '#2b8fd6')
+
+# 系统 UI 字体（微软雅黑 / 苹方）不含彩色 emoji 字形，拿它画 😀 会落到
+# 一套很小的位图 fallback 上，放大就糊。emoji 一律走各平台自己的彩色字体。
+EMOJI_FAMILY = ('Apple Color Emoji' if host.IS_MAC else
+                'Segoe UI Emoji' if host.IS_WIN else host.ui_font())
+
+
+def emoji_font(size):
+    f = QFont(EMOJI_FAMILY)
+    f.setPointSizeF(float(size))
+    return f
 
 
 def human_size(n):
@@ -105,19 +119,19 @@ def _hover_events(cls):
 
 @_hover_events
 class ToolIcon(QToolButton):
-    """输入区左上的一颗工具按钮。
+    """输入区左下角的一颗工具按钮。
 
-    原来用 '☺ ▧ ⎘' 三个字符，不同字体下大小形状全不一样，还特别小。
-    这里改成矢量自绘：一套线宽、一套颜色、hover 时放大并浮出底色。
+    只有两颗：表情、文件（图片和文件合并到同一颗里）。矢量自绘，
+    一套线宽一套颜色，hover 时放大并浮出底色，不靠字体里的符号。
     """
 
-    TIPS = {'emoji': '表情 / 表情包', 'image': '发图片', 'file': '发文件'}
+    TIPS = {'emoji': '表情 / 表情包', 'file': '图片 / 文件'}
 
     def __init__(self, kind, parent=None):
         super().__init__(parent)
         self.kind = kind
         self._hover = False
-        self.setFixedSize(36, 36)
+        self.setFixedSize(32, 32)
         self.setToolTip(self.TIPS.get(kind, ''))
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet('QToolButton { border: none; background: transparent; }')
@@ -129,29 +143,24 @@ class ToolIcon(QToolButton):
         if self._hover:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(ACCENT_SOFT))
-            p.drawRoundedRect(QRectF(self.rect()), 9, 9)
+            p.drawRoundedRect(QRectF(self.rect()), 8, 8)
             _zoom(p, self, 1.14)
         p.setPen(QPen(QColor(ACCENT if self._hover else SUB), 1.7,
                       Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.setBrush(Qt.NoBrush)
 
         if self.kind == 'emoji':
-            p.drawEllipse(QPointF(cx, cy), 10, 10)
+            p.drawEllipse(QPointF(cx, cy), 9, 9)
             p.setBrush(QColor(ACCENT if self._hover else SUB))
             p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(cx - 3.8, cy - 2.6), 1.3, 1.5)
-            p.drawEllipse(QPointF(cx + 3.8, cy - 2.6), 1.3, 1.5)
+            p.drawEllipse(QPointF(cx - 3.4, cy - 2.4), 1.2, 1.4)
+            p.drawEllipse(QPointF(cx + 3.4, cy - 2.4), 1.2, 1.4)
             p.setBrush(Qt.NoBrush)
             p.setPen(QPen(QColor(ACCENT if self._hover else SUB), 1.5,
                           Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(QRectF(cx - 5.5, cy - 3.5, 11, 10), 200 * 16, 140 * 16)
-        elif self.kind == 'image':
-            p.drawRoundedRect(QRectF(cx - 10, cy - 8, 20, 16), 3, 3)
-            p.drawEllipse(QPointF(cx - 5, cy - 3.5), 1.8, 1.8)
-            p.drawLine(QPointF(cx - 9, cy + 5), QPointF(cx - 2.5, cy - 0.5))
-            p.drawLine(QPointF(cx - 2.5, cy - 0.5), QPointF(cx + 1.5, cy + 4))
-            p.drawLine(QPointF(cx + 1.5, cy + 4), QPointF(cx + 8, cy - 1))
+            p.drawArc(QRectF(cx - 5, cy - 3, 10, 9), 200 * 16, 140 * 16)
         else:
+            # 一张带折角的文件：图片也走这颗按钮，选完类型再进系统文件框
             p.drawLine(QPointF(cx - 7, cy - 9), QPointF(cx + 3, cy - 9))
             p.drawLine(QPointF(cx + 3, cy - 9), QPointF(cx + 8, cy - 4))
             p.drawLine(QPointF(cx + 8, cy - 4), QPointF(cx + 8, cy + 9))
@@ -166,19 +175,22 @@ class ToolIcon(QToolButton):
 
 @_hover_events
 class ActionChip(QToolButton):
-    """快捷互动的一颗。文字宽度固定，倒计时画角标，不会让整条抖来抖去。"""
+    """快捷互动的一颗。本身就是圆角按钮，背后没有底板。
+
+    文字宽度固定，倒计时画角标，不会让整条抖来抖去。
+    """
 
     def __init__(self, label, cmd, parent=None):
         super().__init__(parent)
         self._hover = False
         self._cd = 0
         self.setText(label)
-        self.setFont(font(9))
+        self.setFont(font(8))
         self.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet('QToolButton { border: none; background: transparent; }')
-        w = QFontMetrics(self.font()).horizontalAdvance(label) + 26
-        self.setFixedSize(w, 30)
+        w = QFontMetrics(self.font()).horizontalAdvance(label) + 20
+        self.setFixedSize(w, 26)
         self.clicked.connect(cmd)
 
     def set_cd(self, sec):
@@ -194,16 +206,16 @@ class ActionChip(QToolButton):
         if self._hover and self.isEnabled():
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(ACCENT))
-            p.drawRoundedRect(r, 9, 9)
+            p.drawRoundedRect(r, 8, 8)
             _zoom(p, self, 1.06)
         elif self.isEnabled():
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(ACCENT_SOFT))
-            p.drawRoundedRect(r, 9, 9)
+            p.drawRoundedRect(r, 8, 8)
         else:
             p.setPen(Qt.NoPen)
             p.setBrush(QColor('#f1f2f5'))
-            p.drawRoundedRect(r, 9, 9)
+            p.drawRoundedRect(r, 8, 8)
         if self._hover and self.isEnabled():
             fg = '#ffffff'
         else:
@@ -224,10 +236,11 @@ class ActionChip(QToolButton):
 
 
 class PickerCell(QToolButton):
-    """拾取面板的一格：emoji 是大字，贴纸是缩好的图。
+    """拾取面板的一格：emoji 是大字，贴纸是图片。
 
-    hover 时放大内容，并把大图交给外部那个共享预览浮层 —— 格子本身
-    只有 56px，再怎么放大也看不清贴纸上的小字，得有一块真正的大图。
+    `_pix` 存的是**原图**（贴纸素材 256×256），不是缩到格子大小的缩略图：
+    格子里按 hover 状态现场高质量缩放，预览浮层也从这张原图出图。
+    以前先压到 48px 再拉到 140px，两层重采样把表情糊成了一团。
     """
 
     def __init__(self, pix, text, label, cmd, on_hover, on_leave, parent=None):
@@ -252,14 +265,13 @@ class PickerCell(QToolButton):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(ACCENT_SOFT))
             p.drawRoundedRect(QRectF(self.rect()), 9, 9)
-            _zoom(p, self, 1.3)
+        k = 1.25 if self._hover else 1.0
         if self._pix is not None:
-            p.drawPixmap(int((self.width() - self._pix.width()) / 2),
-                         int((self.height() - self._pix.height()) / 2), self._pix)
+            side = int((CELL - 8) * k)
+            p.drawPixmap((self.width() - side) // 2,
+                         (self.height() - side) // 2, side, side, self._pix)
         else:
-            f = QFont(host.ui_font())
-            f.setPointSize(28)
-            p.setFont(f)
+            p.setFont(emoji_font(28 * k))
             p.setPen(QColor(FG))
             p.drawText(self.rect(), Qt.AlignCenter, self._text)
         p.end()
@@ -278,7 +290,11 @@ class PickerCell(QToolButton):
 
 
 class PreviewPopup(QFrame):
-    """悬停时弹出的放大预览。常驻引用，只 show/hide，不排队延迟删除。"""
+    """悬停时弹出的放大预览。常驻引用，只 show/hide，不排队延迟删除。
+
+    位图按 `PREVIEW_BOX × PREVIEW_DPR` 的物理像素出图，再标上 dpr：
+    高分屏 1:1 显示，普通屏是 2x 超采样，边缘都干净。
+    """
 
     def __init__(self):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint
@@ -290,39 +306,43 @@ class PreviewPopup(QFrame):
             '#pv { background: #ffffff; border: 1px solid %s;'
             ' border-radius: 12px; }' % BORDER)
         v = QVBoxLayout(self)
-        v.setContentsMargins(12, 10, 12, 10)
-        v.setSpacing(6)
+        v.setContentsMargins(10, 10, 10, 8)
+        v.setSpacing(4)
         self.big = QLabel()
-        self.big.setFixedSize(148, 148)
+        self.big.setFixedSize(PREVIEW_BOX, PREVIEW_BOX)
         self.big.setAlignment(Qt.AlignCenter)
         self.big.setStyleSheet('border: none; background: transparent;')
         v.addWidget(self.big)
         self.cap = QLabel()
         self.cap.setAlignment(Qt.AlignCenter)
-        self.cap.setFont(font(9))
+        self.cap.setFont(font(8))
         self.cap.setStyleSheet('color: %s; border: none; background: transparent;'
                                % SUB)
         v.addWidget(self.cap)
         self.adjustSize()
 
     def show_for(self, cell, top_left):
-        self.big.setText('')
+        side = int(PREVIEW_BOX * PREVIEW_DPR)
+        pm = QPixmap(side, side)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         if cell._pix is not None:
-            pm = cell._pix.scaled(140, 140, Qt.KeepAspectRatio,
-                                  Qt.SmoothTransformation)
+            box = side - 20
+            fit = cell._pix.scaled(box, box, Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
+            p.drawPixmap((side - fit.width()) // 2,
+                         (side - fit.height()) // 2, fit)
         else:
             # 自绘而不是 QLabel.setText：QPainter 的字号不受样式表影响，
-            # emoji 才能真正放大到 84pt。
-            pm = QPixmap(140, 140)
-            pm.fill(Qt.transparent)
-            p = QPainter(pm)
-            p.setRenderHint(QPainter.Antialiasing, True)
-            f = QFont(host.ui_font())
-            f.setPointSize(84)
-            p.setFont(f)
+            # 彩色 emoji 字体才能真正放大到 192pt。
+            p.setFont(emoji_font(96 * PREVIEW_DPR))
             p.setPen(QColor(FG))
-            p.drawText(QRectF(0, 0, 140, 140), Qt.AlignCenter, cell._text)
-            p.end()
+            p.drawText(QRectF(0, 0, side, side), Qt.AlignCenter, cell._text)
+        p.end()
+        pm.setDevicePixelRatio(PREVIEW_DPR)
         self.big.setPixmap(pm)
         self.cap.setText(cell._label)
         self.adjustSize()
@@ -348,7 +368,7 @@ class ConvRow(QWidget):
         self.name = name
         self.selected = False
         self.unread = 0
-        self.pix = None if key == CONV_ALL else avatar(key, 42)
+        self.pix = None if key == CONV_ALL else avatar(key, 40)
         self.preview = ''
         self.stamp = ''
         self.setFixedHeight(ROW_H)
@@ -372,9 +392,9 @@ class ConvRow(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         p.fillRect(self.rect(), QColor(SIDE_SEL if self.selected else SIDE_BG))
         if self.selected:
-            p.fillRect(QRectF(0, 12, 3, ROW_H - 24), QColor(ACCENT))
+            p.fillRect(QRectF(0, 10, 3, ROW_H - 20), QColor(ACCENT))
 
-        ax, ay, s = 13, (ROW_H - 42) // 2, 42
+        ax, ay, s = 12, (ROW_H - 40) // 2, 40
         if self.pix is not None:
             p.drawPixmap(ax, ay, self.pix)
         else:
@@ -385,7 +405,7 @@ class ConvRow(QWidget):
             p.setBrush(QColor(color))
             p.drawEllipse(ax, ay, s, s)
             p.setPen(QColor('#ffffff'))
-            p.setFont(font(12, True))
+            p.setFont(font(11, True))
             p.drawText(QRectF(ax, ay, s, s), Qt.AlignCenter,
                        '群' if self.key == CONV_ALL else self.name[:1])
 
@@ -394,34 +414,108 @@ class ConvRow(QWidget):
         p.setPen(QColor(MUTED))
         p.setFont(font(8))
         tw = p.fontMetrics().horizontalAdvance(self.stamp)
-        p.drawText(QRectF(right - tw, 12, tw, 14), Qt.AlignRight | Qt.AlignVCenter,
+        p.drawText(QRectF(right - tw, 9, tw, 13), Qt.AlignRight | Qt.AlignVCenter,
                    self.stamp)
 
         p.setPen(QColor(FG))
-        p.setFont(font(11, True))
+        p.setFont(font(10, True))
         name_w = max(30, right - tw - 6 - x)
         name = p.fontMetrics().elidedText(self.name, Qt.ElideRight, int(name_w))
-        p.drawText(QRectF(x, 10, name_w, 20), Qt.AlignLeft | Qt.AlignVCenter, name)
+        p.drawText(QRectF(x, 8, name_w, 18), Qt.AlignLeft | Qt.AlignVCenter, name)
 
         badge_w = 0
         if self.unread:
             txt = str(self.unread) if self.unread < 10 else '9+'
-            p.setFont(font(8, True))
+            p.setFont(font(7, True))
             bw = max(18, p.fontMetrics().horizontalAdvance(txt) + 10)
             badge_w = bw + 6
             bx = right - bw
             p.setPen(Qt.NoPen)
             p.setBrush(QColor('#f0445a'))
-            p.drawRoundedRect(QRectF(bx, 38, bw, 17), 8, 8)
+            p.drawRoundedRect(QRectF(bx, 35, bw, 16), 8, 8)
             p.setPen(QColor('#ffffff'))
-            p.drawText(QRectF(bx, 38, bw, 17), Qt.AlignCenter, txt)
+            p.drawText(QRectF(bx, 35, bw, 16), Qt.AlignCenter, txt)
 
         p.setPen(QColor(MUTED))
-        p.setFont(font(9))
+        p.setFont(font(8))
         pw = max(20, right - badge_w - x)
         text = p.fontMetrics().elidedText(self.preview, Qt.ElideRight, int(pw))
-        p.drawText(QRectF(x, 37, pw, 18), Qt.AlignLeft | Qt.AlignVCenter, text)
+        p.drawText(QRectF(x, 34, pw, 17), Qt.AlignLeft | Qt.AlignVCenter, text)
         p.end()
+
+
+class Composer(QTextEdit):
+    """微信式多行输入框：Enter 发送，Shift/Ctrl+Enter 换行。
+
+    QTextEdit 没有 placeholder，空的时候自己在 viewport 上画一行灰字。
+    `text()` / `setText()` 是 QLineEdit 兼容接口 —— 探针和历史脚本还按
+    老接口塞文字，没必要为了换个控件把它们全改一遍。
+    """
+
+    send_requested = Signal()
+
+    def __init__(self, parent, on_paste):
+        super().__init__(parent)
+        self._on_paste = on_paste
+        self._hint = '说点什么…'
+        self.setFont(font(10))
+        self.setFrameShape(QFrame.NoFrame)
+        self.setStyleSheet(
+            'QTextEdit { background: transparent; border: none;'
+            ' padding: 2px 4px; selection-background-color: %s; }'
+            % ACCENT_SOFT)
+        self.setFixedHeight(COMPOSER_H)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.setAcceptDrops(False)      # 拖文件交给主窗口统一处理
+
+    def text(self):
+        return self.toPlainText()
+
+    def setText(self, s):
+        self.setPlainText(s or '')
+
+    def keyPressEvent(self, e):
+        key, mod = e.key(), e.modifiers()
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if mod & (Qt.ShiftModifier | Qt.AltModifier):
+                super().keyPressEvent(e)     # 换行
+            else:
+                self.send_requested.emit()  # 裸 Enter / Ctrl+Enter 都发送
+            e.accept()
+            return
+        if key == Qt.Key_V and (mod & Qt.ControlModifier):
+            if self._on_paste():
+                e.accept()
+                return
+        super().keyPressEvent(e)
+
+    def paintEvent(self, e):
+        super().paintEvent(e)
+        if self.toPlainText().strip():
+            return
+        p = QPainter(self.viewport())
+        p.setFont(self.font())
+        p.setPen(QColor(MUTED))
+        p.drawText(QRectF(self.viewport().rect()).adjusted(6, 3, -6, -3),
+                   Qt.AlignLeft | Qt.AlignTop, self._hint)
+        p.end()
+
+    def dragEnterEvent(self, e):
+        # 拖到文本框上的文件也要交给主窗口走「发附件」那条路，
+        # 而不是被 QTextEdit 当成一段路径文本插进来。
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dropEvent(self, e):
+        win = self.window()
+        if win is not self and hasattr(win, 'dropEvent'):
+            win.dropEvent(e)
+        else:
+            super().dropEvent(e)
 
 
 class ChatWindow(CardWindow):
@@ -464,26 +558,26 @@ class ChatWindow(CardWindow):
         self._build()
         self.refresh_list()
         self.switch(CONV_ALL)
-        QTimer.singleShot(0, self._reflow_actions)
+        QTimer.singleShot(0, self._place_actions)
 
     # ---------------- 构建 ----------------
 
     def _build(self):
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(12)
+        body.setSpacing(10)
 
         left = QWidget()
         left.setFixedWidth(LIST_W)
         left.setStyleSheet('background: %s; border-radius: 12px;' % SIDE_BG)
         lv = QVBoxLayout(left)
-        lv.setContentsMargins(10, 10, 10, 10)
-        lv.setSpacing(8)
+        lv.setContentsMargins(9, 9, 9, 9)
+        lv.setSpacing(7)
 
         self.search = QLineEdit()
         self.search.setPlaceholderText('搜索会话或消息')
         self.search.setFont(font(9))
-        self.search.setFixedHeight(32)
+        self.search.setFixedHeight(30)
         self.search.setStyleSheet(
             'QLineEdit { background:#ffffff; border:1px solid %s; border-radius:9px;'
             ' padding:4px 10px; }' % LINE)
@@ -500,13 +594,13 @@ class ChatWindow(CardWindow):
         right = QWidget()
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
-        rv.setSpacing(8)
+        rv.setSpacing(6)
 
         head = QHBoxLayout()
         head.setContentsMargins(0, 0, 0, 0)
         head.setSpacing(8)
         self.title = QLabel('')
-        self.title.setFont(font(13, True))
+        self.title.setFont(font(12, True))
         head.addWidget(self.title)
         self.state_lb = QLabel('')
         self.state_lb.setFont(font(8))
@@ -517,8 +611,6 @@ class ChatWindow(CardWindow):
         head.addStretch(1)
         rv.addLayout(head)
 
-        rv.addWidget(self._build_actions())
-
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -528,53 +620,53 @@ class ChatWindow(CardWindow):
         self.msg_host = QWidget()
         self.msg_host.setStyleSheet('background: %s;' % CANVAS_BG)
         self.msg_box = QVBoxLayout(self.msg_host)
-        self.msg_box.setContentsMargins(16, 14, 16, 14)
-        self.msg_box.setSpacing(10)
+        # 底部留一条给悬浮快捷按钮，最后一条消息不会被压住
+        self.msg_box.setContentsMargins(12, 10, 12, 42)
+        self.msg_box.setSpacing(8)
         self.msg_box.addStretch(1)
         self.scroll.setWidget(self.msg_host)
         rv.addWidget(self.scroll, 1)
 
+        # 反馈提示只有出事时才占一行；平时收起来，快捷条就紧贴输入框
         self.note = QLabel('')
         self.note.setFont(font(8))
         self.note.setStyleSheet('color: %s;' % SUB)
-        self.note.setFixedHeight(16)
+        self.note.setFixedHeight(14)
+        self.note.hide()
         rv.addWidget(self.note)
 
+        self._build_actions(right)      # 浮层，不进布局：见 _place_actions
         rv.addWidget(self._build_inbox())
         body.addWidget(right, 1)
         self.content.addLayout(body)
         self.setAcceptDrops(True)
 
-    def _build_actions(self):
-        """消息区上方那条悬浮卡片：宽就多摆几颗，窄就把剩下的收进「更多」。"""
-        bar = QFrame()
+    def _build_actions(self, stage):
+        """输入框正上方一排圆角按钮，浮在消息画布上。
+
+        容器完全透明：没有白底卡片、没有边框、没有阴影，也没有「快捷互动」
+        标题 —— 看上去就是一颗颗按钮浮在灰色画布上。它不进布局，高度不占
+        消息区的位置；宽就多摆几颗，窄就把剩下的收进「更多」。
+        """
+        bar = QWidget(stage)
         bar.setObjectName('actbar')
-        bar.setStyleSheet(
-            '#actbar { background: #ffffff; border: 1px solid %s;'
-            ' border-radius: 12px; }' % LINE)
-        shadow = QGraphicsDropShadowEffect(bar)
-        shadow.setBlurRadius(14)
-        shadow.setOffset(0, 3)
-        shadow.setColor(QColor(17, 24, 39, 24))
-        bar.setGraphicsEffect(shadow)
+        bar.setFixedHeight(28)
+        bar.setStyleSheet('#actbar { background: transparent; }')
 
         row = QHBoxLayout(bar)
-        row.setContentsMargins(10, 7, 8, 7)
-        row.setSpacing(8)
-        cap = QLabel('快捷互动')
-        cap.setFont(font(8, True))
-        cap.setStyleSheet('color: %s;' % MUTED)
-        row.addWidget(cap)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(5)
 
         self._chip_host = QWidget(bar)
         self._chip_lay = QHBoxLayout(self._chip_host)
         self._chip_lay.setContentsMargins(0, 0, 0, 0)
-        self._chip_lay.setSpacing(6)
+        self._chip_lay.setSpacing(5)
         row.addWidget(self._chip_host, 1)
 
         self._more_pop = QFrame(None, Qt.Popup)
+        self._more_pop.setObjectName('more')
         self._more_pop.setStyleSheet(
-            'QFrame { background: #ffffff; border: 1px solid %s;'
+            '#more { background: #ffffff; border: 1px solid %s;'
             ' border-radius: 12px; }' % BORDER)
         self._more_grid = QGridLayout(self._more_pop)
         self._more_grid.setContentsMargins(10, 10, 10, 10)
@@ -597,14 +689,14 @@ class ChatWindow(CardWindow):
         ml.setContentsMargins(0, 0, 0, 0)
         self.more_btn = QToolButton(self._more_slot)
         self.more_btn.setText('更多 ▾')
-        self.more_btn.setFont(font(9))
-        self.more_btn.setFixedHeight(30)
+        self.more_btn.setFont(font(8))
+        self.more_btn.setFixedHeight(26)
         self.more_btn.setCursor(Qt.PointingHandCursor)
         self.more_btn.setStyleSheet(
-            'QToolButton { border: none; border-radius: 9px; padding: 0 8px;'
-            ' color: %s; background: %s; }'
+            'QToolButton { border: none; border-radius: 8px;'
+            ' padding: 0 9px; color: %s; background: %s; }'
             'QToolButton:hover { color: #ffffff; background: %s; }'
-            % (SUB, FIELD, ACCENT))
+            % (SUB, ACCENT_SOFT, ACCENT))
         self.more_btn.clicked.connect(self._show_more)
         ml.addWidget(self.more_btn)
         row.addWidget(self._more_slot)
@@ -614,59 +706,50 @@ class ChatWindow(CardWindow):
         return bar
 
     def _build_inbox(self):
-        """工具条 / 输入框 / 目标+发送，三段分开，谁也不挤谁。"""
+        """微信式的一个白框：上面几行文字，左下工具、右下发送，全在框内。"""
         inbox = QFrame()
         inbox.setObjectName('inbox')
         inbox.setStyleSheet(
             '#inbox { background: %s; border: 1px solid %s; border-radius: 12px; }'
             % (WINDOW, LINE))
         iv = QVBoxLayout(inbox)
-        iv.setContentsMargins(12, 8, 12, 10)
-        iv.setSpacing(7)
+        iv.setContentsMargins(10, 8, 10, 8)
+        iv.setSpacing(2)
 
-        tools = QHBoxLayout()
-        tools.setContentsMargins(0, 0, 0, 0)
-        tools.setSpacing(4)
-        self.icon_btn = {}
-        for kind in ('emoji', 'image', 'file'):
-            b = ToolIcon(kind, inbox)
-            b.clicked.connect(lambda _=False, k=kind: self._on_icon(k))
-            tools.addWidget(b)
-            self.icon_btn[kind] = b
-        tools.addStretch(1)
-        hint = QLabel('Enter 发送   ·   Ctrl+V 贴图   ·   拖文件进来')
-        hint.setFont(font(8))
-        hint.setStyleSheet('color: %s;' % MUTED)
-        tools.addWidget(hint)
-        iv.addLayout(tools)
-
-        self.field = QLineEdit()
-        self.field.setPlaceholderText('说点什么…')
-        self.field.setFont(font(11))
-        self.field.setFixedHeight(40)
-        self.field.setStyleSheet(
-            'QLineEdit { background: %s; border: 1px solid %s;'
-            ' border-radius: 10px; padding: 6px 12px; }'
-            'QLineEdit:focus { border-color: %s; background: #ffffff; }'
-            % (FIELD, LINE, ACCENT))
-        self.field.returnPressed.connect(self.send)
+        self.field = Composer(inbox, self._paste)
+        self.field.send_requested.connect(self.send)
         iv.addWidget(self.field)
 
         foot = QHBoxLayout()
         foot.setContentsMargins(0, 0, 0, 0)
-        foot.setSpacing(8)
+        foot.setSpacing(4)
+        self.icon_btn = {}
+        for kind in ('emoji', 'file'):
+            b = ToolIcon(kind, inbox)
+            b.clicked.connect(lambda _=False, k=kind: self._on_icon(k))
+            foot.addWidget(b)
+            self.icon_btn[kind] = b
+        foot.addSpacing(6)
+
         self.target_lb = QLabel('')
         self.target_lb.setFont(font(8))
         self.target_lb.setStyleSheet('color: %s;' % MUTED)
         foot.addWidget(self.target_lb)
         foot.addStretch(1)
-        self.send_btn = QPushButton('发送')
+
+        self.hint = QLabel('Enter 发送  ·  Shift+Enter 换行  ·  Ctrl+V 贴图')
+        self.hint.setFont(font(8))
+        self.hint.setStyleSheet('color: %s;' % MUTED)
+        foot.addWidget(self.hint)
+        foot.addSpacing(6)
+
+        self.send_btn = QPushButton('发送', inbox)
         self.send_btn.setCursor(Qt.PointingHandCursor)
-        self.send_btn.setFixedSize(96, 36)
-        self.send_btn.setFont(font(10, True))
+        self.send_btn.setFixedSize(80, 30)
+        self.send_btn.setFont(font(9, True))
         self.send_btn.setStyleSheet(
             'QPushButton { background: %s; color: #ffffff; border: none;'
-            ' border-radius: 10px; padding: 0; }'
+            ' border-radius: 8px; padding: 0; }'
             'QPushButton:hover { background: %s; }'
             'QPushButton:disabled { background: #dfe1ea; }'
             % (ACCENT, '#4a4ade'))
@@ -703,9 +786,27 @@ class ChatWindow(CardWindow):
                 b.setToolTip('还要等 %d 秒' % cd if cd else
                              actions.get(key).get('hint', ''))
 
+    def _place_actions(self):
+        """把按钮条按到消息区底部内侧：浮在灰色画布上，不占布局高度。"""
+        bar = getattr(self, 'act_bar', None)
+        scroll = getattr(self, 'scroll', None)
+        if bar is None or scroll is None:
+            return
+        self._reflow_actions()
+        r = scroll.geometry()
+        if r.width() <= 0 or r.height() <= 0:
+            return
+        bar.move(r.x() + 12, r.bottom() - bar.height() - 8)
+        bar.raise_()
+        if not bar.isVisible():
+            bar.show()
+
     def _reflow_actions(self):
-        """按当前宽度决定摆几颗，其余进「更多」。窗口拉大拉小都会重算。"""
-        avail = self._chip_host.width()
+        """按消息区宽度决定摆几颗，其余进「更多」。窗口拉大拉小都会重算。
+
+        浮层宽度只包住真正显示的按钮，旁边的画布照样能点、能滚。
+        """
+        avail = self.scroll.width() - 24
         if avail <= 0 or avail == self._act_avail:
             return
         self._act_avail = avail
@@ -720,8 +821,8 @@ class ChatWindow(CardWindow):
         hidden = []
         for key in actions.ORDER:
             chip = self._chips[key]
-            w = chip.width() + 6
-            if not hidden and used + w <= avail:
+            w = chip.width() + 5
+            if not hidden and used + w + MORE_W + 8 <= avail:
                 lay.addWidget(chip)
                 chip.show()
                 used += w
@@ -733,6 +834,7 @@ class ChatWindow(CardWindow):
         self.more_btn.setToolTip('%d 个互动在「更多」里' % len(hidden)
                                  if hidden else '')
         self._sync_more()
+        self.act_bar.setFixedWidth(used + MORE_W + 9)
 
     def _sync_more(self):
         lay = self._more_grid
@@ -976,28 +1078,26 @@ class ChatWindow(CardWindow):
             # 发出来的 emoji 原来是 10pt 的一行小字，聊天里根本看不清
             char = e.get('char') or e.get('text') or ''
             lb = QLabel(char)
-            f = QFont(host.ui_font())
-            f.setPointSize(32)
-            lb.setFont(f)
+            lb.setFont(emoji_font(30))
             lb.setStyleSheet(
-                'background: %s; padding: 6px 12px; border-radius: 12px;'
+                'background: %s; padding: 4px 10px; border-radius: 12px;'
                 % (BUBBLE_ME if mine else BUBBLE_OTH))
             return lb
 
         text = e.get('text') or ''
         lb = QLabel(text)
         lb.setWordWrap(True)
-        lb.setFont(font(11))
+        lb.setFont(font(10))
         lb.setMaximumWidth(BUBBLE_MAX)
         lb.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Minimum)
         lb.setTextInteractionFlags(Qt.TextSelectableByMouse)
         if mine:
             lb.setStyleSheet(
-                'background: %s; color: %s; padding: 10px 14px;'
+                'background: %s; color: %s; padding: 8px 12px;'
                 ' border-radius: 12px;' % (BUBBLE_ME, BUBBLE_ME_FG))
         else:
             lb.setStyleSheet(
-                'background: %s; color: %s; padding: 10px 14px;'
+                'background: %s; color: %s; padding: 8px 12px;'
                 ' border: 1px solid #e6e6e6; border-radius: 12px;'
                 % (BUBBLE_OTH, '#111827'))
         return lb
@@ -1057,6 +1157,7 @@ class ChatWindow(CardWindow):
 
     def set_note(self, text):
         self.note.setText(text or '')
+        self.note.setVisible(bool(text))
 
     # ---------------- 发送 ----------------
 
@@ -1081,32 +1182,45 @@ class ChatWindow(CardWindow):
     def _on_icon(self, kind):
         if self._pop is not None and self._pop.isVisible():
             self._close_pop()
-            return
+            if kind == 'emoji':
+                return                  # 再点一次表情就是收起
         if kind == 'emoji':
-            self._picker_pop()
-        elif kind == 'image':
+            pop = self._picker_pop()
+            btn = self.icon_btn['emoji']
+            pop.move(btn.mapToGlobal(QPoint(0, -pop.height() - 6)))
+            pop.show()
+        else:
+            self._file_menu()
+
+    def _file_menu(self):
+        """图片和文件共用一颗按钮：先选类型，再进系统文件框。"""
+        menu = QMenu(self)
+        img = menu.addAction('发送图片')
+        any_file = menu.addAction('发送文件（任意类型）')
+        btn = self.icon_btn['file']
+        pos = btn.mapToGlobal(QPoint(0, -menu.sizeHint().height() - 6))
+        picked = menu.exec(pos)
+        self._menu_prev = menu          # exec 返回后别立刻丢 Python 引用
+        if picked is img:
             path, _ = QFileDialog.getOpenFileName(
-                self, '发图片', '', '图片 (*.png *.jpg *.jpeg *.gif *.webp *.bmp)')
+                self, '发图片', '',
+                '图片 (*.png *.jpg *.jpeg *.gif *.webp *.bmp);;所有文件 (*)')
             if path:
                 self._send_media('img', path)
-            return
-        elif kind == 'file':
+        elif picked is any_file:
             path, _ = QFileDialog.getOpenFileName(self, '发文件', '')
             if path:
                 self._send_media('file', path)
-            return
-        if self._pop is not None:
-            btn = self.icon_btn.get(kind)
-            pos = btn.mapToGlobal(QPoint(0, -self._pop.height() - 6)) if btn else QPoint(0, 0)
-            self._pop.move(pos)
-            self._pop.show()
 
     def _picker_pop(self):
         """表情 / 表情包拾取面板：三页，同一块格子换内容。"""
         pop = QFrame(None, Qt.Popup)
         self._pop = pop             # 弹层没有 parent，引用必须自己先攥住
+        # QLabel 也是 QFrame，选择器必须限定 objectName，否则提示文字会
+        # 被套上一圈白底圆角边框。
+        pop.setObjectName('pick')
         pop.setStyleSheet(
-            'QFrame { background: #ffffff; border: 1px solid %s;'
+            '#pick { background: #ffffff; border: 1px solid %s;'
             ' border-radius: 12px; }' % BORDER)
         v = QVBoxLayout(pop)
         v.setContentsMargins(10, 10, 10, 10)
@@ -1120,7 +1234,7 @@ class ChatWindow(CardWindow):
             b = QToolButton(pop)
             b.setText(label)
             b.setCheckable(True)
-            b.setFont(font(9))
+            b.setFont(font(8))
             b.setCursor(Qt.PointingHandCursor)
             b.setStyleSheet(
                 'QToolButton { border: none; border-radius: 7px;'
@@ -1190,9 +1304,8 @@ class ChatWindow(CardWindow):
         else:
             cards = self._sticker_cards(page)
             for i, path in enumerate(cards):
-                pix = QPixmap(path).scaled(
-                    CELL - 8, CELL - 8, Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation)
+                # 原图进 PickerCell，缩放只发生在绘制的那一刻
+                pix = QPixmap(path)
                 cell = PickerCell(
                     pix, '', self._sticker_tip(path),
                     lambda _=False, p=path: self._pick_sticker(p),
@@ -1249,13 +1362,6 @@ class ChatWindow(CardWindow):
 
     # ---------------- 粘贴 / 拖放 ----------------
 
-    def keyPressEvent(self, e):
-        if (e.key() == Qt.Key_V and (e.modifiers() & Qt.ControlModifier)
-                and self._paste()):
-            e.accept()
-            return
-        super().keyPressEvent(e)
-
     def _paste(self):
         md = QApplication.clipboard().mimeData()
         if md is None:
@@ -1299,17 +1405,20 @@ class ChatWindow(CardWindow):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
+        hint = getattr(self, 'hint', None)
+        if hint is not None:
+            hint.setVisible(self.width() > 780)
         if not self._reflow_pending:
             self._reflow_pending = True
             QTimer.singleShot(0, self._do_reflow)
 
     def _do_reflow(self):
         self._reflow_pending = False
-        self._reflow_actions()
+        self._place_actions()
 
     def showEvent(self, e):
         super().showEvent(e)
-        QTimer.singleShot(0, self._reflow_actions)
+        QTimer.singleShot(0, self._place_actions)
 
     def lift(self):
         if self.isMinimized():
