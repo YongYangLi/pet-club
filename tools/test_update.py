@@ -247,9 +247,15 @@ def main():
     check('换完顺手删掉 .new.json', 'del "%NEW%.json"' in script)
     check('拉起前先等一拍（躲开落地扫描）',
           script.index('ping') < script.index('start ""'))
+    # EXENAME 取的是 os.path.basename(exe)。POSIX 上 basename 不认反斜杠，
+    # 拿 'C:\a b\pet-club.exe' 算出来是整串路径 —— 所以按同一套计算比，
+    # 断言的仍然是「脚本里用的是文件名，不是路径」这件事。
+    expect_name = os.path.basename(r'C:\a b\pet-club.exe')
     check('拉起后会确认进程真的在',
-          'set "EXENAME=pet-club.exe"' in script
-          and 'IMAGENAME eq %EXENAME%' in script)
+          ('set "EXENAME=%s"' % expect_name) in script
+          and 'IMAGENAME eq %EXENAME%' in script,
+          (expect_name, [l for l in script.splitlines()
+                         if 'EXENAME' in l][:2]))
     check('没起来会再拉一次（两次 start）', script.count('start ""') == 2)
 
     print('\n--- 拉起新版本时环境必须干净 ---')
