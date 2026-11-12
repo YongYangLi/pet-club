@@ -21,6 +21,12 @@ jobs:
   build:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    # 测试会打印中文用例名。Windows runner 的控制台默认还是 cp1252，
+    # 一句中文就 UnicodeEncodeError、整套测试直接挂 —— 所以在 job 级别
+    # 把 Python 的 stdin/stdout 钉成 UTF-8，两个平台行为一致。
+    env:
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: 'utf-8'
     strategy:
       fail-fast: false          # 一边失败不要影响另一边，两个平台的结论要都能看到
       matrix:

@@ -49,6 +49,47 @@ def serve(directory):
     return 'http://127.0.0.1:%d' % srv.server_address[1], srv.shutdown
 
 
+def test_swap():
+    """只读目标真的换得掉 —— 这一步只能在 Windows 上验。
+
+    换文件靠一个 .bat（cmd + move + 只读位），macOS 上没有这套，
+    客户端那边也是关掉自动更新的，所以直接跳过。
+    """
+    if sys.platform != 'win32':
+        print('\n--- 真跑一遍换文件 ---')
+        print('[skip] 换文件脚本是 Windows 的 .bat，这个平台上跳过')
+        return
+    print('\n--- 真跑一遍换文件（只读目标）---')
+    # 桌面上那个 exe 就是只读的：从浏览器/压缩包出来的文件常带只读位，
+    # 而 move 覆盖只读文件会「拒绝访问」。这是「下好了却装不上」的根因，
+    # 所以这里不测字符串，直接把脚本跑起来看文件有没有换掉。
+    swap_dir = os.path.join(TMP, 'swap')
+    os.makedirs(swap_dir, exist_ok=True)
+    real = os.path.join(swap_dir, 'app.exe')
+    fresh = real + '.new'
+    with open(real, 'wb') as f:
+        f.write(b'OLD')
+    os.chmod(real, os.stat(real).st_mode & ~0o200)          # 摘掉写位 = 只读
+    check('目标真的是只读', not os.access(real, os.W_OK), oct(os.stat(real).st_mode))
+    with open(fresh, 'wb') as f:
+        f.write(b'NEW')
+
+    log = os.path.join(swap_dir, 'update.log')
+    bat = os.path.join(swap_dir, 'run-update.bat')
+    with open(bat, 'w', encoding='mbcs', errors='replace') as f:
+        f.write(update._script(real, fresh, relaunch=False, pid=999999, log=log))
+    subprocess.call(['cmd', '/c', bat], stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    body = open(real, 'rb').read()
+    check('只读目标也能换上', body == b'NEW', body)
+    check('.new 用完就没了', not os.path.exists(fresh))
+    text = open(log, encoding='mbcs', errors='replace').read() if os.path.exists(log) else ''
+    check('换了什么都记进日志', '开始更新' in text and '换好了' in text, text.strip())
+
+    update._clear_readonly(real)
+    check('_clear_readonly 摘得掉只读位', os.access(real, os.W_OK))
+
+
 def main():
     os.makedirs(TMP, exist_ok=True)
     for name in os.listdir(TMP):
@@ -260,35 +301,8 @@ def main():
                 os.environ[k] = v
         os.environ.pop('PET_CLUB_KEEP', None)
 
-    print('\n--- 真跑一遍换文件（只读目标）---')
-    # 桌面上那个 exe 就是只读的：从浏览器/压缩包出来的文件常带只读位，
-    # 而 move 覆盖只读文件会「拒绝访问」。这是「下好了却装不上」的根因，
-    # 所以这里不测字符串，直接把脚本跑起来看文件有没有换掉。
-    swap_dir = os.path.join(TMP, 'swap')
-    os.makedirs(swap_dir, exist_ok=True)
-    real = os.path.join(swap_dir, 'app.exe')
-    fresh = real + '.new'
-    with open(real, 'wb') as f:
-        f.write(b'OLD')
-    os.chmod(real, os.stat(real).st_mode & ~0o200)          # 摘掉写位 = 只读
-    check('目标真的是只读', not os.access(real, os.W_OK), oct(os.stat(real).st_mode))
-    with open(fresh, 'wb') as f:
-        f.write(b'NEW')
+    test_swap()
 
-    log = os.path.join(swap_dir, 'update.log')
-    bat = os.path.join(swap_dir, 'run-update.bat')
-    with open(bat, 'w', encoding='mbcs', errors='replace') as f:
-        f.write(update._script(real, fresh, relaunch=False, pid=999999, log=log))
-    subprocess.call(['cmd', '/c', bat], stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    body = open(real, 'rb').read()
-    check('只读目标也能换上', body == b'NEW', body)
-    check('.new 用完就没了', not os.path.exists(fresh))
-    text = open(log, encoding='mbcs', errors='replace').read() if os.path.exists(log) else ''
-    check('换了什么都记进日志', '开始更新' in text and '换好了' in text, text.strip())
-
-    update._clear_readonly(real)
-    check('_clear_readonly 摘得掉只读位', os.access(real, os.W_OK))
 
     print('\n--- 配置 ---')
     check('版本号是 三段式', len(config.VERSION.split('.')) == 3, config.VERSION)
