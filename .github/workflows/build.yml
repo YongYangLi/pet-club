@@ -33,6 +33,11 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONIOENCODING: 'utf-8'
+      # CI 的 stdout 是管道（BufferedWriter，带内部锁）。测试起的 daemon 线程
+      # 若在解释器 finalize 时 print，会 _enter_buffered_busy 然后直接 abort
+      # （mac 上 exit 134 / Abort trap: 6），且缓冲还会把崩溃前的日志吞掉。
+      # 无缓冲把 stdout.buffer 变成 FileIO，顺带让 Actions 日志实时可见。
+      PYTHONUNBUFFERED: '1'
     strategy:
       fail-fast: false          # 一边失败不要影响另一边，两个平台的结论要都能看到
       matrix:

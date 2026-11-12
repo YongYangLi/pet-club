@@ -117,14 +117,28 @@ def claimed(players):
 
 def main():
     # ⚠️ 巡查间隔必须在启动巡查线程**之前**调小：
-    # reaper_loop 一进循环就 time.sleep(REAP_INTERVAL)，那一下就把值读走了，
-    # 之后线程已经在长睡里，再改也等不到它醒。
+    # 循环一进来就把 REAP_INTERVAL 读进 wait()，这一觉睡下去再改要等下一轮。
     S.HEARTBEAT_TIMEOUT = 30.0      # 这个每次 reap 调用时才读，随时改都生效
     S.REAP_INTERVAL = 0.2
     srv = S.Server(('127.0.0.1', 0), S.Handler)
     port = srv.server_address[1]
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    threading.Thread(target=S.reaper_loop, daemon=True).start()
+    serve = threading.Thread(target=srv.serve_forever, daemon=True)
+    serve.start()
+
+    # S.reaper_loop 是 while True 的常驻线程，测试跑完也不会退。它留在进程里，
+    # 一旦在解释器 finalize 时正好写 stdout，就会撞 BufferedWriter 的锁直接
+    # abort。测试自己起的线程自己收：包一层带 Event 的循环，末尾 set + join。
+    stop_reaper = threading.Event()
+
+    def reap():
+        while not stop_reaper.wait(S.REAP_INTERVAL):
+            try:
+                S.REG.reap()
+            except Exception as ex:      # 巡查线程绝不能死
+                S.log('巡查出错：%r' % (ex,))
+
+    reaper = threading.Thread(target=reap, daemon=True)
+    reaper.start()
 
     # ---- 1. 一连上就告诉现状（没有房间码，也没有 query 也能拿到）----
     a = C(port)
@@ -306,6 +320,13 @@ def main():
     for x in (a, b, e, f, g, h, i2, z):
         x.close()
     srv.shutdown()
+    srv.server_close()
+    serve.join(2)
+    stop_reaper.set()
+    reaper.join(2)
+    # Handler 也是 daemon 线程，finally 里还会 log('连接断开')。到这里已经不需要
+    # 服务端日志了，掐掉它，免得有落后的线程把 print 拖进解释器 finalize。
+    S.log = lambda *_a, **_kw: None
 
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))
     if FAIL:
