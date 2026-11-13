@@ -2480,18 +2480,22 @@ class ChatWindow(CardWindow):
 
         规则：人物一直置顶、聊天框会让人。切走的时候顺手把表情弹层收掉，
         不然面板退了它还在上面飘着。
+
+        返回「这一轮刚刚置顶了自己」—— 调用方要据此立刻把角色插回最前面，
+        否则聊天框激活后会压住角色好几秒（见 app._keep_top）。
         """
         if fg is None:
-            return
+            return False
         pop = self._pop if (self._pop is not None and self._pop.isVisible()) else None
         on = host.is_foreground(fg, self, pop)
         if on == self._top_on:
-            return
+            return False
         self._top_on = on
         host.set_topmost(self, on)
         if not on:
             self._close_pop()
             self._hide_preview()
+        return on
 
     def alive(self):
         """窗口收起来（隐藏 / 最小化）之后，消息要照常算未读。"""

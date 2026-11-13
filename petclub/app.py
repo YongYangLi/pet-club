@@ -22,7 +22,7 @@ from .actions import (ORDER, get, media_line, reply_line, say_line,
 from .actors import Pet, gather_targets
 from .effects import Fireworks
 from .config import ROLES, ROLE_NAME, assets_dir, files_dir
-from .host import cursor_pos, foreground, owner_at, tray_icons, work_area
+from .host import cursor_pos, foreground, hwnd_at, owner_at, tray_icons, work_area
 from .net import Net
 from .chat import CONV_ALL, ChatWindow
 from .claim import ClaimDialog
@@ -354,13 +354,42 @@ class App:
             self._sit_due_until = now + 120.0
             self.say_role(me, '坐挺久了，起来动动？', sec=10.0)
 
+    def _chat_hwnd(self):
+        """聊天框的窗口句柄；没开 / 已经收起来就是 0。"""
+        chat = self.chat
+        if chat is None:
+            return 0
+        try:
+            if not chat.isVisible():
+                return 0
+            return int(chat.winId())
+        except RuntimeError:            # 底层 C++ 对象已经没了
+            return 0
+
+    def _covered_by_chat(self, pt, pet_win):
+        """盖住角色的那个自家窗口，是不是聊天框。
+
+        「始终置顶」是对角色说的：聊天框也是自己的一部分，它压住角色等于
+        角色消失了。所以自家聊天框要像别的程序一样，把角色重新插上去。
+        预览大图 / 表情弹层 / 右键菜单 / 头顶气泡不在此列 —— 那些是临时浮层，
+        本来就该压在角色上方，抢的话会出现「点菜单时人被顶到菜单上面」。
+        """
+        if owner_at(pt[0], pt[1], pet_win) != 'own':
+            return False
+        hwnd = self._chat_hwnd()
+        return bool(hwnd) and hwnd_at(pt[0], pt[1]) == hwnd
+
     def _keep_top(self, now):
         fg = foreground()
         switched = fg != self._last_fg
         self._last_fg = fg
         chat = self.chat
         if chat is not None and chat.alive():
-            chat.follow(fg)
+            # 聊天框刚把自己置顶（用户点了它 / 刚打开）时立刻把角色插回去，
+            # 不然巡检要等下一轮，用户会看到「人被聊天框盖住了」好几秒。
+            if chat.follow(fg) and self._top_on:
+                for pet in self.pets.values():
+                    pet.win.reassert_top()
 
         if not self._top_on or not self.pets:
             return
@@ -371,7 +400,11 @@ class App:
             pt = pet.win.hit_point()
             if pt is None:
                 continue
-            if owner_at(pt[0], pt[1], pet.win) != 'other':
+            who = owner_at(pt[0], pt[1], pet.win)
+            if who == 'me':
+                continue
+            # 'own' 默认让位（自家弹层在上面是有意的）；聊天框例外。
+            if who == 'own' and not self._covered_by_chat(pt, pet.win):
                 continue
             pet.win.reassert_top()
 
@@ -1427,7 +1460,7 @@ class App:
 
     def layer_hint(self):
         if self._top_on:
-            return '角色压在普通窗口上方；取消勾选后，其他窗口会挡住角色。'
+            return '角色压在普通窗口和自家聊天框上方；取消勾选后，其他窗口会挡住角色。'
         return '和普通窗口同级，会被其他窗口挡住；勾选后角色始终在最上层。'
 
     def layer_toggle(self, on=None):

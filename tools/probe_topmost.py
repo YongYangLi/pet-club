@@ -138,7 +138,8 @@ def main():
         cover.raise_()
         app.qapp.processEvents()
         who = win32.owner_at(hit[0], hit[1], int(pet.win.winId()))
-        chk('被自己的面板盖住 → 判成 own（不该抢置顶）', who == 'own', who)
+        chk('被自己的临时面板盖住 → 判成 own（弹层留在角色上面）',
+            who == 'own', who)
         cover.hide()
         cover.deleteLater()
         app.qapp.processEvents()
@@ -168,6 +169,7 @@ def main():
     real_owner = APP.owner_at
     calls = []
     real_top = pet.win.reassert_top
+
     APP.owner_at = lambda x, y, me: 'other'
     pet.win.reassert_top = lambda: calls.append(1)
     try:
@@ -182,6 +184,41 @@ def main():
         chk('关掉「始终置顶」以后巡检什么都不做', len(calls) == 1, calls)
     finally:
         APP.owner_at = real_owner
+        pet.win.reassert_top = real_top
+
+    print('\n--- 巡检：被自家聊天框盖住时也插回去 ---')
+    # 聊天框是自己人，但它压住角色等于角色没了 —— 「始终置顶」要是连这个都
+    # 挡不住，用户看到的就还是「勾了置顶，人却被聊天框盖着」。
+    # 临时弹层（预览大图 / 菜单 / 头顶气泡）例外，那些必须留在角色上面。
+    real_hwnd_at = APP.hwnd_at
+    real_owner2 = APP.owner_at
+    real_chat_hwnd = app._chat_hwnd
+    calls2 = []
+    pet.win.reassert_top = lambda: calls2.append(1)
+    try:
+        APP.owner_at = lambda x, y, me: 'own'
+        APP.hwnd_at = lambda x, y: 4242
+        app._chat_hwnd = lambda: 4242
+        app._top_on = True
+        app._top_checked = 0.0
+        app.tick()
+        chk('被自家聊天框盖住 → 也重新插到最前面', len(calls2) == 1, calls2)
+
+        calls2.clear()
+        APP.hwnd_at = lambda x, y: 999
+        app._top_checked = 0.0
+        app.tick()
+        chk('被自家临时弹层盖住 → 不动（弹层该在上面）', not calls2, calls2)
+
+        calls2.clear()
+        app._top_on = False
+        app._top_checked = 0.0
+        app.tick()
+        chk('关掉置顶后聊天框也不抢', not calls2, calls2)
+    finally:
+        APP.hwnd_at = real_hwnd_at
+        APP.owner_at = real_owner2
+        app._chat_hwnd = real_chat_hwnd
         pet.win.reassert_top = real_top
 
     print('\n--- 图层开关 ---')

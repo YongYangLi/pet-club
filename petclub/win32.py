@@ -7,6 +7,7 @@ user32 —— 但**只是查询和小动作**，没有任何渲染、没有消�
   work_area()      屏幕工作区（排除任务栏），角色落地要用
   foreground()     当前前台窗口，用来发现「用户切到别的应用了」
   owner_at(x, y)   屏幕这一点上压着谁的窗口，用来判断角色是不是被盖住了
+  hwnd_at(x, y)    那一点点上具体是哪个窗口（用来区分「自家聊天框」和其他自家弹层）
   raise_top(hwnd)  重新插回置顶带最前面
   set_topmost()    改置顶属性（不重建窗口）
   round_corners()  让系统把无边框窗的四角裁圆（Win11 才有）
@@ -114,6 +115,11 @@ if IS_WIN:
         user32.GetWindowThreadProcessId(root, ctypes.byref(pid))
         return 'own' if pid.value == MY_PID else 'other'
 
+    def hwnd_at(x, y):
+        """屏幕点 (x, y) 上压着的顶层窗口句柄；那儿什么都没有就返回 0。"""
+        h = user32.WindowFromPoint(wintypes.POINT(int(x), int(y)))
+        return int(root_of(h)) if h else 0
+
     def raise_top(hwnd):
         """插回置顶带最前面：不挪位置、不改尺寸、不抢焦点。"""
         if not hwnd:
@@ -168,6 +174,9 @@ else:
 
     def owner_at(x, y, me):
         return 'me'
+
+    def hwnd_at(x, y):
+        return 0
 
     def raise_top(hwnd):
         return False
