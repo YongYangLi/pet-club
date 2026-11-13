@@ -489,30 +489,45 @@ def field(placeholder='', width=None):
 
 
 def avatar(role, size):
-    """圆形头像：从 idle 立绘上裁头（和 chat.head_square 同一套逻辑）。
+    """圆形头像：把整只角色（全身）缩进圆里，和网页版保持同一观感。
 
-    返回 QPixmap（已按 size 抗锯齿缩放、圆形裁剪），拿不到就返回 None。
+    以前裁的是「头」：只看得到脸，会议栏里分不清谁是谁。现在按 alpha
+    包围盒取整身，等比缩进一个正方形画布，再套圆形蒙版。
+    返回 QPixmap（已按 size 抗锯齿缩放），拿不到就返回 None。
     """
     path = os.path.join(assets_dir(), 'roles', role, 'idle.png')
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageChops, ImageDraw
         im = Image.open(path).convert('RGBA')
     except (OSError, ValueError):
         return None
     box = im.split()[3].getbbox()
     if box:
         im = im.crop(box)
-    side = max(8, min(im.width, int(round(im.height * 0.44))))
-    cx = im.width / 2.0
-    im = im.crop((int(round(cx - side / 2.0)), 0,
-                  int(round(cx + side / 2.0)), side))
     big = size * 4
-    im = im.resize((big, big), Image.LANCZOS)
+    canvas = Image.new('RGBA', (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    # 和网页版 .avatar 一样的浅灰圆底 + 一圈细边：全身图放在圆里，
+    # 不再是一张透明背景的图直接贴在会话栏上。
+    ring = max(1, big // max(1, size))
+    half = ring / 2.0
+    draw.ellipse((half, half, big - 1 - half, big - 1 - half),
+                 fill=(238, 240, 245, 255),
+                 outline=(229, 231, 235, 255), width=ring)
+    # 留一圈边，圆不会切到头顶和脚底
+    fit = big * 0.84
+    k = min(fit / max(1, im.width), fit / max(1, im.height))
+    w = max(1, int(round(im.width * k)))
+    h = max(1, int(round(im.height * k)))
+    im = im.resize((w, h), Image.LANCZOS)
+    canvas.alpha_composite(im, ((big - w) // 2, (big - h) // 2))
     mask = Image.new('L', (big, big), 0)
     ImageDraw.Draw(mask).ellipse((0, 0, big - 1, big - 1), fill=255)
-    im.putalpha(mask)
-    im = im.resize((size, size), Image.LANCZOS)
+    # 乘上去，不要直接 putalpha：直接替换会把角色周围的透明底
+    # 在圆里变成不透明的黑块。
+    canvas.putalpha(ImageChops.multiply(canvas.getchannel('A'), mask))
+    canvas = canvas.resize((size, size), Image.LANCZOS)
 
     from .windows import to_qimage
-    pm = QPixmap.fromImage(to_qimage(im))
+    pm = QPixmap.fromImage(to_qimage(canvas))
     return pm

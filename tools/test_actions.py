@@ -23,7 +23,7 @@ FAIL = []
 # 明确不留聊天痕迹的：环境动作，动了就动了，不必在群里报一遍。
 # 这份名单和 actions.TIP 互为对照 —— 名单里的人出现在 TIP 里、名单外的人
 # 不在 TIP 里，都算错（见 test_tips）。
-AMBIENT = ('sleep', 'jump')
+AMBIENT = ()
 
 
 def check(name, ok, detail=''):
@@ -170,9 +170,9 @@ def test_tips():
     check('不再有第二处留痕开关（log 之类的字段）',
           all('log' not in s for s in A.ACTIONS.values()),
           repr([k for k, s in A.ACTIONS.items() if 'log' in s]))
-    check('环境动作不留痕（睡觉 / 跳 / 传话）',
-          not (set(AMBIENT) | {'say'}) & set(A.TIP),
-          repr((set(AMBIENT) | {'say'}) & set(A.TIP)))
+    check('传话不单独留痕',
+          not {'say'} & set(A.TIP),
+          repr({'say'} & set(A.TIP)))
 
     bad = []
     for k in sorted(logged):

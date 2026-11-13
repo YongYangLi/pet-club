@@ -18,6 +18,7 @@
 """
 
 import base64
+import hashlib
 import io
 import os
 import zlib
@@ -25,11 +26,61 @@ from collections import OrderedDict
 
 from PIL import Image
 
+from .config import files_dir
+
 
 MAX_SIDE = 1280             # 发之前缩到这个长边：气泡里用不到，点开看的时候要够清楚
 MAX_BYTES = 1200 * 1024     # 图片编码后的上限（base64 后约 1.6MB，服务端 MAX_IMG 2.9MB）
 MAX_FILE = 2 * 1024 * 1024  # 文件原样传，上限 2MB（base64 后约 2.7MB，服务端收得下）
 JPEG_Q = 88
+
+
+def _sniff_image_ext(raw):
+    """从文件头猜图片后缀；猜不出就按 png 存，浏览时仍能按内容解码。"""
+    if raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'png'
+    if raw.startswith(b'\xff\xd8\xff'):
+        return 'jpg'
+    if raw.startswith((b'GIF87a', b'GIF89a')):
+        return 'gif'
+    if raw.startswith(b'RIFF') and raw[8:12] == b'WEBP':
+        return 'webp'
+    return 'png'
+
+
+def chat_images_dir():
+    d = os.path.join(files_dir(), 'images')
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def save_chat_image(b64, sticker=False):
+    """把聊天里的图片落到本地，返回稳定路径；失败返回空串。
+
+    SQLite 里只存这个路径，不存几 MB 的 base64 —— 桌面上的 exe 在哪都
+    不影响，图片实际落在 files/images 下（打包后是用户数据目录）。
+    """
+    if not b64:
+        return ''
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except (ValueError, TypeError):
+        return ''
+    if len(raw) > MAX_FILE:
+        return ''
+    d = chat_images_dir()
+    name = hashlib.sha1(raw).hexdigest()[:20] + '.' + _sniff_image_ext(raw)
+    path = os.path.join(d, name)
+    if not os.path.exists(path):
+        try:
+            with open(path, 'wb') as f:
+                f.write(raw)
+        except OSError:
+            return ''
+    return path
 
 # 屏幕上两种媒体的大小上限（像素）
 IMG_BOX = 200               # 普通图片：白框里的那张，长边不超过 200

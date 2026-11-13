@@ -56,7 +56,7 @@ B64_RE = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
 # 起因很实在 —— 客户端发了新版、服务端没重启，客户端那边表现是「图片发了对方收不到」，
 # 而两边看起来都「是最新的」（客户端版本号是对的，服务端根本不会说自己是谁）。
 # 现在握手消息里带一个 v，连上去看一眼就知道。
-SERVER_VERSION = '1.4.0'
+SERVER_VERSION = '1.6.0'
 
 
 def log(msg):
@@ -107,13 +107,16 @@ class Client:
 
 
 class Member:
-    __slots__ = ('mid', 'role', 'client', 'last_seen')
+    __slots__ = ('mid', 'role', 'client', 'last_seen', 'kind')
 
-    def __init__(self, mid, role, client):
+    def __init__(self, mid, role, client, kind='desktop'):
         self.mid = mid
         self.role = role
         self.client = client
         self.last_seen = time.monotonic()
+        # 客户端类型只用于聊天标题上的「网页版 / 桌面版」，不参与裁决。
+        # 老客户端不发 client，按桌面版处理。
+        self.kind = 'web' if kind == 'web' else 'desktop'
 
 
 class Room:
@@ -134,7 +137,8 @@ class Room:
         for r in ROLES:
             mid = self.roles.get(r)
             m = self.members.get(mid) if mid else None
-            players[r] = {'role': r, 'name': ROLE_NAMES[r]} if m else None
+            players[r] = ({'role': r, 'name': ROLE_NAMES[r],
+                          'client': m.kind} if m else None)
         return players
 
 
@@ -164,7 +168,7 @@ class Registry:
 
     # ---- 认领 / 释放 ----
 
-    def join(self, client, role):
+    def join(self, client, role, client_kind='desktop'):
         """尝试认领身份。返回 (member, err)。err 为 None 表示成功。
 
         这里是唯一的「先占先得」判定点 —— 检查和写入必须在同一把锁内完成，
@@ -173,7 +177,7 @@ class Registry:
         if role not in ROLES:
             return None, 'bad_role'
         room = self.room
-        m = Member(self._new_mid(), role, client)
+        m = Member(self._new_mid(), role, client, client_kind)
         with room.lock:
             if room.roles.get(role) is not None:
                 return None, 'role_taken'       # ← 这个身份已经有人了
@@ -299,7 +303,9 @@ class Handler(socketserver.BaseRequestHandler):
                 return c.send({'t': 'error', 'msg': '你已经有身份了',
                                'players': REG.state_msg()['players']})
             role = msg.get('role')
-            m, err = REG.join(c, role)
+            # 老客户端不带 client，默认桌面版；新网页版带 'web'。
+            client_kind = 'web' if msg.get('client') == 'web' else 'desktop'
+            m, err = REG.join(c, role, client_kind)
             if err == 'role_taken':
                 self.client.send({
                     't': 'reject', 'reason': 'role_taken', 'role': role,

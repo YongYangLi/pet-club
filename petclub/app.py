@@ -15,7 +15,7 @@ from PySide6.QtCore import QPoint, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
-from . import config, media, update, windows
+from . import config, media, store, update, windows
 from .actions import (ORDER, get, media_line, reply_line, say_line,
                       tip_text)
 from .actors import Pet, gather_targets
@@ -33,7 +33,7 @@ GROUND_MARGIN = 34
 DRAG_SLOP = 4
 GATHER_GAP = 0.10       # 集合后两个人**身体之间**的空隙 = 最宽那只的身宽 × 它
 
-CHAT_HISTORY = 50
+CHAT_HISTORY = 200
 TRAY_BLINK_SEC = 0.7
 
 OFFLINE_NOTE = '连不上服务器，正在重试…'
@@ -114,7 +114,8 @@ class App:
         self._win_trash = []        # 退出前收留所有窗口，留到进程结束
         self.chat = None
         self._chat_trash = []       # 已关闭但还不能回收的面板（见 _chat_closed）
-        self.chat_log = {}
+        self.history = store.History(host, port)
+        self.chat_log = self.history.load()
         self.unread = {}
         self._tray_on = False
         self._tray_at = 0.0
@@ -175,7 +176,8 @@ class App:
             self.check_update()
 
         if self._pending_role and not self._pending_sent and self.net.connected:
-            if self.net.send(t='join', role=self._pending_role):
+            if self.net.send(t='join', role=self._pending_role,
+                             client='desktop'):
                 self._pending_sent = True
 
         if self.net.connected and now - self._last_hb >= config.HEARTBEAT_SEC:
@@ -250,7 +252,7 @@ class App:
             self._set_offline(False)
             self._pending_sent = False
             if self.me:
-                self.net.send(t='join', role=self.me['role'])
+                self.net.send(t='join', role=self.me['role'], client='desktop')
             else:
                 self.net.send(t='query')
         elif t == '_down':
@@ -688,6 +690,11 @@ class App:
 
     # ---------------- 聊天 ----------------
 
+    def client_of(self, role):
+        """某个身份是网页版还是桌面版；老服务端没有这个字段就返回空。"""
+        info = self.players.get(role) if role else None
+        return info.get('client') if isinstance(info, dict) else None
+
     def _conv_key(self, to):
         return CONV_ALL if not to else to
 
@@ -700,6 +707,7 @@ class App:
             self.chat = ChatWindow(None, self.send_chat, self._chat_closed,
                                    me=self.me['role'],
                                    is_online=lambda r: bool(self.players.get(r)),
+                                   client_of=self.client_of,
                                    log=self.chat_log,
                                    on_media=self.send_media,
                                    unread=self.unread,
@@ -710,7 +718,10 @@ class App:
                                    pet_size=config.PET_SIZE,
                                    remote_on=self.remote_on,
                                    on_remote=self.remote_toggle,
-                                   remote_hint=self.remote_hint)
+                                   remote_hint=self.remote_hint,
+                                   on_update=self.update_action,
+                                   update_label=self.update_label,
+                                   update_enabled=lambda: update.enabled())
             self.chat.switch(key)
             self.chat.show()
         else:
@@ -742,7 +753,7 @@ class App:
         key = self.chat.key
         to = None if key == CONV_ALL else key
         self._emit_say(to, text=text)
-        self._log_msg('me', text, key)
+        self._log_msg(self.me['role'], text, key)
         return ''
 
     def send_media(self, mt, payload):
@@ -756,7 +767,7 @@ class App:
             if not isinstance(payload, str) or not payload:
                 return '这个表情发不出去'
             self._emit_say(to, mt='emoji', text=payload)
-            self._log_media('me', 'emoji', key, char=payload)
+            self._log_media(self.me['role'], 'emoji', key, char=payload)
             self._say_media_line(mt)
             return ''
 
@@ -781,7 +792,8 @@ class App:
         except ValueError as e:
             return str(e)
 
-        self._log_media('me', mt, key, img=b64, name=name, size=size, path=path)
+        self._log_media(self.me['role'], mt, key, img=b64, name=name,
+                        size=size, path=path)
         self._say_media_line(mt)
         return ''
 
@@ -829,9 +841,12 @@ class App:
         log.append(entry)
         if len(log) > CHAT_HISTORY:
             del log[:-CHAT_HISTORY]
-        if (entry.get('kind') == 'msg' and entry.get('who') != 'me'
+        me = self.me['role'] if self.me else None
+        if (entry.get('kind') == 'msg' and entry.get('who') != me
+                and entry.get('who') != 'me'
                 and not self._watching(key)):
             self.unread[key] = self.unread.get(key, 0) + 1
+        self.history.add(key, entry)
         if self.chat is not None:
             self.chat.on_new(key)
 
@@ -881,6 +896,11 @@ class App:
             text = '[表情包]'
         else:
             text = '[文件] %s' % (name or '文件')
+        # 图片落盘再记路径：历史记录重启后还能看，SQLite 也不会被 base64 撑大
+        if mt in ('img', 'sticker') and img:
+            saved = media.save_chat_image(img, sticker=(mt == 'sticker'))
+            if saved:
+                path = saved
         self._store(key, {'kind': 'msg', 'mt': mt, 'who': who, 'text': text,
                           'img': img if mt in ('img', 'sticker') else '',
                           'char': char, 'name': name, 'size': size,
@@ -1248,6 +1268,7 @@ class App:
         except Exception:
             pass
         self.net.stop()
+        self.history.close()
         # 退出时只 hide，不 deleteLater、也不丢引用：deleteLater 之后引用一断，
         # shiboken 和 Qt 会各删一次同一个 C++ 对象。进程马上结束，
         # 这些窗口由系统连同进程一起回收。

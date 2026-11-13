@@ -36,7 +36,7 @@ from .config import (PET_SIZE_NAME, PET_SIZE_ORDER, ROLE_NAME, ROLES,
                      assets_dir)
 from .theme import (ACCENT, ACCENT_EDGE, ACCENT_SOFT, BORDER, CARD_BG, CARD_LINE,
                     CHROME, CHROME_HOVER, CHROME_LINE, CHROME_SEL, FG, MUTED, SUB,
-                    CardWindow, avatar, font)
+                    CardWindow, WinButton, avatar, font)
 from .windows import to_qimage
 
 CONV_ALL = 'all'
@@ -90,7 +90,7 @@ def emoji_font(size):
 
 
 def conv_pix(key, size):
-    """会话头像：单聊裁角色立绘的头，群聊画一个圆底「群」。
+    """会话头像：单聊用角色全身，群聊画一个圆底「群」。
 
     角色素材缺失时也画圆底首字，不会留一个空白洞。
     """
@@ -519,19 +519,20 @@ class PreviewPopup(QFrame):
 
 
 class ImageViewer(QFrame):
-    """点开聊天里的图片：置顶、原图、滚轮缩放、按住拖动。
+    """点开聊天里的图片：独立预览窗口，带最小化 / 最大化 / 关闭。
 
-    原来是把气泡里那张 240 宽的缩略图塞进一个普通窗口 —— 一放大就糊，
-    还因为聊天窗是置顶的，预览直接被压在下面。这里改用原图重新解码、
-    显式置顶，滚轮缩放（1x ~ 6x），按住能平移，单击 / Esc 关掉。
+    不是盖在聊天窗里的浮层：有自己的标题带和三颗窗口按钮，任务栏里也有
+    自己的一项。图片仍按原图解码，滚轮缩放（1x ~ 6x），按住可以拖动。
+    不再在底部写「滚轮缩放 / 单击关闭」这种提示。
     """
 
     MAX_ZOOM = 6.0
     BG = '#0f1115'
+    HEADER_H = 42
 
     def __init__(self, owner=None):
         super().__init__(None, Qt.Window | Qt.FramelessWindowHint
-                         | Qt.WindowStaysOnTopHint | Qt.Tool)
+                         | Qt.WindowStaysOnTopHint)
         self.owner = owner
         self._pix = None
         self._dpr = 1.0
@@ -539,9 +540,24 @@ class ImageViewer(QFrame):
         self._zoom = 1.0
         self._off = QPointF(0, 0)
         self._drag = None
+        self._win_drag = None
+        self._maxed = False
+        self._normal_geo = None
         self.setMouseTracking(True)
         self.setCursor(Qt.OpenHandCursor)
         self.setAttribute(Qt.WA_DeleteOnClose, False)
+
+        self.title_lb = QLabel('图片预览', self)
+        self.title_lb.setFont(font(9, True))
+        self.title_lb.setStyleSheet('color: %s; background: transparent;' % SUB)
+        # 让标题文字不挡拖动：鼠标事件交给下面的预览窗口自己处理
+        self.title_lb.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.min_btn = WinButton('min', self)
+        self.max_btn = WinButton('max', self)
+        self.close_btn = WinButton('close', self)
+        self.min_btn.clicked.connect(self.showMinimized)
+        self.max_btn.clicked.connect(self._toggle_max)
+        self.close_btn.clicked.connect(self.hide)
 
     # ---- 打开 ----
 
@@ -556,15 +572,20 @@ class ImageViewer(QFrame):
         w = pix.width() / self._dpr
         h = pix.height() / self._dpr
         # 1x = 原图像素 1:1（小图不硬拉大，大图缩到屏幕里）
+        view_h = max(120, scr.height() - self.HEADER_H)
         self._base = min(1.0, scr.width() * 0.86 / max(1.0, w),
-                         scr.height() * 0.84 / max(1.0, h))
+                         view_h * 0.84 / max(1.0, h))
         self._zoom = 1.0
         self._off = QPointF(0, 0)
+        self._maxed = False
+        self._normal_geo = None
+        self.max_btn.set_kind('max')
         self.resize(max(240, int(w * self._base)),
-                    max(180, int(h * self._base)))
+                    self.HEADER_H + max(160, int(h * self._base)))
         ox = scr.left() + (scr.width() - self.width()) // 2
         oy = scr.top() + (scr.height() - self.height()) // 2
         self.move(ox, oy)
+        self._layout_controls()
         self.show()
         # 桌宠窗口本身是置顶的，普通 raise_() 抢不过原生置顶带；
         # 这里直接把自己插到置顶带最前面，预览才不会被人物盖住。
@@ -584,8 +605,9 @@ class ImageViewer(QFrame):
         s = self._scale()
         vw = self._pix.width() / self._dpr * s
         vh = self._pix.height() / self._dpr * s
+        view_h = max(1, self.height() - self.HEADER_H)
         mx = max(0.0, (vw - self.width()) / 2.0)
-        my = max(0.0, (vh - self.height()) / 2.0)
+        my = max(0.0, (vh - view_h) / 2.0)
         self._off = QPointF(max(-mx, min(mx, self._off.x())),
                             max(-my, min(my, self._off.y())))
 
@@ -597,13 +619,33 @@ class ImageViewer(QFrame):
         e.accept()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton:
-            self._drag = (e.position(), QPointF(self._off))
+        if e.button() != Qt.LeftButton:
+            return
+        p = e.position()
+        # 标题带：拖动窗口。图片区在 1x 时也拖动窗口；放大后才拖动图片。
+        if p.y() < self.HEADER_H or self._zoom <= 1.0:
+            self._win_drag = {
+                'start': e.globalPosition().toPoint(),
+                'geo': self.pos(),
+                'moved': False,
+                'close_on_click': p.y() >= self.HEADER_H,
+            }
             self.setCursor(Qt.ClosedHandCursor)
-        elif e.button() == Qt.RightButton:
-            self.hide()
+            return
+        self._drag = (p, QPointF(self._off))
+        self.setCursor(Qt.ClosedHandCursor)
 
     def mouseMoveEvent(self, e):
+        if self._win_drag is not None:
+            d = self._win_drag
+            cur = e.globalPosition().toPoint()
+            dx = cur.x() - d['start'].x()
+            dy = cur.y() - d['start'].y()
+            if abs(dx) + abs(dy) > 3:
+                d['moved'] = True
+            if d['moved']:
+                self.move(d['geo'].x() + dx, d['geo'].y() + dy)
+            return
         if self._drag is None:
             return
         p0, off0 = self._drag
@@ -613,14 +655,49 @@ class ImageViewer(QFrame):
         self.update()
 
     def mouseReleaseEvent(self, e):
+        if self._win_drag is not None:
+            d = self._win_drag
+            self._win_drag = None
+            self.setCursor(Qt.OpenHandCursor)
+            if not d['moved'] and d['close_on_click']:
+                self.hide()             # 单击图片：关闭预览
+            return
         if self._drag is None:
             return
         moved = (abs(e.position().x() - self._drag[0].x())
                  + abs(e.position().y() - self._drag[0].y()))
         self._drag = None
         self.setCursor(Qt.OpenHandCursor)
-        if moved < 3:               # 只是点了一下：当「关闭」
+        if moved < 3:                   # 放大后单击图片：关闭预览
             self.hide()
+
+    def _toggle_max(self):
+        if self._maxed:
+            if self._normal_geo is not None:
+                self.setGeometry(self._normal_geo)
+            self._maxed = False
+            self.max_btn.set_kind('max')
+        else:
+            self._normal_geo = self.geometry()
+            scr = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+            self.setGeometry(scr)
+            self._maxed = True
+            self.max_btn.set_kind('restore')
+        self._clamp_off()
+        self._layout_controls()
+        self.update()
+
+    def _layout_controls(self):
+        y = (self.HEADER_H - self.close_btn.height()) // 2
+        x = self.width() - 10 - self.close_btn.width()
+        for btn in (self.close_btn, self.max_btn, self.min_btn):
+            btn.move(x, y)
+            x -= btn.width() + 4
+        self.title_lb.setGeometry(14, 0, max(1, x - 6), self.HEADER_H)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._layout_controls()
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
@@ -638,21 +715,20 @@ class ImageViewer(QFrame):
 
     def paintEvent(self, _e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(self.BG))
+        p.fillRect(QRectF(0, 0, self.width(), self.HEADER_H), QColor(CHROME))
+        p.fillRect(QRectF(0, self.HEADER_H, self.width(),
+                          max(0, self.height() - self.HEADER_H)), QColor(self.BG))
+        p.setPen(QColor(CHROME_LINE))
+        p.drawLine(0, self.HEADER_H - 1, self.width(), self.HEADER_H - 1)
         if self._pix is not None:
             p.setRenderHint(QPainter.SmoothPixmapTransform, True)
             s = self._scale()
             w = self._pix.width() / self._dpr * s
             h = self._pix.height() / self._dpr * s
+            view_h = max(1, self.height() - self.HEADER_H)
             p.drawPixmap(QRectF((self.width() - w) / 2 + self._off.x(),
-                                (self.height() - h) / 2 + self._off.y(),
+                                self.HEADER_H + (view_h - h) / 2 + self._off.y(),
                                 w, h), self._pix, QRectF(self._pix.rect()))
-        # 底部一行浅色提示，位置固定，不跟着图动
-        p.setFont(font(8))
-        p.setPen(QColor('#8b90a0'))
-        p.drawText(QRectF(0, self.height() - 26, self.width(), 20),
-                   Qt.AlignCenter,
-                   '滚轮缩放 · 按住拖动 · 单击关闭')
         p.end()
 
 
@@ -807,6 +883,9 @@ class Composer(QTextEdit):
         super().__init__(parent)
         self._on_paste = on_paste
         self._hint = '说点什么…'
+        # 输入法还在拼字（preedit）时 toPlainText() 仍是空的，但屏幕上已经有
+        # 候选词了；这时再画 placeholder 就会和候选词叠在一起。
+        self._composing = False
         self.setFont(font(10))
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet(
@@ -840,9 +919,14 @@ class Composer(QTextEdit):
                 return
         super().keyPressEvent(e)
 
+    def inputMethodEvent(self, e):
+        self._composing = bool(e.preeditString())
+        super().inputMethodEvent(e)
+        self.viewport().update()
+
     def paintEvent(self, e):
         super().paintEvent(e)
-        if self.toPlainText().strip():
+        if self._composing or self.toPlainText().strip():
             return
         p = QPainter(self.viewport())
         p.setFont(self.font())
@@ -923,10 +1007,11 @@ class ChatWindow(CardWindow):
     """一个窗口，六（N）个会话。"""
 
     def __init__(self, parent=None, on_send=None, on_close=None, me=None,
-                 is_online=None, log=None, on_media=None, unread=None,
-                 on_action=None, on_leave=None, on_quit=None,
+                 is_online=None, client_of=None, log=None, on_media=None,
+                 unread=None, on_action=None, on_leave=None, on_quit=None,
                  on_pet_size=None, pet_size='default',
-                 remote_on=True, on_remote=None, remote_hint=None):
+                 remote_on=True, on_remote=None, remote_hint=None,
+                 on_update=None, update_label=None, update_enabled=None):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
@@ -944,6 +1029,10 @@ class ChatWindow(CardWindow):
         self.pet_size = pet_size
         self.me = me
         self.is_online = is_online or (lambda r: False)
+        self.client_of = client_of or (lambda r: None)
+        self.on_update = on_update
+        self.update_label = update_label or (lambda: '检查更新')
+        self.update_enabled = update_enabled or (lambda: True)
         self.log = log if log is not None else {}
         self.unread = unread if unread is not None else {}
         self.key = CONV_ALL
@@ -1013,11 +1102,12 @@ class ChatWindow(CardWindow):
         sb.setSpacing(0)
         self.search = QLineEdit(search_bar)
         self.search.setPlaceholderText('搜索会话或消息')
+        self.search.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.search.setFont(font(9))
         self.search.setFixedHeight(34)
         self.search.setStyleSheet(
             'QLineEdit { background:#ffffff; border:1px solid %s;'
-            ' border-radius:10px; padding: 0 12px 0 32px; }'
+            ' border-radius:10px; padding: 0 12px 0 2px; }'
             'QLineEdit:focus { border-color: %s; }' % (CHROME_LINE, ACCENT_EDGE))
         self.search.addAction(self._search_icon(), QLineEdit.LeadingPosition)
         self.search.textChanged.connect(self._on_search)
@@ -1270,6 +1360,10 @@ class ChatWindow(CardWindow):
         act.setToolTip(self.remote_hint())
         act.triggered.connect(self._on_remote)
         m.addSeparator()
+        act = m.addAction(self.update_label())
+        act.setEnabled(self.update_enabled())
+        act.triggered.connect(self._on_update)
+        m.addSeparator()
         m.addAction('换一个身份').triggered.connect(self._on_leave)
         m.addAction('退出').triggered.connect(self._on_quit)
         self._me_menu_prev, self._me_menu = self._me_menu, m
@@ -1293,6 +1387,10 @@ class ChatWindow(CardWindow):
         if self.on_remote is None:
             return
         self.remote_on = bool(self.on_remote(on))
+
+    def _on_update(self):
+        if self.on_update is not None:
+            self.on_update()
 
     def _on_leave(self):
         if self.on_leave is not None:
@@ -1405,7 +1503,8 @@ class ChatWindow(CardWindow):
         text = e.get('text') or ''
         if e.get('kind') == 'tip':
             return text
-        if e.get('who') == 'me' or key != CONV_ALL:
+        # 'me' 是旧记录里的写法；新记录直接写角色 ID
+        if e.get('who') in (self.me, 'me') or key != CONV_ALL:
             return text
         return '%s：%s' % (ROLE_NAME.get(e.get('who'), ''), text)
 
@@ -1486,6 +1585,11 @@ class ChatWindow(CardWindow):
         else:
             live = self.is_online(self.key)
             text = '在线' if live else '空闲'
+            kind = self.client_of(self.key) if live else None
+            if kind == 'web':
+                text += ' · 网页版'
+            elif kind == 'desktop':
+                text += ' · 桌面版'
         self.state_lb.set_state(text, live)
 
     def on_new(self, key):
@@ -1564,7 +1668,8 @@ class ChatWindow(CardWindow):
             lb.setStyleSheet('color: %s;' % TIME_FG)
             return lb
 
-        mine = e.get('who') == 'me'
+        # 新记录写角色 ID：换身份后，旧身份发的消息就不再算「我」
+        mine = e.get('who') in (self.me, 'me')
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)
@@ -1583,7 +1688,26 @@ class ChatWindow(CardWindow):
 
         content = self._content(e, mine)
         if content is not None:
-            h.addWidget(content, 0, Qt.AlignTop)
+            if self.key == CONV_ALL:
+                # 群聊里每个人的名字跟在气泡上方：只看一句「好」不知道是谁说的。
+                box = QWidget()
+                v = QVBoxLayout(box)
+                v.setContentsMargins(0, 0, 0, 0)
+                v.setSpacing(2)
+                who = e.get('who')
+                if mine:
+                    label = '%s（我）' % ROLE_NAME.get(self.me, '')
+                else:
+                    label = ROLE_NAME.get(who, who or '')
+                name = QLabel(label)
+                name.setFont(font(8))
+                name.setStyleSheet('color: %s;' % MUTED)
+                align = Qt.AlignRight if mine else Qt.AlignLeft
+                v.addWidget(name, 0, align)
+                v.addWidget(content, 0, align)
+                h.addWidget(box, 0, Qt.AlignTop)
+            else:
+                h.addWidget(content, 0, Qt.AlignTop)
         if not mine:
             h.addStretch(1)
         return row
@@ -1609,13 +1733,17 @@ class ChatWindow(CardWindow):
             return self._file_card(e)
 
         if mt == 'emoji':
-            # 发出来的 emoji 原来是 10pt 的一行小字，聊天里根本看不清
+            # 发出来的 emoji 原来是 10pt 的一行小字，聊天里根本看不清。
+            # 注意：全局 QSS 里的 QWidget { font-size: 10pt; } 会盖过 setFont，
+            # 所以字号必须在 QLabel 自己的样式表里再写一遍。
             char = e.get('char') or e.get('text') or ''
             lb = QLabel(char)
-            lb.setFont(emoji_font(30))
+            lb.setAlignment(Qt.AlignCenter)
+            lb.setFont(emoji_font(40))
             lb.setStyleSheet(
-                'background: %s; padding: 4px 10px; border-radius: 14px;'
-                % (BUBBLE_ME if mine else BUBBLE_OTH))
+                'QLabel { background: %s; padding: 6px 12px; border-radius: 16px;'
+                ' font-family: "%s"; font-size: 40pt; }'
+                % (BUBBLE_ME if mine else BUBBLE_OTH, EMOJI_FAMILY))
             return lb
 
         text = e.get('text') or ''
@@ -1634,8 +1762,8 @@ class ChatWindow(CardWindow):
         return max(200, min(BUBBLE_MAX, vw - 96))
 
     def _img_pix(self, e):
-        """条目里的图 → 缩放后的 QPixmap。表情包不套白框，普通图片按 240 宽缩。"""
-        limit = 160 if (e.get('mt') == 'sticker') else 240
+        """条目里的图 → 缩放后的 QPixmap。表情包不套白框，普通图片按 260 宽缩。"""
+        limit = 220 if (e.get('mt') == 'sticker') else 260
         im = media.thumb(e.get('img') or '', e.get('path') or '', limit)
         if im is None:
             return None

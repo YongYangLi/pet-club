@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>pet-club 1.6.0</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- 认领页：进入网页先选人物 -->
+  <div id="claim-screen" class="screen">
+    <div class="claim-card">
+      <div class="claim-kicker">pet-club <span class="ver">v1.6.0</span></div>
+      <h1>挑一个身份坐下</h1>
+      <p class="claim-sub">同一时间每个身份只能有一个人</p>
+      <div id="role-grid" class="role-grid"></div>
+      <div id="claim-note" class="claim-note"></div>
+      <div class="claim-foot">
+        <div id="claim-status" class="claim-status">正在连接服务器…</div>
+        <button id="claim-ok" class="btn btn-primary" type="button" disabled>进入</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 主界面：全屏聊天 + 悬浮人物 -->
+  <div id="main-screen" class="screen hidden">
+    <div class="chat-shell">
+      <aside class="sidebar">
+        <div class="side-head">
+          <div class="brand">pet-club <span class="ver">v1.6.0</span></div>
+          <div id="online-pill" class="online-pill"><span class="dot"></span><span>0/6 在线</span></div>
+        </div>
+        <div class="search-wrap">
+          <input id="conv-search" class="search" placeholder="搜索会话或消息" autocomplete="off">
+        </div>
+        <div id="conv-list" class="conv-list"></div>
+        <div class="side-foot">
+          <button id="me-bar" class="me-bar" type="button">
+            <span id="me-avatar" class="avatar avatar-sm"></span>
+            <span class="me-text"><b id="me-name"></b><small id="me-state">在线</small></span>
+            <span class="me-caret">⋯</span>
+          </button>
+        </div>
+      </aside>
+
+      <section class="conversation">
+        <header class="conv-head">
+          <div>
+            <div id="conv-title" class="conv-title">全体群聊</div>
+            <div id="conv-sub" class="conv-sub">所有人都在这里</div>
+          </div>
+          <div id="conv-state" class="pill"><span class="dot"></span><span>在线</span></div>
+        </header>
+        <div id="messages" class="messages"></div>
+        <div id="chat-note" class="chat-note"></div>
+        <footer class="composer">
+          <div id="quick-actions" class="quick-actions"></div>
+          <div class="composer-card">
+            <div id="attach-strip" class="attach-strip hidden"></div>
+            <textarea id="composer-input" rows="3" placeholder="说点什么…"></textarea>
+            <div class="composer-foot">
+              <div class="composer-tools">
+                <button id="emoji-btn" class="tool-btn" type="button" title="表情 / 表情包">表情</button>
+                <button id="file-btn" class="tool-btn" type="button" title="图片 / 文件">文件</button>
+              </div>
+              <div class="composer-target"><span id="target-label">发送到 全体群聊</span></div>
+              <div class="composer-hint">Enter 发送 · Shift+Enter 换行</div>
+              <button id="send-btn" class="btn btn-primary" type="button">发送</button>
+            </div>
+          </div>
+          <div id="media-picker" class="media-picker hidden"></div>
+        </footer>
+        <input id="file-input" type="file" hidden>
+      </section>
+    </div>
+
+    <div id="pet-layer" class="pet-layer"></div>
+    <div id="bubble-layer" class="bubble-layer"></div>
+    <div id="picker-preview" class="picker-preview hidden"></div>
+    <div id="image-viewer" class="image-viewer hidden"><img id="image-viewer-img" alt=""></div>
+    <div id="ctx-menu" class="ctx-menu hidden"></div>
+    <div id="toast" class="toast hidden"></div>
+    <div id="offline-banner" class="offline-banner hidden"><span class="dot"></span>连不上服务器，正在重试…</div>
+  </div>
+
+  <script type="module" src="/static/js/main.js"></script>
+</body>
+</html>

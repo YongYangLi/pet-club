@@ -13,3 +13,7 @@
 *.exe binary
 *.dll binary
 *.pyd binary
+
+# 部署脚本要在 Linux 上直接跑，必须是 LF。Windows 上 checkout/commit 也不能
+# 悄悄转成 CRLF，否则服务器上会报 /bin/sh^M: bad interpreter。
+*.sh text eol=lf

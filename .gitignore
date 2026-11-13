@@ -13,6 +13,8 @@ dist/
 # 聊天里收到/发出的附件（config.files_dir），只在当前这台机器上有意义。
 petclub-data/
 *.log
+logs/
+run/
 
 # ---- 做图用的原图 ----
 # 324MB 的定妆图/抠图/候选稿，只在出 assets 时用到；运行时一个字节都不读。
