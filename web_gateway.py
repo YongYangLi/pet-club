@@ -35,13 +35,18 @@ from socketserver import ThreadingMixIn
 from urllib.parse import unquote, urlparse
 
 from petclub import actions
+from petclub import __version__ as WEB_VERSION
 import server as game_server
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, 'web')
 ASSETS_DIR = os.path.join(ROOT, 'assets')
 
-WEB_VERSION = '1.6.0'
+# 发布脚本写进 web/build.json 的版本标识。前端靠它判断自己是不是过期了：
+# 页面 HTML 里有 __BUILD__（渲染时替换），服务端在 /api/version 里说当前的，
+# 两个不一样就说明用户手里是旧页面。
+BUILD_FILE = os.path.join(WEB_DIR, 'build.json')
+_build_cache = {'key': None, 'value': None}
 WS_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11'
 MAX_MSG = 8 * 1024 * 1024       # 单条消息上限，给以后的图片留余量
 UPSTREAM_PING = 5.0             # 给服务端发应用层 ping，避免 30 秒心跳超时
@@ -68,8 +73,56 @@ def log(msg):
     print('[%s] %s' % (time.strftime('%H:%M:%S'), msg), flush=True)
 
 
+def read_build():
+    """读 web/build.json，按 mtime 缓存一次 —— 发布时直接覆盖文件，不重启进程。"""
+    try:
+        st = os.stat(BUILD_FILE)
+    except OSError:
+        return {'version': WEB_VERSION, 'build': 'dev'}
+    key = (st.st_mtime_ns, st.st_size)
+    if _build_cache['key'] == key:
+        return _build_cache['value']
+    try:
+        with open(BUILD_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    value = {
+        'version': str(data.get('version') or WEB_VERSION),
+        'build': str(data.get('build') or 'dev'),
+    }
+    _build_cache['key'] = key
+    _build_cache['value'] = value
+    return value
+
+
+def render_index():
+    """把版本号和 build 号填进 index.html 的占位符。
+
+    为什么不在前端用 JS 填：页面必须先知道自己这一份的 build 号，
+    才能跟服务端比。等 JS 跑起来再问服务端，问到的永远是「最新」，
+    旧页面会一直觉得自己是新的。
+    """
+    path = os.path.join(WEB_DIR, 'index.html')
+    with open(path, 'r', encoding='utf-8') as f:
+        html = f.read()
+    b = read_build()
+    html = html.replace('__VERSION__', b['version']).replace('__BUILD__', b['build'])
+    return html.encode('utf-8')
+
+
+def file_etag(path):
+    """用 mtime+size 做 ETag。文件被覆盖上传后 mtime 一定变，够用。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return '"%x-%x"' % (st.st_mtime_ns, st.st_size)
+
+
 def build_meta():
     """前端需要的静态数据。台词、动作只从 actions.py 取，不另写一份。"""
+    b = read_build()
     return {
         'roles': list(game_server.ROLES),
         'role_names': dict(game_server.ROLE_NAMES),
@@ -88,7 +141,8 @@ def build_meta():
         'crawl_frame_sec': 0.16,
         'pet_size_factor': {'small': 0.78, 'default': 1.0, 'large': 1.3},
         'server_version': getattr(game_server, 'SERVER_VERSION', ''),
-        'web_version': WEB_VERSION,
+        'web_version': b['version'],
+        'build': b['build'],
     }
 
 
@@ -346,12 +400,26 @@ class WebHandler(BaseHTTPRequestHandler):
 
     # ---- 基础输出 ----
 
-    def _send_bytes(self, data, ctype, cache='no-cache', status=200):
+    def _send_bytes(self, data, ctype, cache='no-cache', status=200, etag=None):
+        # 带着上次的 ETag 回来问，说明文件没动，回 304 让浏览器用本地副本。
+        # 没有这一条时，no-cache 的语义是「每次都得重新下整份」——
+        # 每次刷新白跑 164 KB，网络差的时候很肉。
+        if etag and self.headers.get('If-None-Match') == etag:
+            try:
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', cache)
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.close_connection = True
+            return
         try:
             self.send_response(status)
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(len(data)))
             self.send_header('Cache-Control', cache)
+            if etag:
+                self.send_header('ETag', etag)
             self.end_headers()
             if self.command != 'HEAD':
                 self.wfile.write(data)
@@ -370,7 +438,7 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         ext = os.path.splitext(path)[1].lower()
         ctype = MIME.get(ext) or mimetypes.guess_type(path)[0] or 'application/octet-stream'
-        self._send_bytes(data, ctype, cache=cache)
+        self._send_bytes(data, ctype, cache=cache, etag=file_etag(path))
 
     # ---- 路由 ----
 
@@ -385,10 +453,21 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             if path == '/api/meta':
                 data = json.dumps(build_meta(), ensure_ascii=False).encode('utf-8')
-                self._send_bytes(data, 'application/json; charset=utf-8')
+                self._send_bytes(data, 'application/json; charset=utf-8', cache='no-store')
+                return
+            if path == '/api/version':
+                # 前端轮询就看这一个，绝不能被任何一层缓存挡住。
+                data = json.dumps(read_build(), ensure_ascii=False).encode('utf-8')
+                self._send_bytes(data, 'application/json; charset=utf-8', cache='no-store')
                 return
             if path in ('/', '/index.html'):
-                self._serve_file(os.path.join(WEB_DIR, 'index.html'))
+                # HTML 每次现渲染：里面带着这一份的 build 号，缓存住就失去意义了。
+                try:
+                    data = render_index()
+                except OSError:
+                    self.send_error(404)
+                    return
+                self._send_bytes(data, 'text/html; charset=utf-8', cache='no-store')
                 return
             if path.startswith('/static/'):
                 self._serve_file(safe_path(WEB_DIR, path[len('/static/'):]))

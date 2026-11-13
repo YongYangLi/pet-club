@@ -13,6 +13,7 @@
 这里只存路径。这样 SQLite 不会因为几张图变成几十兆。
 """
 
+import json
 import os
 import sqlite3
 
@@ -50,7 +51,14 @@ class History:
                 ' img TEXT,'
                 ' name TEXT,'
                 ' size INTEGER,'
-                ' path TEXT)')
+                ' path TEXT,'
+                ' re TEXT)')
+            # 老库没有 re 列：引用回复是 1.6.0 之后加的，直接 ALTER 补上。
+            # 已经有过这一列时 SQLite 会报 duplicate column，忽略即可。
+            try:
+                self.conn.execute('ALTER TABLE messages ADD COLUMN re TEXT')
+            except sqlite3.Error:
+                pass
             self.conn.execute(
                 'CREATE INDEX IF NOT EXISTS idx_messages_conv'
                 ' ON messages(conv, id)')
@@ -65,11 +73,12 @@ class History:
             return out
         try:
             rows = self.conn.execute(
-                'SELECT conv, ts, kind, who, text, mt, char, img, name, size, path'
-                ' FROM messages ORDER BY id').fetchall()
+                'SELECT conv, ts, kind, who, text, mt, char, img, name, size,'
+                ' path, re FROM messages ORDER BY id').fetchall()
         except sqlite3.Error:
             return out
-        for (conv, ts, kind, who, text, mt, char, img, name, size, path) in rows:
+        for (conv, ts, kind, who, text, mt, char, img, name, size, path,
+             re_raw) in rows:
             entry = {
                 'kind': kind or 'msg',
                 'ts': float(ts or 0),
@@ -85,6 +94,14 @@ class History:
             # 有稳定文件路径时不再把 base64 读回内存
             if entry['path']:
                 entry['img'] = ''
+            re_obj = None
+            if re_raw:
+                try:
+                    re_obj = json.loads(re_raw)
+                except (TypeError, ValueError):
+                    re_obj = None
+            if isinstance(re_obj, dict):
+                entry['re'] = re_obj
             out.setdefault(conv, []).append(entry)
         for conv in out:
             out[conv] = out[conv][-LIMIT:]
@@ -100,8 +117,8 @@ class History:
         try:
             self.conn.execute(
                 'INSERT INTO messages'
-                ' (conv, ts, kind, who, text, mt, char, img, name, size, path)'
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                ' (conv, ts, kind, who, text, mt, char, img, name, size, path, re)'
+                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 (conv, float(entry.get('ts') or 0),
                  entry.get('kind') or 'msg',
                  entry.get('who') or '',
@@ -111,7 +128,9 @@ class History:
                  img,
                  entry.get('name') or '',
                  int(entry.get('size') or 0),
-                 path))
+                 path,
+                 (json.dumps(entry['re'], ensure_ascii=False)
+                  if isinstance(entry.get('re'), dict) else None)))
             self.conn.execute(
                 'DELETE FROM messages WHERE conv = ? AND id NOT IN'
                 ' (SELECT id FROM messages WHERE conv = ?'

@@ -120,23 +120,33 @@ class Pet:
         self.y = (-win.win_h - 40.0) if drop else float(ground_y)   # 从屏幕上方看不见的地方开始
         self.top = -win.win_h - 40.0    # 起飞升到的最高处（整个身子刚好出屏）
         self._crawl_to = None           # 集合落点；在空中时先记着，落地再出发
+        self._crawl_to_y = None         # 逗猫棒是二维的：光标在哪儿就爬到哪儿
+        self._land_y = None             # 起飞后落回哪一层（空中松手 / 摆放过的位置）
         self._crawl_t = 0.0             # 爬行循环帧的计时
 
-    # ---- 集合：贴地爬过去 ----
+    # ---- 集合：爬过去 ----
 
-    def start_crawl(self, target_x):
-        """朝 target_x 爬过去，到位自动站回 idle。
+    def start_crawl(self, target_x, target_y=None):
+        """朝 (target_x, target_y) 爬过去，到位自动站回 idle。
 
         在空中 / 被抓着时先记下落点，落地那一刻自己出发 —— 刚出场或
-        正被拎起来的那只也不会漏掉这一声集合。
+        正被拎起来的那只也不会漏掉这一声集合。`target_y` 为 None 时保持
+        当前高度（旧的「只横向爬」调用方不用改）。
         """
         self._crawl_to = float(target_x)
+        self._crawl_to_y = None if target_y is None else float(target_y)
         if self.phase not in ('fall', 'hold', 'rise'):
             self._begin_crawl()
 
     def _begin_crawl(self):
-        if self._crawl_to is None or abs(self._crawl_to - self.x) < 1.0:
+        if self._crawl_to is None:
+            return
+        if self._crawl_to_y is None:
+            self._crawl_to_y = self.y
+        if (abs(self._crawl_to - self.x) < 1.0
+                and abs(self._crawl_to_y - self.y) < 1.0):
             self._crawl_to = None       # 本来就在旁边，不用爬
+            self._crawl_to_y = None
             return
         self.phase = 'crawl'
         self.pose = self.CRAWL_FRAMES[0]
@@ -146,8 +156,30 @@ class Pet:
     def _stop_crawl(self):
         """后一个指令 / 拖动 / 起飞一律顶掉爬行：没有冷却，也不排队。"""
         self._crawl_to = None
+        self._crawl_to_y = None
         if self.phase == 'crawl':
             self.phase = 'idle'
+
+    def chase(self, target_x, target_y=None):
+        """逗猫棒：朝光标爬过去（横竖都跟）。
+
+        和集合共用同一套爬行物理，区别只在于目标可以每帧改 —— 所以正在爬
+        的时候只更新落点，不重开一次爬行（重开会把两帧动画倒回第一帧）。
+        """
+        self._crawl_to = float(target_x)
+        self._crawl_to_y = self.y if target_y is None else float(target_y)
+        if self.phase in ('fall', 'hold', 'rise'):
+            return
+        if self.phase != 'crawl':
+            self._begin_crawl()
+
+    def stop_chase(self):
+        """逗猫棒结束：停在原地，别继续朝最后那个落点爬。"""
+        self._crawl_to = None
+        self._crawl_to_y = None
+        if self.phase == 'crawl':
+            self.phase = 'idle'
+            self.pose = 'idle'
 
     def act(self, pose, dur):
         """做一个指定动作，dur 秒后自动回 idle。下落、被抓着、起飞时都不接动作。
@@ -186,21 +218,28 @@ class Pet:
         self.y = float(y)
 
     def release(self, vy=0.0):
-        """松手：从当前位置自由落体，落地回到 idle（= 拉起来再扔下去）。"""
+        """松手：人就停在松手的位置，不再掉回地面。
+
+        桌宠不是「只能站在屏幕底边」的挂件 —— 用户把它拖到哪儿，它就该待在
+        哪儿。所以松手直接回到 idle，位置原样保留；只有出场（drop=True）和
+        起飞落地走重力。
+        """
         if self.phase != 'hold':
             return
-        self.phase = 'fall'
-        self.pose = 'fall'
-        self.vy = max(0.0, float(vy))
+        self.phase = 'idle'
+        self.pose = 'idle'
+        self.vy = 0.0
+        self.landed = True
+        self._land_y = None
 
     def take_off(self):
-        """起飞：从当前位置升到屏幕最上方，到顶后原地掉落。
+        """起飞：从当前位置升到屏幕最上方，到顶后掉回起飞前的高度。
 
-        和「拎起来松手」是同一条路：上去只是匀速改 y，到顶把 phase 交给
-        fall，后面完全由重力接管 —— 落地那一下和拖动扔下来一模一样。
-        已经在天上（正下落/被拎着）也接指令，重新从当前位置起飞。
+        上层只改 y，下落仍由重力接管；落地高度记在 `_land_y`，所以摆在
+        半空的人飞一圈后还回到原来那一层，不会被顺手扔回屏幕底边。
         """
         self._stop_crawl()
+        self._land_y = self.y
         if self.y <= self.top + 1:
             self.phase = 'fall'         # 已经在顶上了，没什么可升的，直接掉
             self.pose = 'fall'
@@ -233,12 +272,14 @@ class Pet:
         if self.phase == 'fall':
             self.vy += self.GRAVITY * dt
             self.y += self.vy * dt
-            if self.y >= self.ground:
-                self.y = self.ground
+            land_y = self.ground if self._land_y is None else self._land_y
+            if self.y >= land_y:
+                self.y = land_y
                 self.vy = 0.0
                 self.phase = 'idle'
                 self.pose = 'idle'
                 self.landed = True
+                self._land_y = None
                 if self._crawl_to is not None:
                     self._begin_crawl()    # 排队的那声集合，落地就出发
         elif self.phase == 'rise':
@@ -253,15 +294,22 @@ class Pet:
             pass                    # 位置由拖动直接写入，这里不加速度
         elif self.phase == 'crawl':
             remain = self._crawl_to - self.x
+            remain_y = ((self._crawl_to_y if self._crawl_to_y is not None
+                         else self.y) - self.y)
             step = self.win.win_w * self.CRAWL_BODY_PER_SEC * dt
             self.x += (remain if abs(remain) <= step
                        else (step if remain > 0 else -step))
+            self.y += (remain_y if abs(remain_y) <= step
+                       else (step if remain_y > 0 else -step))
             self._crawl_t += dt
             self.pose = self.CRAWL_FRAMES[
                 int(self._crawl_t / self.CRAWL_FRAME_SEC) % 2]
-            if abs(self._crawl_to - self.x) <= 0.5:
+            if abs(self._crawl_to - self.x) <= 0.5 and abs(remain_y) <= step:
                 self.x = self._crawl_to
+                self.y = (self._crawl_to_y if self._crawl_to_y is not None
+                          else self.y)
                 self._crawl_to = None
+                self._crawl_to_y = None
                 self.phase = 'idle'
                 self.pose = 'idle'
         elif self.timer > 0:

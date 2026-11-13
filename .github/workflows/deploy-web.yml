@@ -1,0 +1,134 @@
+name: deploy-web
+
+# 打 tag 就把网页版发到服务器 —— 全量：服务端 + 网页 + 素材，一次发完。
+#
+# 和 build.yml（打 exe / .app）是两条腿，互不等待：桌面端要几分钟、产物几十 MB，
+# 网页版几秒就完。放一个 job 里会让网页版干等打包。
+#
+# 需要先在仓库 Settings → Secrets and variables → Actions 里配：
+#   DEPLOY_HOST   服务器 IP
+#   DEPLOY_USER   登录用户
+#   DEPLOY_KEY    私钥全文（ed25519，专门给部署用，别复用你天天登的那把）
+#   DEPLOY_PORT   可选，默认 22
+#   DEPLOY_PATH   可选，默认 /opt/pet-club
+#
+# 密钥怎么来（本机 Git Bash 里跑一次）：
+#   ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/petclub_deploy -N ""
+#   ssh-copy-id -i ~/.ssh/petclub_deploy.pub root@47.94.21.34
+#   cat ~/.ssh/petclub_deploy | clip          # 私钥进剪贴板，粘到 DEPLOY_KEY
+# 第一条生成一对密钥，第二条把公钥装进服务器（会要一次密码），第三条只是复制。
+# 之后 workflow 用私钥登录，不再需要密码。
+#
+# ⚠️ 服务器安全组必须让 GitHub 的 runner 连得上 22 端口。只放行了自己公司 IP 的话，
+#    这个 workflow 会卡在「准备 SSH」或「上传并重启」。
+#
+# 回滚：在 Actions 里手动跑本 workflow，选旧 tag 的 ref 重发一次。
+#       网页端的 build 号会跟着变回旧值，已经打开的页面会提示刷新。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 连着打两个 tag 时排队，不要互相覆盖 —— 并发解压同一个目录会解出半套代码。
+concurrency:
+  group: deploy-web
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 发布网页版
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # tag 是 v1.6.0，代码里三处版本号也必须是 1.6.0。
+      # 对不上直接失败：发出去就是「网页说 1.7、服务端说 1.6」，最难查的那种。
+      - name: 校验版本号并生成 build.json
+        run: python tools/make_web_build.py --tag "${{ github.ref_name }}"
+
+      # 每次都是全量：代码 + 网页 + 素材一起发。
+      # 不拆「先发代码、改天补素材」—— 那种拆法的代价是线上可能长期处于
+      # 「新 JS 配旧图片」的半套状态，而且没人说得清现在到底是哪一版。
+      # 素材 6 MB，PNG 已经压过，gzip 只是包成一个流，大小基本不变。
+      - name: 打包（全量）
+        run: |
+          tar -czf /tmp/pet-club-web.tar.gz \
+            --exclude __pycache__ \
+            --exclude 'assets/_gen' \
+            server.py web_gateway.py petclub web deploy assets
+
+          # 素材漏了的话，线上就是「代码是新的、图全 404」，最难查的故障之一。
+          # 这里先自证包里有东西，比发布完再发现好。
+          for d in assets/roles assets/stickers web/js web/build.json; do
+            n=$(tar -tzf /tmp/pet-club-web.tar.gz | grep -c "^$d")
+            echo "  $d: $n 项"
+            if [ "$n" -eq 0 ]; then echo "包里缺 $d，停止发布"; exit 1; fi
+          done
+
+          echo "包内条目：$(tar -tzf /tmp/pet-club-web.tar.gz | wc -l)"
+          du -h /tmp/pet-club-web.tar.gz
+
+      - name: 准备 SSH
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # 先把主机指纹接住，免得 ssh 卡在 yes/no 上把 job 挂到超时。
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "ssh-keyscan 没扫到 $DEPLOY_HOST:$DEPLOY_PORT —— 安全组大概率没放开"
+            exit 1
+          fi
+
+      - name: 上传并重启
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/pet-club' }}
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key -p $DEPLOY_PORT -o StrictHostKeyChecking=accept-new"
+          SCP="scp -i ~/.ssh/deploy_key -P $DEPLOY_PORT -o StrictHostKeyChecking=accept-new"
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p '$DEPLOY_PATH'"
+          $SCP /tmp/pet-club-web.tar.gz "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH/"
+          $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && tar -xzf pet-club-web.tar.gz && rm -f pet-club-web.tar.gz && sh deploy/stop.sh && sh deploy/start.sh"
+
+      # 部署脚本自己会自检 PID，但那只证明「进程起来了」。
+      # 这里再从外面问一句：线上那份的 build 号，是不是刚打出来的那个？
+      - name: 核对线上版本
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          rm -f /tmp/online.json
+          for i in 1 2 3 4 5 6 7 8; do
+            if curl -fsS --max-time 5 "http://$DEPLOY_HOST:8766/api/version" -o /tmp/online.json; then
+              break
+            fi
+            echo "第 $i 次没问到，等 2 秒重试"
+            sleep 2
+          done
+          cat /tmp/online.json
+          python - <<'PY'
+          import json
+          online = json.load(open('/tmp/online.json'))
+          local = json.load(open('web/build.json'))
+          assert online['build'] == local['build'], (
+              '线上 %s != 本地 %s\n'
+              '进程没起来？去服务器看 logs/web.log 和 logs/server.log'
+              % (online['build'], local['build'])
+          )
+          print('线上 build 与本地一致：', online['build'])
+          PY

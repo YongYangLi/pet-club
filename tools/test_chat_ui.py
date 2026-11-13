@@ -18,9 +18,10 @@ sys.path.insert(0, ROOT)
 
 from PySide6.QtCore import QEvent, QPoint, QPointF, Qt, QUrl          # noqa: E402
 from PySide6.QtGui import (QColor, QFontMetrics, QKeyEvent, QMouseEvent,  # noqa: E402
-                           QPalette, QPixmap, QWheelEvent)
+                           QPalette, QPixmap, QTextCursor, QWheelEvent)
 from PySide6.QtTest import QTest                                 # noqa: E402
-from PySide6.QtWidgets import QApplication                       # noqa: E402
+from PySide6.QtWidgets import (QApplication, QLabel, QPushButton,    # noqa: E402
+                               QToolButton)
 from PIL import Image                                            # noqa: E402
 
 from petclub import actions, media                               # noqa: E402
@@ -29,7 +30,7 @@ from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CELL_GAP, CHIP_H,  # noqa: 
                           CHROME, COLS, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,
                           PREVIEW_BOX, SEL_BG, SEL_FG, TALK_BG, BubbleText,
                           ChatWindow, Composer, CONV_ALL, ImageViewer, MeBar,
-                          StatePill, ToolIcon)
+                          StatePill)
 from petclub.config import ROLES, assets_dir                     # noqa: E402
 
 PASS = []
@@ -156,9 +157,9 @@ def main():
     chk('合并后的按钮提示里同时有图片和文件',
         '图片' in chat.icon_btn['file'].toolTip()
         and '文件' in chat.icon_btn['file'].toolTip())
-    chk('工具图标是自绘矢量而不是字符',
-        all(isinstance(v, ToolIcon) for v in chat.icon_btn.values()))
-    chk('工具图标不小于 30px', chat.icon_btn['emoji'].width() >= 30)
+    chk('工具按钮和 web 一样是文字按钮',
+        all(isinstance(v, QPushButton) for v in chat.icon_btn.values()))
+    chk('工具按钮高度和互动条对齐', chat.icon_btn['emoji'].height() == 24)
 
     card = chat.composer_card
     emo = chat.icon_btn['emoji'].mapTo(card, QPoint(0, 0))
@@ -244,10 +245,15 @@ def main():
         and 'border' not in bar.styleSheet(), bar.styleSheet())
     chk('快捷条没有阴影 / 没有边框卡片', bar.graphicsEffect() is None)
     chip = chat._chips['wave']
-    chk('快捷互动是紧凑的小药丸',
+    chk('快捷互动是紧凑的小药丸（和 web 同尺寸同字号）',
         chip.height() == CHIP_H and chip.width() < 60
-        and chip.font().pointSize() <= 8,
-        (chip.size(), chip.font().pointSize()))
+        and chip.font().pixelSize() == 11,
+        (chip.size(), chip.font().pixelSize()))
+    chk('表情 / 文件是 10px 的小文字按钮',
+        chat.icon_btn['emoji'].font().pixelSize() == 10
+        and chat.icon_btn['emoji'].height() == 24,
+        (chat.icon_btn['emoji'].font().pixelSize(),
+         chat.icon_btn['emoji'].height()))
 
     print('\n--- 窗口按钮：只关窗，不退程序 ---')
     app = App('127.0.0.1', 1)
@@ -321,6 +327,19 @@ def main():
         set(live._chips) == set(actions.CHAT_ORDER), set(live._chips))
     chk('快捷条里没有「传个话」（人已经在窗口里了）',
         'say' not in live._chips)
+    chk('聊天条里有「逗一逗」本机按钮',
+        live._toy_chip.isVisible() and live._toy_chip.text() == '逗一逗')
+    chk('烟花也升到互动条，跟在逗一逗后面',
+        live._fx_chip.isVisible() and live._fx_chip.text() == '烟花'
+        and live._fx_chip.x() > live._toy_chip.x(),
+        (live._fx_chip.geometry(), live._toy_chip.geometry()))
+    chk('工具行里不再有烟花按钮',
+        not any(b.text() == '烟花' for b in live.findChildren(QPushButton)))
+    smenu = app.build_self_menu()
+    stexts = [a.text() for a in smenu.actions()]
+    chk('右键菜单里逗一逗和烟花是两条独立指令',
+        all(t in stexts for t in ('逗一逗', '烟花')), stexts)
+    smenu.close()
     chk('快捷条接的是 App 的互动执行', live.on_action == app.do_action)
     chk('群聊下目标提示正确', '全体群聊' in live.target_lb.text())
     live.switch('p2')
@@ -572,8 +591,9 @@ def main():
 
     print('\n--- 桌宠大小三档 ---')
     sizes = []
+    rems = []
     szwin = ChatWindow(None, me='p1', on_pet_size=sizes.append,
-                       pet_size='large')
+                       pet_size='large', on_reminder=lambda *a: rems.append(a))
     szwin._show_me_menu()
     sub = szwin._me_menu.actions()[2].menu()
     labels = [a.text() for a in sub.actions()]
@@ -582,6 +602,32 @@ def main():
         [a.text() for a in sub.actions() if a.isChecked()] == ['大'])
     sub.actions()[0].trigger()
     chk('选「小」回调到 App', sizes == ['small'], sizes)
+
+    rows = [a for a in szwin._me_menu.actions()
+            if a.text().startswith(('喝水提醒', '久坐提醒'))]
+    chk('提醒只有两行：喝水 + 久坐',
+        [a.text().split('    ')[0] for a in rows] == ['喝水提醒', '久坐提醒'],
+        [a.text() for a in rows])
+    chk('提醒分组标题已去掉（不再多一行「提醒」）',
+        '提醒' not in [a.text() for a in szwin._me_menu.actions()])
+    chk('提醒就是普通可勾选菜单项（勾和文字跟其他项同一套）',
+        all(a.isCheckable() and not a.isChecked() for a in rows)
+        and rows[0].text().endswith('45 分钟'), [a.text() for a in rows])
+    pens = [b for b in szwin._me_menu.findChildren(QToolButton)
+            if b.text() == '✎']
+    chk('每行尾部多一枚小笔头',
+        len(pens) == 2 and all(p.isVisible() for p in pens),
+        [(p.geometry(), p.isVisible()) for p in pens])
+    rows[0].trigger()
+    qapp.processEvents()
+    chk('单击整行就是启用（不写「启用」两个字）',
+        rems and rems[-1] == ('water', True, 45) and rows[0].isChecked(), rems)
+    rows[0].trigger()
+    qapp.processEvents()
+    chk('再单击一次就是停用',
+        rems[-1] == ('water', False, 45) and not rows[0].isChecked(), rems)
+    chk('来回切换后聊天窗口的状态跟着更新', szwin.water_on is False)
+
     szwin._me_menu.close()
     szwin.hide()
 
@@ -590,6 +636,57 @@ def main():
     me_win.hide()
     pop.hide()
     live.hide()
+
+    print('\n--- 引用回复 / @ / 小游戏 ---')
+    game_calls = []
+    qwin = ChatWindow(None, me='p1',
+                      on_game=lambda k, t: game_calls.append((k, t)))
+    qwin.show()
+    qapp.processEvents()
+    qwin.set_quote({'kind': 'msg', 'who': 'p2', 'text': '原话',
+                    'ts': time.time()})
+    chk('引用条会出现在输入框上方', not qwin.quote_host.isHidden())
+    chk('引用摘要带上了谁说的', '胡大神' in qwin.quote_lb.text(),
+        qwin.quote_lb.text())
+    taken = qwin.take_quote()
+    chk('发送时取走引用并收起',
+        taken and taken['text'] == '原话' and qwin.quote_host.isHidden(), taken)
+
+    qwin.field.setText('hi')
+    cur = qwin.field.textCursor()
+    cur.movePosition(QTextCursor.End)
+    qwin.field.setTextCursor(cur)
+    qwin._insert_mention('胡大神')
+    chk('@ 提到某个人会插到光标处',
+        qwin.field.text() == 'hi @胡大神 ', repr(qwin.field.text()))
+
+    qwin.field.setText('@')
+    cur = qwin.field.textCursor()
+    cur.movePosition(QTextCursor.End)
+    qwin.field.setTextCursor(cur)
+    qwin._insert_mention('胡大神')
+    chk('手输 @ 再选人不会重复 @',
+        qwin.field.text() == '@胡大神 ', repr(qwin.field.text()))
+    qwin._on_game('dice')
+    chk('骰子按钮走 App 的回调', game_calls == [('dice', None)], game_calls)
+
+    game_log = {CONV_ALL: [{'kind': 'game', 'who': 'p2',
+                            'text': '胡大神 掷出了 4', 'ts': time.time()}]}
+    gwin = ChatWindow(None, me='p1', log=game_log)
+    chk('游戏结果会进会话预览', gwin.preview_of(CONV_ALL) == '胡大神 掷出了 4',
+        gwin.preview_of(CONV_ALL))
+    gwin.show()
+    qapp.processEvents()
+    qapp.processEvents()
+    pills = [lb for lb in gwin.findChildren(QLabel)
+             if lb.text() == '胡大神 掷出了 4' and '#f1f2ff' in lb.styleSheet()]
+    chk('游戏/烟花是一条贴合文字的胶囊，不铺满整行',
+        bool(pills) and pills[0].width() < gwin.scroll.viewport().width() * 0.8,
+        ((pills[0].width() if pills else None), gwin.scroll.viewport().width()))
+    gwin.hide()
+
+    qwin.hide()
+
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))
     for name in FAIL:
         print('  - ' + name)

@@ -15,8 +15,20 @@ export const state = {
   currentKey: CONV_ALL,
   remoteOn: readBool('petclub.remote', true),
   petSize: readChoice('petclub.petSize', ['small', 'default', 'large'], 'default'),
+  // 上次坐的是哪个身份。刷新（比如版本更新后自动刷新）要能自己坐回去，
+  // 否则每次更新都把人踢回认领页重选一遍。
+  lastRole: readText('petclub.role', ''),
   claimVisible: true,
 };
+
+function readText(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v || fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
 
 function readBool(key, fallback) {
   try {

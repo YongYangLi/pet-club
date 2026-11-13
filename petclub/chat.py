@@ -18,6 +18,7 @@
 """
 import io
 import os
+import re
 import time
 
 from PIL import Image
@@ -25,11 +26,12 @@ from PySide6.QtCore import (QBuffer, QIODevice, QPoint, QPointF, QRectF, Qt,
                             QTimer, Signal)
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                            QGuiApplication, QIcon, QPainter, QPen, QPixmap,
-                           QTextOption)
-from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QMenu,
-                               QPushButton, QScrollArea, QSizePolicy, QTextEdit,
-                               QToolButton, QVBoxLayout, QWidget)
+                           QTextCharFormat, QTextCursor, QTextOption)
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame,
+                               QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QMenu, QPushButton, QScrollArea,
+                               QSizePolicy, QTextEdit, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from . import actions, host, media
 from .config import (PET_SIZE_NAME, PET_SIZE_ORDER, ROLE_NAME, ROLES,
@@ -52,10 +54,10 @@ BUBBLE_MAX = 460                # 气泡最宽（窗口够宽时才吃得到，�
 CELL = 56                   # 拾取面板一格；表情和贴纸都按这个放大
 CELL_GAP = 2                # 格子之间的缝（算面板尺寸时要跟着一起算）
 COLS = 8
-CHIP_H = 22                 # 互动药丸的高度：比正文小一号，挤在输入卡片顶上
+CHIP_H = 24                 # 和 web 的 .chip 一致：24 高、11px 字
 CHIP_GAP = 4                # 药丸之间的缝
 ACT_ROWS = 2                # 最多排两行，排不下就换行，不再收进「更多」
-COMPOSER_H = 72             # 多行输入框：三行多文字
+COMPOSER_H = 64             # 多行输入框：比一屏三行再紧一点
 PREVIEW_BOX = 200           # 悬停预览的逻辑边长
 PREVIEW_DPR = 2.0           # 位图按 2x 物理像素生成，高分屏上不糊
 
@@ -71,6 +73,11 @@ TIME_FG = '#a6abb8'
 SIDE_BG = CHROME            # 会话栏 = 顶部标题带同一个颜色
 SIDE_SEL = CHROME_SEL
 SIDE_HOVER = CHROME_HOVER
+
+# @ 谁：名字来自身份表，不另写一份。长的先匹配，避免「胡大神」被「胡」截断。
+MENTION_RE = re.compile('@(?:%s)' % '|'.join(
+    sorted([re.escape(n) for n in ROLE_NAME.values()] + ['所有人'],
+           key=len, reverse=True)))
 
 # 头像色块按 ROLES 的顺序取色，一个身份一个颜色 —— 加角色就往后面接一个，
 # 别复用前面的：两个身份撞色时，会话栏里只能靠首字分辨人。
@@ -144,16 +151,6 @@ def _pil_from_clipboard(img):
     return Image.open(io.BytesIO(bytes(buf.data()))).convert('RGBA')
 
 
-def _zoom(p, widget, k):
-    """hover 时以控件中心为原点放大：只改绘制，不动布局，不会挤到邻居。"""
-    if k == 1.0:
-        return
-    cx, cy = widget.width() / 2.0, widget.height() / 2.0
-    p.translate(cx, cy)
-    p.scale(k, k)
-    p.translate(-cx, -cy)
-
-
 def _hover_events(cls):
     """给自绘按钮补上 enter/leave 的重绘。"""
     def enter(self, e):
@@ -172,62 +169,6 @@ def _hover_events(cls):
 
 
 @_hover_events
-class ToolIcon(QToolButton):
-    """输入区左下角的一颗工具按钮。
-
-    只有两颗：表情、文件（图片和文件合并到同一颗里）。矢量自绘，
-    一套线宽一套颜色，hover 时放大并浮出底色，不靠字体里的符号。
-    """
-
-    TIPS = {'emoji': '表情 / 表情包', 'file': '发送图片或文件'}
-
-    def __init__(self, kind, parent=None):
-        super().__init__(parent)
-        self.kind = kind
-        self._hover = False
-        self.setFixedSize(32, 32)
-        self.setToolTip(self.TIPS.get(kind, ''))
-        self.setCursor(Qt.PointingHandCursor)
-        self.setStyleSheet('QToolButton { border: none; background: transparent; }')
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, True)
-        cx, cy = self.width() / 2.0, self.height() / 2.0
-        if self._hover:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(ACCENT_SOFT))
-            p.drawRoundedRect(QRectF(self.rect()), 8, 8)
-            _zoom(p, self, 1.14)
-        p.setPen(QPen(QColor(ACCENT if self._hover else SUB), 1.7,
-                      Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        p.setBrush(Qt.NoBrush)
-
-        if self.kind == 'emoji':
-            p.drawEllipse(QPointF(cx, cy), 9, 9)
-            p.setBrush(QColor(ACCENT if self._hover else SUB))
-            p.setPen(Qt.NoPen)
-            p.drawEllipse(QPointF(cx - 3.4, cy - 2.4), 1.2, 1.4)
-            p.drawEllipse(QPointF(cx + 3.4, cy - 2.4), 1.2, 1.4)
-            p.setBrush(Qt.NoBrush)
-            p.setPen(QPen(QColor(ACCENT if self._hover else SUB), 1.5,
-                          Qt.SolidLine, Qt.RoundCap))
-            p.drawArc(QRectF(cx - 5, cy - 3, 10, 9), 200 * 16, 140 * 16)
-        else:
-            # 一张带折角的文件：图片也走这颗按钮，点一下直接开系统文件框
-            p.drawLine(QPointF(cx - 7, cy - 9), QPointF(cx + 3, cy - 9))
-            p.drawLine(QPointF(cx + 3, cy - 9), QPointF(cx + 8, cy - 4))
-            p.drawLine(QPointF(cx + 8, cy - 4), QPointF(cx + 8, cy + 9))
-            p.drawLine(QPointF(cx + 8, cy + 9), QPointF(cx - 7, cy + 9))
-            p.drawLine(QPointF(cx - 7, cy + 9), QPointF(cx - 7, cy - 9))
-            p.drawLine(QPointF(cx + 3, cy - 9), QPointF(cx + 3, cy - 4))
-            p.drawLine(QPointF(cx + 3, cy - 4), QPointF(cx + 8, cy - 4))
-            p.drawLine(QPointF(cx - 4, cy), QPointF(cx + 4, cy))
-            p.drawLine(QPointF(cx - 4, cy + 4), QPointF(cx + 2, cy + 4))
-        p.end()
-
-
-@_hover_events
 class ActionChip(QToolButton):
     """快捷互动的一颗：白色小药丸，压在输入卡片的浅灰底上。
 
@@ -238,11 +179,13 @@ class ActionChip(QToolButton):
         super().__init__(parent)
         self._hover = False
         self.setText(label)
-        self.setFont(font(7))
+        f = font(6)
+        f.setPixelSize(11)          # 和 web 的 11px 对齐，不跟 DPI 的点数换算跑
+        self.setFont(f)
         self.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.setCursor(Qt.PointingHandCursor)
         self.setStyleSheet('QToolButton { border: none; background: transparent; }')
-        w = QFontMetrics(self.font()).horizontalAdvance(label) + 14
+        w = QFontMetrics(self.font()).horizontalAdvance(label) + 20
         self.setFixedSize(max(34, w), CHIP_H)
         self.clicked.connect(cmd)
 
@@ -250,17 +193,15 @@ class ActionChip(QToolButton):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
-        rad = r.height() / 2.0
+        rad = 11.0                  # web 的 .chip 是 24 高、11 圆角
         if self._hover:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(ACCENT))
-            p.drawRoundedRect(r, rad, rad)
-            _zoom(p, self, 1.06)
+            p.setPen(QPen(QColor(ACCENT_EDGE), 1))
+            p.setBrush(QColor(ACCENT_SOFT))
         else:
             p.setPen(QPen(QColor(CARD_LINE), 1))
             p.setBrush(QColor('#ffffff'))
-            p.drawRoundedRect(r, rad, rad)
-        p.setPen(QColor('#ffffff' if self._hover else SUB))
+        p.drawRoundedRect(r, rad, rad)
+        p.setPen(QColor(ACCENT if self._hover else SUB))
         p.setFont(self.font())
         p.drawText(r, Qt.AlignCenter, self.text())
         p.end()
@@ -279,9 +220,10 @@ class BubbleText(QTextEdit):
 
     PAD_X, PAD_Y = 13, 9
 
-    def __init__(self, text, mine, parent=None, max_w=None):
+    def __init__(self, text, mine, parent=None, max_w=None, on_quote=None):
         super().__init__(parent)
         self._max = int(max_w) if max_w else BUBBLE_MAX
+        self._on_quote = on_quote
         self.setReadOnly(True)
         self.setUndoRedoEnabled(False)
         self.setFrameShape(QFrame.NoFrame)
@@ -309,7 +251,23 @@ class BubbleText(QTextEdit):
                 % (BUBBLE_OTH, BUBBLE_OTH_FG, self.PAD_Y, self.PAD_X,
                    SEL_BG, SEL_FG))
         self.setPlainText(text)
+        self._highlight_mentions(mine)
         self._fit()
+
+    def _highlight_mentions(self, mine):
+        """把 @名字 标出来。用字符格式而不是 HTML，换行和空格不会被排版吃掉。"""
+        text = self.toPlainText()
+        if '@' not in text:
+            return
+        fmt = QTextCharFormat()
+        fmt.setFontWeight(QFont.Bold)
+        fmt.setFontUnderline(True)
+        fmt.setForeground(QColor('#ffffff' if mine else ACCENT))
+        cur = QTextCursor(self.document())
+        for m in MENTION_RE.finditer(text):
+            cur.setPosition(m.start())
+            cur.setPosition(m.end(), QTextCursor.KeepAnchor)
+            cur.mergeCharFormat(fmt)
 
     def set_max_width(self, w):
         """窗口变宽/变窄时重算一次；宽度没变就什么都不做。"""
@@ -342,6 +300,9 @@ class BubbleText(QTextEdit):
 
     def _menu(self, pos):
         m = QMenu(self)
+        if self._on_quote is not None:
+            m.addAction('引用').triggered.connect(self._on_quote)
+            m.addSeparator()
         m.addAction('复制').triggered.connect(self.copy)
         m.addAction('全选').triggered.connect(self.selectAll)
         m.exec(self.mapToGlobal(pos))
@@ -878,6 +839,7 @@ class Composer(QTextEdit):
     """
 
     send_requested = Signal()
+    at_typed = Signal()
 
     def __init__(self, parent, on_paste):
         super().__init__(parent)
@@ -886,12 +848,13 @@ class Composer(QTextEdit):
         # 输入法还在拼字（preedit）时 toPlainText() 仍是空的，但屏幕上已经有
         # 候选词了；这时再画 placeholder 就会和候选词叠在一起。
         self._composing = False
-        self.setFont(font(10))
+        self.setFont(font(9))
         self.setFrameShape(QFrame.NoFrame)
         self.setStyleSheet(
             'QTextEdit { background: transparent; border: none;'
-            ' padding: 2px 4px; selection-background-color: %s;'
+            ' padding: 1px 3px; selection-background-color: %s;'
             ' selection-color: %s; }' % (SEL_BG, SEL_FG))
+        self.document().setDocumentMargin(0)
         self.setFixedHeight(COMPOSER_H)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -918,6 +881,9 @@ class Composer(QTextEdit):
                 e.accept()
                 return
         super().keyPressEvent(e)
+        # 手输 @ 也要弹快捷选人：光有按钮的话，习惯打 @ 的人会以为没这个功能
+        if e.text() in ('@', '＠'):
+            self.at_typed.emit()
 
     def inputMethodEvent(self, e):
         self._composing = bool(e.preeditString())
@@ -931,7 +897,7 @@ class Composer(QTextEdit):
         p = QPainter(self.viewport())
         p.setFont(self.font())
         p.setPen(QColor(MUTED))
-        p.drawText(QRectF(self.viewport().rect()).adjusted(6, 3, -6, -3),
+        p.drawText(QRectF(self.viewport().rect()).adjusted(4, 1, -4, -1),
                    Qt.AlignLeft | Qt.AlignTop, self._hint)
         p.end()
 
@@ -1011,13 +977,23 @@ class ChatWindow(CardWindow):
                  unread=None, on_action=None, on_leave=None, on_quit=None,
                  on_pet_size=None, pet_size='default',
                  remote_on=True, on_remote=None, remote_hint=None,
-                 on_update=None, update_label=None, update_enabled=None):
+                 on_update=None, update_label=None, update_enabled=None,
+                 on_game=None, on_toy=None, on_fx=None, on_reminder=None,
+                 water_on=False, water_min=45, sit_on=False, sit_min=60):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
         self.setMinimumSize(MIN_W, MIN_H)
         self.on_send = on_send
         self.on_media = on_media
+        self.on_game = on_game
+        self.on_toy = on_toy
+        self.on_fx = on_fx
+        self.on_reminder = on_reminder
+        self.water_on = bool(water_on)
+        self.water_min = int(water_min or 45)
+        self.sit_on = bool(sit_on)
+        self.sit_min = int(sit_min or 60)
         self.on_close = on_close
         self.on_action = on_action
         self.on_leave = on_leave
@@ -1056,6 +1032,7 @@ class ChatWindow(CardWindow):
         self._reflow_pending = False
         self._attach = []           # 还没发出去的附件（图片 / 文件）
         self._attach_chips = []
+        self._quote = None          # 正在引用的一条：{who, text, mt}
 
         self._build()
         self.refresh_list()
@@ -1240,6 +1217,15 @@ class ChatWindow(CardWindow):
             chip.hide()
             self._chips[key] = chip
 
+        # 逗一逗是纯本机效果（让它跟着我的鼠标跑），不占动作表，也不发网络消息
+        self._toy_chip = ActionChip('逗一逗', self._on_toy, bar)
+        self._toy_chip.setToolTip('让它跟着鼠标跑 8 秒')
+        self._toy_chip.hide()
+        # 烟花也升到互动条，排在逗一逗右边；工具行只留骰子
+        self._fx_chip = ActionChip('烟花', lambda _=False: self._on_fun('fx'), bar)
+        self._fx_chip.setToolTip('放一场烟花')
+        self._fx_chip.hide()
+
         # 先按一行占位：多数窗口够宽，_reflow_actions 真需要两行时再长高
         bar.setFixedHeight(CHIP_H)
         self.act_bar = bar
@@ -1278,6 +1264,31 @@ class ChatWindow(CardWindow):
         self.attach_host.hide()
         cv.addWidget(self.attach_host)
 
+        # 引用条：点了「引用」才出现，发出去或点 × 就收起来
+        self.quote_host = QFrame(card)
+        self.quote_host.setObjectName('quotebar')
+        self.quote_host.setStyleSheet(
+            '#quotebar { background: #f3f4f9; border: none;'
+            ' border-left: 3px solid #c9cbe0; border-radius: 8px; }')
+        qh = QHBoxLayout(self.quote_host)
+        qh.setContentsMargins(8, 3, 2, 3)
+        qh.setSpacing(2)
+        self.quote_lb = QLabel('', self.quote_host)
+        self.quote_lb.setFont(font(8))
+        self.quote_lb.setWordWrap(True)
+        self.quote_lb.setStyleSheet('color: %s; background: transparent;' % SUB)
+        qh.addWidget(self.quote_lb, 1)
+        qx = QToolButton(self.quote_host)
+        qx.setText('×')
+        qx.setCursor(Qt.PointingHandCursor)
+        qx.setFixedSize(20, 20)
+        qx.setStyleSheet('QToolButton { border: none; color: %s;'
+                         ' background: transparent; }' % MUTED)
+        qx.clicked.connect(self.clear_quote)
+        qh.addWidget(qx, 0, Qt.AlignTop)
+        self.quote_host.hide()
+        cv.addWidget(self.quote_host)
+
         cv.addWidget(self._build_actions(card))
 
         line = QFrame(card)
@@ -1293,11 +1304,26 @@ class ChatWindow(CardWindow):
         foot.setContentsMargins(2, 0, 0, 0)
         foot.setSpacing(4)
         self.icon_btn = {}
-        for kind in ('emoji', 'file'):
-            b = ToolIcon(kind, card)
+        for kind, label in (('emoji', '表情'), ('file', '文件')):
+            b = self._mini_btn(label, card)
+            b.setToolTip('表情 / 表情包' if kind == 'emoji'
+                         else '发送图片或文件')
             b.clicked.connect(lambda _=False, k=kind: self._on_icon(k))
             foot.addWidget(b)
             self.icon_btn[kind] = b
+        foot.addSpacing(6)
+
+        # @、骰子：和「表情 / 文件」同一套文字按钮，对齐 web 端
+        at = self._mini_btn('@', card)
+        at.setToolTip('提到某个人')
+        at.clicked.connect(lambda: self._mention_menu(at))
+        self.mention_btn = at
+        self.field.at_typed.connect(self._on_at_typed)
+        foot.addWidget(at)
+        dice = self._mini_btn('骰子', card)
+        dice.setToolTip('掷骰子')
+        dice.clicked.connect(lambda: self._on_fun('dice'))
+        foot.addWidget(dice)
         foot.addSpacing(6)
 
         self.target_lb = QLabel('')
@@ -1360,6 +1386,12 @@ class ChatWindow(CardWindow):
         act.setToolTip(self.remote_hint())
         act.triggered.connect(self._on_remote)
         m.addSeparator()
+        self._reminder_acts = []
+        self._reminder_action(m, 'water', '喝水提醒', self.water_on,
+                              self.water_min)
+        self._reminder_action(m, 'sit', '久坐提醒', self.sit_on,
+                              self.sit_min)
+        m.addSeparator()
         act = m.addAction(self.update_label())
         act.setEnabled(self.update_enabled())
         act.triggered.connect(self._on_update)
@@ -1368,8 +1400,12 @@ class ChatWindow(CardWindow):
         m.addAction('退出').triggered.connect(self._on_quit)
         self._me_menu_prev, self._me_menu = self._me_menu, m
         m.adjustSize()
+        # 给行尾的小笔头留出位置，又不挤动文字
+        m.setMinimumWidth(m.sizeHint().width() + 24)
         at = self.me_bar.mapToGlobal(QPoint(0, 0))
         m.popup(QPoint(at.x() + 12, at.y() - m.height() - 4))
+        # 必须等 popup 之后再挂笔头：菜单展开前创建的子控件不会跟着画出来
+        self._place_reminder_pens(m)
 
     def _on_pet_size(self, level):
         if level == self.pet_size:
@@ -1377,6 +1413,62 @@ class ChatWindow(CardWindow):
         self.pet_size = level
         if self.on_pet_size is not None:
             self.on_pet_size(level)
+
+    def _reminder_action(self, menu, kind, name, on, minutes):
+        """提醒就是一条普通可勾选菜单项，只在行尾多挂一个小笔头。"""
+        row = {'kind': kind, 'name': name, 'minutes': [int(minutes)]}
+        act = menu.addAction('%s    %d 分钟' % (name, minutes))
+        act.setCheckable(True)
+        act.setChecked(bool(on))
+        act.toggled.connect(
+            lambda checked, r=row: self._on_reminder(r['kind'], checked,
+                                                     r['minutes'][0]))
+        row['act'] = act
+        row['pen'] = None
+        self._reminder_acts.append(row)
+
+    def _place_reminder_pens(self, menu):
+        """把笔头摆在每条提醒的右内边距里，不挤文字、不改菜单布局。"""
+        for row in self._reminder_acts:
+            pen = row.get('pen')
+            if pen is None:
+                pen = QToolButton(menu)
+                pen.setText('✎')
+                pen.setToolTip('编辑提醒时间')
+                pen.setCursor(Qt.PointingHandCursor)
+                pen.setFont(font(9))
+                pen.setFixedSize(18, 18)
+                pen.setStyleSheet(
+                    'QToolButton { border: none; border-radius: 6px;'
+                    ' background: transparent; color: %s; }'
+                    'QToolButton:hover { background: %s; color: %s; }'
+                    % (SUB, ACCENT_SOFT, ACCENT))
+                pen.clicked.connect(
+                    lambda _=False, r=row: self._edit_reminder(menu, r))
+                row['pen'] = pen
+            g = menu.actionGeometry(row['act'])
+            pen.move(g.right() - 21, g.top() + (g.height() - 18) // 2)
+            pen.show()
+
+    def _edit_reminder(self, menu, row):
+        value, ok = QInputDialog.getInt(
+            self, row['name'], '每隔多少分钟提醒一次？', row['minutes'][0],
+            5, 600, 5)
+        if not ok:
+            return
+        row['minutes'][0] = value
+        row['act'].setText('%s    %d 分钟' % (row['name'], value))
+        menu.adjustSize()
+        self._place_reminder_pens(menu)
+        self._on_reminder(row['kind'], row['act'].isChecked(), value)
+
+    def _on_reminder(self, kind, on, minutes):
+        if self.on_reminder is not None:
+            self.on_reminder(kind, bool(on), int(minutes))
+        if kind == 'water':
+            self.water_on, self.water_min = bool(on), int(minutes)
+        else:
+            self.sit_on, self.sit_min = bool(on), int(minutes)
 
     def _on_remote(self, on=False):
         """头像菜单里勾 / 取消「同步远程互动」。
@@ -1412,6 +1504,117 @@ class ChatWindow(CardWindow):
             return
         self.on_action(key, self._action_target())
 
+    def _on_toy(self):
+        """逗一逗：纯本机效果。群聊先选一个人，单聊直接逗当前会话的人。"""
+        if self.on_toy is None:
+            return
+        if self.key != CONV_ALL:
+            if not self.is_online(self.key):
+                self.set_note('「%s」不在线，逗不了'
+                              % ROLE_NAME.get(self.key, self.key))
+                return
+            self.on_toy(self.key)
+            return
+        roles = [r for r in ROLES if r != self.me and self.is_online(r)]
+        if not roles:
+            self.set_note('现在没有别人在线，逗不了')
+            return
+        m = QMenu(self)
+        for r in roles:
+            m.addAction('逗 %s' % ROLE_NAME.get(r, r)).triggered.connect(
+                lambda _=False, t=r: self.on_toy(t))
+        m.exec(self._toy_chip.mapToGlobal(
+            QPoint(0, self._toy_chip.height() + 4)))
+
+    def _on_game(self, key):
+        self._on_fun(key)
+
+    def _on_fun(self, key):
+        if key == 'dice':
+            if self.on_game is not None:
+                self.on_game('dice', self._action_target())
+        elif key == 'fx' and self.on_fx is not None:
+            self.on_fx(self._action_target())
+
+    # ---------------- 引用 / @ ----------------
+
+    def set_quote(self, entry):
+        """引用一条消息：只在输入框上方放一条摘要，发出去时随 event 带上。"""
+        who = entry.get('who') or ''
+        # 老记录里「我」写成 'me'，服务端只认角色 ID，这里先归一化
+        if who in ('', 'me'):
+            who = self.me or ''
+        text = (entry.get('text') or '').strip()
+        if not text:
+            return
+        mt = entry.get('mt') or 'text'
+        self._quote = {'who': who, 'text': text[:120], 'mt': mt}
+        name = '我' if who == self.me else ROLE_NAME.get(who, who)
+        preview = text if len(text) <= 60 else text[:60] + '…'
+        self.quote_lb.setText('引用 %s：%s' % (name, preview))
+        self.quote_host.show()
+        self.focus_input()
+
+    def take_quote(self):
+        q = self._quote
+        self.clear_quote()
+        return q
+
+    def clear_quote(self):
+        self._quote = None
+        self.quote_lb.setText('')
+        self.quote_host.hide()
+
+    def _mini_btn(self, text, parent, width=None):
+        b = QPushButton(text, parent)
+        b.setCursor(Qt.PointingHandCursor)
+        f = font(7)
+        f.setPixelSize(10)          # 和 web 的 .tool-btn 10px 对齐
+        b.setFont(f)
+        w = max(width or 0,
+                QFontMetrics(f).horizontalAdvance(text) + 16, 26)
+        b.setFixedSize(w, 24)
+        b.setStyleSheet(
+            'QPushButton { background: #ffffff; color: %s;'
+            ' border: 1px solid %s; border-radius: 8px; padding: 0; }'
+            'QPushButton:hover { background: %s; border-color: %s;'
+            ' color: %s; }' % (SUB, CARD_LINE, ACCENT_SOFT, ACCENT_EDGE,
+                               ACCENT))
+        return b
+
+    def _mention_menu(self, anchor):
+        """@ 谁：列出别的身份，在线的才能点。"""
+        m = QMenu(self)
+        for r in ROLES:
+            if r == self.me:
+                continue
+            name = ROLE_NAME.get(r, r)
+            act = m.addAction('@%s' % name)
+            act.setEnabled(bool(self.is_online(r)))
+            act.triggered.connect(
+                lambda _=False, n=name: self._insert_mention(n))
+        m.addSeparator()
+        m.addAction('@所有人').triggered.connect(
+            lambda: self._insert_mention('所有人'))
+        m.exec(anchor.mapToGlobal(QPoint(-4, anchor.height() + 4)))
+
+    def _on_at_typed(self):
+        """手输 @ 时弹一次选人菜单（按钮和键盘走同一个入口）。"""
+        self._mention_menu(self.mention_btn)
+
+    def _insert_mention(self, name):
+        cur = self.field.textCursor()
+        before = self.field.toPlainText()[:cur.position()]
+        if before.endswith(('@', '＠')):
+            # 手输的 @ 已经在输入框里了，只补名字
+            cur.insertText('%s ' % name)
+        elif before and before[-1] not in (' ', '\n'):
+            cur.insertText(' @%s ' % name)
+        else:
+            cur.insertText('@%s ' % name)
+        self.field.setTextCursor(cur)
+        self.focus_input()
+
     def _reflow_actions(self):
         """按宽度把药丸铺进一两行。
 
@@ -1430,12 +1633,20 @@ class ChatWindow(CardWindow):
                 if w is not None:
                     w.hide()
 
-        keys = list(actions.CHAT_ORDER)
+        keys = list(actions.CHAT_ORDER) + ['__toy__', '__fx__']
+
+        def chip_of(key):
+            if key == '__toy__':
+                return self._toy_chip
+            if key == '__fx__':
+                return self._fx_chip
+            return self._chips[key]
+
         i, used_rows = 0, 0
         for row in self._act_rows:
             used = 0
             while i < len(keys):
-                chip = self._chips[keys[i]]
+                chip = chip_of(keys[i])
                 w = chip.width()
                 need = w if used == 0 else used + CHIP_GAP + w
                 if need > avail and used > 0:
@@ -1452,8 +1663,8 @@ class ChatWindow(CardWindow):
         if i < len(keys):
             last = self._act_rows[used_rows - 1]
             while i < len(keys):
-                last.insertWidget(last.count() - 1, self._chips[keys[i]])
-                self._chips[keys[i]].show()
+                last.insertWidget(last.count() - 1, chip_of(keys[i]))
+                chip_of(keys[i]).show()
                 i += 1
 
         self.act_bar.setFixedHeight(
@@ -1501,7 +1712,7 @@ class ChatWindow(CardWindow):
         if e is None:
             return '还没有消息'
         text = e.get('text') or ''
-        if e.get('kind') == 'tip':
+        if e.get('kind') in ('tip', 'game', 'fx'):
             return text
         # 'me' 是旧记录里的写法；新记录直接写角色 ID
         if e.get('who') in (self.me, 'me') or key != CONV_ALL:
@@ -1523,6 +1734,7 @@ class ChatWindow(CardWindow):
     def _on_search(self, text):
         self.query = text
         self.refresh_list()
+        self.render()
 
     @staticmethod
     def _stamp(ts):
@@ -1562,6 +1774,7 @@ class ChatWindow(CardWindow):
             key = CONV_ALL
         self.key = key
         self.unread[key] = 0
+        self.clear_quote()
         self.title.setText(self.name_of(key))
         pix = conv_pix(key, 30)
         self.head_av.setPixmap(pix) if pix is not None else self.head_av.clear()
@@ -1612,6 +1825,12 @@ class ChatWindow(CardWindow):
         self._clear_msgs()
         last_ts = None
         entries = self.entries()
+        q = (self.query or '').strip().lower()
+        if q:
+            entries = [e for e in entries
+                       if q in (e.get('text') or '').lower()]
+            self.msg_box.insertWidget(self.msg_box.count() - 1,
+                                      self._search_row(q, len(entries)))
         for e in entries:
             ts = e.get('ts')
             if last_ts is not None and ts and ts - last_ts > GAP_TIME:
@@ -1659,12 +1878,36 @@ class ChatWindow(CardWindow):
         lb.setStyleSheet('color: %s;' % TIME_FG)
         return lb
 
+    def _search_row(self, q, n):
+        lb = QLabel('搜索「%s」 · 当前会话 %d 条匹配' % (q, n))
+        lb.setAlignment(Qt.AlignCenter)
+        lb.setWordWrap(True)
+        lb.setFont(font(8))
+        lb.setStyleSheet('color: %s; background: #f4f5fa; padding: 4px 8px;'
+                         ' border-radius: 6px;' % SUB)
+        return lb
+
     def _entry_row(self, e):
-        if e.get('kind') == 'tip':
+        if e.get('kind') in ('tip', 'game', 'fx'):
+            game = e.get('kind') in ('game', 'fx')
             lb = QLabel(e.get('text') or '')
             lb.setAlignment(Qt.AlignCenter)
             lb.setWordWrap(True)
             lb.setFont(font(8))
+            if game:
+                lb.setStyleSheet('color: %s; background: #f1f2ff;'
+                                 ' padding: 3px 10px; border-radius: 10px;'
+                                 % ACCENT)
+                # 和 web 一样只是一颗贴着字的胶囊，不铺满整行
+                lb.setWordWrap(False)
+                lb.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+                row = QWidget()
+                h = QHBoxLayout(row)
+                h.setContentsMargins(0, 2, 0, 2)
+                h.addStretch(1)
+                h.addWidget(lb)
+                h.addStretch(1)
+                return row
             lb.setStyleSheet('color: %s;' % TIME_FG)
             return lb
 
@@ -1687,6 +1930,8 @@ class ChatWindow(CardWindow):
             h.addStretch(1)
 
         content = self._content(e, mine)
+        if content is not None and isinstance(e.get('re'), dict):
+            content = self._with_quote(e['re'], content)
         if content is not None:
             if self.key == CONV_ALL:
                 # 群聊里每个人的名字跟在气泡上方：只看一句「好」不知道是谁说的。
@@ -1712,6 +1957,39 @@ class ChatWindow(CardWindow):
             h.addStretch(1)
         return row
 
+    def _with_quote(self, re_, content):
+        """气泡上方那块「引用 xxx：…」。只显示摘要，不跳转 —— 历史只在本机。"""
+        who = re_.get('who') or ''
+        name = '我' if who == self.me else ROLE_NAME.get(who, who)
+        text = (re_.get('text') or '').strip()
+        if len(text) > 60:
+            text = text[:60] + '…'
+        lb = QLabel('%s：%s' % (name, text))
+        lb.setFont(font(8))
+        lb.setWordWrap(True)
+        lb.setMaximumWidth(self._bubble_room())
+        lb.setStyleSheet(
+            'color: %s; background: #f4f5f9; border: none;'
+            ' border-left: 3px solid #c9cbe0; padding: 4px 8px;'
+            ' border-radius: 6px;' % SUB)
+        box = QWidget()
+        v = QVBoxLayout(box)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(4)
+        v.addWidget(lb)
+        v.addWidget(content)
+        return box
+
+    def _quote_menu(self, widget, entry):
+        widget.setContextMenuPolicy(Qt.CustomContextMenu)
+        widget.customContextMenuRequested.connect(
+            lambda pos, w=widget, ent=entry: self._pop_quote(w, pos, ent))
+
+    def _pop_quote(self, widget, pos, entry):
+        m = QMenu(widget)
+        m.addAction('引用').triggered.connect(lambda: self.set_quote(entry))
+        m.exec(widget.mapToGlobal(pos))
+
     def _content(self, e, mine):
         mt = e.get('mt') or 'text'
         if mt in ('img', 'sticker'):
@@ -1726,7 +2004,9 @@ class ChatWindow(CardWindow):
             if mt == 'img':
                 lb.setStyleSheet('background: #ffffff; padding: 4px;'
                                  ' border: 1px solid #eef0f5; border-radius: 12px;')
-            lb.mousePressEvent = lambda _e, ent=e: self._show_big(ent)
+            lb.mousePressEvent = lambda ev, ent=e: (
+                self._show_big(ent) if ev.button() == Qt.LeftButton else None)
+            self._quote_menu(lb, e)
             return lb
 
         if mt == 'file':
@@ -1744,10 +2024,12 @@ class ChatWindow(CardWindow):
                 'QLabel { background: %s; padding: 6px 12px; border-radius: 16px;'
                 ' font-family: "%s"; font-size: 40pt; }'
                 % (BUBBLE_ME if mine else BUBBLE_OTH, EMOJI_FAMILY))
+            self._quote_menu(lb, e)
             return lb
 
         text = e.get('text') or ''
-        return BubbleText(text, mine, max_w=self._bubble_room())
+        return BubbleText(text, mine, max_w=self._bubble_room(),
+                          on_quote=lambda ent=e: self.set_quote(ent))
 
     def _bubble_room(self):
         """气泡最宽能到多少：聊天区宽度去掉头像、间距和两侧留白。
@@ -1789,7 +2071,9 @@ class ChatWindow(CardWindow):
         v.addWidget(size)
         path = e.get('path') or ''
         w.setCursor(Qt.PointingHandCursor)
-        w.mousePressEvent = lambda _e: self._open_file(path)
+        w.mousePressEvent = lambda ev: (self._open_file(path)
+                                        if ev.button() == Qt.LeftButton else None)
+        self._quote_menu(w, e)
         return w
 
     def _open_file(self, path):

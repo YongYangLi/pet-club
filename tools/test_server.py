@@ -285,6 +285,20 @@ def main():
     e.send(t='event', kind='say', to='p1', text='', mt='emoji')
     check('空表情被拒', (e.wait('error') or {}).get('msg') is not None)
 
+    # ---- 引用 / 小游戏：附加字段原样转发 ----
+    e.send(t='event', kind='say', to='p1', text='说得对',
+           re={'who': 'p2', 'text': '引用我', 'mt': 'text'})
+    ev = a.wait('event')
+    check('引用摘要能转发',
+          ev and (ev.get('re') or {}).get('who') == 'p2'
+          and (ev.get('re') or {}).get('text') == '引用我', repr(ev))
+
+    e.send(t='event', kind='game', text='dice:4')
+    ev = a.wait('event')
+    check('小游戏结果能转发',
+          ev and ev.get('kind') == 'game' and ev.get('text') == 'dice:4',
+          repr(ev))
+
     # ---- 9. 僵尸占用：心跳超时后自动释放 ----
     old_to = S.HEARTBEAT_TIMEOUT
     S.HEARTBEAT_TIMEOUT = 0.6

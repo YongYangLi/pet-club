@@ -56,6 +56,13 @@ def work_area():
             int(r.right() * dpr), int(r.bottom() * dpr))
 
 
+def cursor_pos():
+    """鼠标位置，屏幕物理像素；拿不到返回 None（调用方自己退化）。"""
+    if IS_WIN:
+        return win32.cursor_pos()
+    return None
+
+
 # ---------------- 前台 / 遮挡 ----------------
 
 def foreground():

@@ -7,20 +7,22 @@ Qt 的槽都在主线程执行，跨线程只走 `queue.Queue`，不碰控件。
 import base64
 import os
 import queue
+import random
 import sys
 import time
 
 from PIL import Image
 from PySide6.QtCore import QPoint, QTimer
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
 
 from . import config, media, store, update, windows
 from .actions import (ORDER, get, media_line, reply_line, say_line,
                       tip_text)
 from .actors import Pet, gather_targets
+from .effects import Fireworks
 from .config import ROLES, ROLE_NAME, assets_dir, files_dir
-from .host import foreground, owner_at, tray_icons, work_area
+from .host import cursor_pos, foreground, owner_at, tray_icons, work_area
 from .net import Net
 from .chat import CONV_ALL, ChatWindow
 from .claim import ClaimDialog
@@ -35,6 +37,9 @@ GATHER_GAP = 0.10       # 集合后两个人**身体之间**的空隙 = 最宽�
 
 CHAT_HISTORY = 200
 TRAY_BLINK_SEC = 0.7
+TOY_SEC = 8.0           # 逗猫棒持续多久：够逗两圈，又不至于一直追着光标跑
+WATER_MIN = 45          # 喝水提醒默认间隔（分钟）
+SIT_MIN = 60            # 久坐提醒默认间隔（分钟）
 
 OFFLINE_NOTE = '连不上服务器，正在重试…'
 
@@ -102,6 +107,26 @@ class App:
 
         self._drag = None
         self.offline = False
+
+        # 分部位点击的连击计数：{role: [(zone, ts), ...]}，只存最近四秒。
+        self._taps = {}
+        # 逗猫棒：被逗的那只 + 结束时间 + 下一次蹦跶的时间。
+        self._toy_role = None
+        self._toy_until = 0.0
+        self._toy_hop = 0.0
+        self._fx = None
+        self._fx_trash = []
+        # 喝水提醒：只保留这一种，间隔可改
+        self._reminder_at = 0.0
+        self._reminder_min = WATER_MIN
+        self._water_on = False
+        self._reminder_act = None
+        # 久坐提醒：和喝水提醒同一套开关，默认关
+        self._sit_on = False
+        self._sit_min = SIT_MIN
+        self._sit_next = 0.0
+        self._sit_due = False
+        self._sit_due_until = 0.0
 
         # Qt 对象的所有权只能有一套：这里全部交给 Python 引用计数。
         # 千万不要 deleteLater() 之后又把引用丢掉 —— shiboken 会立刻 delete
@@ -186,6 +211,9 @@ class App:
 
         for pet in list(self.pets.values()):
             pet.update(dt)
+        self._tick_toy(now)
+        self._tick_reminder(now)
+        self._tick_sit(now)
 
         # 爬行时气泡得跟着人走，否则那句「来了」留在原地，人已经爬远了
         for role in self._bubble_until:
@@ -212,6 +240,119 @@ class App:
                     if b is not None:
                         b.hide()
                     self._bubble_until.pop(role, None)
+
+    def _tick_toy(self, now):
+        """逗猫棒：被逗的那只朝鼠标爬，够近了就蹦一下。"""
+        role = self._toy_role
+        if not role:
+            return
+        pet = self.pets.get(role)
+        if now >= self._toy_until or pet is None:
+            if pet is not None:
+                pet.stop_chase()
+            self._toy_role = None
+            return
+        if pet.held or pet.airborne or not pet.landed:
+            return
+
+        # 角色坐标是屏幕物理像素。Windows 上直接问系统要光标（物理像素），
+        # 高 DPI 下才不会比到「指针左上」去；其他平台用 Qt 逻辑像素 × dpr。
+        pos = cursor_pos()
+        if pos is not None:
+            cx, cy = float(pos[0]), float(pos[1])
+        else:
+            cur = QCursor.pos()
+            scr = QGuiApplication.screenAt(QPoint(cur.x(), cur.y()))
+            dpr = float(scr.devicePixelRatio()) if scr is not None else pet.win.dpr
+            cx, cy = cur.x() * dpr, cur.y() * dpr
+        half = pet.win.win_w / 2.0
+        target_x = min(max(cx, half), max(half, self.sw - half))
+        target_y = min(max(cy, pet.win.win_h),
+                       max(pet.win.win_h, self.sh - GROUND_MARGIN))
+        if abs(cx - pet.x) > 48 or abs(target_y - pet.y) > 48:
+            pet.chase(target_x, target_y)
+        else:
+            pet.stop_chase()
+            if now >= self._toy_hop:
+                self._toy_hop = now + 1.2
+                pet.act('jump', 0.6)
+
+    def start_toy(self, role):
+        """「逗一逗」：这只角色跟着鼠标跑 8 秒，纯本机效果。"""
+        if role not in self.pets:
+            return
+        self._toy_role = role
+        self._toy_until = time.monotonic() + TOY_SEC
+        self._toy_hop = 0.0
+
+    # ---------------- 提醒 ----------------
+
+    def set_reminder(self, kind, on, minutes=None):
+        """喝水 / 久坐提醒：开、关、改间隔，都在这里落一次状态。"""
+        if kind not in ('water', 'sit'):
+            return
+        if minutes is not None:
+            minutes = max(5, min(600, int(minutes)))
+        if kind == 'water':
+            if minutes is not None:
+                self._reminder_min = minutes
+            self._water_on = bool(on)
+            self._reminder_at = (time.monotonic() + self._reminder_min * 60
+                                 if self._water_on else 0.0)
+            self._reminder_act = None
+        else:
+            if minutes is not None:
+                self._sit_min = minutes
+            self._sit_on = bool(on)
+            self._sit_next = (time.monotonic() + self._sit_min * 60
+                              if self._sit_on else 0.0)
+            self._sit_due = False
+            self._sit_due_until = 0.0
+        if self.chat is not None:
+            self.chat.water_on = self._water_on
+            self.chat.water_min = self._reminder_min
+            self.chat.sit_on = self._sit_on
+            self.chat.sit_min = self._sit_min
+
+    def _tick_reminder(self, now):
+        if self._reminder_at and now >= self._reminder_at:
+            self._reminder_at = time.monotonic() + self._reminder_min * 60
+            me = self.me['role'] if self.me else None
+            pet = self.pets.get(me) if me else None
+            if pet is not None:
+                pet.start_crawl(self.sw / 2.0, pet.y)
+                self._reminder_act = (me, 'drink', '该喝水啦，润润嗓子')
+
+        act = self._reminder_act
+        if not act:
+            return
+        role, pose, text = act
+        pet = self.pets.get(role)
+        if pet is None:
+            self._reminder_act = None
+            return
+        if (not pet.held and not pet.airborne
+                and not pet.crawling and pet.landed):
+            self._reminder_act = None
+            pet.act(pose, 2.8)
+            self.say_role(role, text)
+
+    def _tick_sit(self, now):
+        if self._sit_due and now > self._sit_due_until:
+            self._sit_due = False
+        if not self._sit_on:
+            return
+        if self._sit_next <= 0:
+            self._sit_next = now + self._sit_min * 60
+            return
+        if now < self._sit_next:
+            return
+        self._sit_next = now + self._sit_min * 60
+        me = self.me['role'] if self.me else None
+        if me in self.pets:
+            self._sit_due = True
+            self._sit_due_until = now + 120.0
+            self.say_role(me, '坐挺久了，起来动动？', sec=10.0)
 
     def _keep_top(self, now):
         fg = foreground()
@@ -353,11 +494,18 @@ class App:
                                  body * GATHER_GAP,
                                  half, max(half, self.sw - half))
         for r, x in zip(roles, targets):
-            self.pets[r].start_crawl(x)
+            self.pets[r].start_crawl(x, host.y)
         return roles
 
     def on_event(self, m):
         kind = m.get('kind')
+        if kind == 'game':
+            # 小游戏的结果是一条独立的消息，不参与动作表 / TIP / 镜像。
+            self.on_game_event(m)
+            return
+        if kind == 'fx':
+            self.on_fx_event(m)
+            return
         spec = get(kind)
         actor = m.get('from')
         if spec is None or actor not in self.pets:
@@ -547,7 +695,9 @@ class App:
             pet.release()
             return
         if self.me and d['role'] == self.me['role']:
-            self.on_pet_click()
+            # 点哪儿反应不一样：头顶摸头、肚子吓一跳、脚边轻拍。
+            zone = pos.y() / max(1.0, float(win.win_h))
+            self.on_pet_click(zone)
 
     def _clamp(self, pet, x, y):
         half = pet.win.win_w / 2.0
@@ -555,23 +705,50 @@ class App:
         y = min(max(y, pet.win.win_h), self.sh - GROUND_MARGIN)
         return x, y
 
-    def on_pet_click(self):
-        """点自己那只：睡着就戳醒，否则摸一下头。
+    def on_pet_click(self, zone=0.35):
+        """点自己那只：睡着就戳醒，否则按部位给不同反应。
 
         这一下是本机的悄悄话，不发 event —— 菜单里的「摸摸头」才是会传给
         别人的指令。不然手滑点一下自己，六个人的屏幕都得跟着跳。
+
+        同一个部位连着点三下会触发一句「被戳烦了」的回应（复用 `.me` 台词），
+        给「一直点」这件事一个小小的反馈。
         """
         role = self.me['role'] if self.me else None
         pet = self.pets.get(role) if role else None
         if pet is None or pet.held:
             return
+        if self._sit_due:
+            self._sit_due = False
+            pet.act('jump', 1.0)
+            self.say_role(role, '起来动动')
+            return
         if pet.pose == 'sleep':
             pet.act('jump', 1.0)
             self.say_role(role, say_line('wake', role))
             return
-        spec = get('pet')
-        pet.act(spec['pose'], spec['dur'])
-        self.say_role(role, say_line('pet', role))
+
+        if zone < 0.38:
+            part, key = 'head', 'pet'
+        elif zone < 0.72:
+            part, key = 'belly', 'jump'
+        else:
+            part, key = 'feet', 'pat'
+
+        now = time.monotonic()
+        hist = [(z, t) for z, t in self._taps.get(role, []) if now - t < 4.0]
+        hist.append((part, now))
+        self._taps[role] = hist[-3:]
+        if len(hist) >= 3 and all(z == part for z, _t in hist[-3:]):
+            self._taps[role] = []
+            pet.act('jump', 1.3)
+            self.say_role(role, reply_line(key, role) or say_line('wake', role))
+            return
+
+        pose, dur = {'head': ('wave', 1.2), 'belly': ('jump', 1.0),
+                     'feet': ('knock', 1.2)}[part]
+        pet.act(pose, dur)
+        self.say_role(role, say_line(key, role))
 
     def on_pet_menu(self, win, pos):
         role = self._role_of(win)
@@ -613,11 +790,19 @@ class App:
     # ---- 菜单构建 ----
 
     def _fill_actions(self, menu, to):
-        for key in ORDER:
+        # 「传个话…」放最上面：从桌面上右键的主要目的就是开聊
+        for key in ['say'] + [k for k in ORDER if k != 'say']:
             spec = get(key)
             act = menu.addAction(spec['label'])
             act.setToolTip(spec.get('hint', ''))
             act.triggered.connect(lambda _=False, k=key, t=to: self.do_action(k, t))
+
+    def _toy_actions(self, menu, role, to):
+        """逗一逗 / 烟花：两条普通菜单项，跟在动作后面，不另起分组。"""
+        toy = menu.addAction('逗一逗')
+        toy.triggered.connect(lambda _=False, r=role: self.start_toy(r))
+        fx = menu.addAction('烟花')
+        fx.triggered.connect(lambda _=False, t=to: self.play_fireworks(t))
 
     def build_self_menu(self):
         me_role = self.me['role'] if self.me else None
@@ -626,6 +811,7 @@ class App:
         a.setEnabled(False)
         m.addSeparator()
         self._fill_actions(m, None)
+        self._toy_actions(m, me_role, None)
         if self.offline:
             m.addSeparator()
             act = m.addAction('连不上服务器 · 正在重试')
@@ -641,6 +827,7 @@ class App:
         a.setEnabled(False)
         m.addSeparator()
         self._fill_actions(m, role)
+        self._toy_actions(m, role, role)
         return m
 
     # ---- 执行 ----
@@ -688,6 +875,99 @@ class App:
         self._log_tip(key, '你', self._conv_key(to),
                       target=ROLE_NAME.get(to, to) if to else None)
 
+    # ---------------- 小游戏 ----------------
+
+    def _send_game(self, to, text):
+        msg = {'t': 'event', 'kind': 'game', 'text': text}
+        if to:
+            msg['to'] = to
+        self.net.send(**msg)
+
+    def play_game(self, key, to=None):
+        """掷骰子：结果在发起端算一次、随 event 发出去，所有人看到同一个数。"""
+        me = self.me['role'] if self.me else None
+        if me is None or key != 'dice':
+            return
+        if to and not self.players.get(to):
+            if self.chat is not None:
+                self.chat.set_note('「%s」不在线' % ROLE_NAME.get(to, to))
+            return
+        conv = self._conv_key(to)
+        pet = self.pets.get(me)
+        n = random.randint(1, 6)
+        self._send_game(to, 'dice:%d' % n)
+        if pet is not None:
+            pet.act('jump', 1.0)
+        self.say_role(me, str(n))
+        self._log_game(me, '你 掷出了 %d' % n, conv)
+
+    def on_game_event(self, m):
+        actor = m.get('from')
+        parts = (m.get('text') or '').split(':')
+        if actor not in ROLES:
+            return
+        target = m.get('to') if isinstance(m.get('to'), str) else None
+        key = CONV_ALL if not target else actor
+        pet = self.pets.get(actor)
+
+        if parts[0] == 'dice' and len(parts) == 2:
+            n = parts[1]
+            if self.remote_on:
+                if pet is not None:
+                    self._play(pet, 'jump', 1.0)
+                self.say_role(actor, n)
+            self._log_game(actor, '%s 掷出了 %s'
+                           % (ROLE_NAME.get(actor, actor), n), key)
+
+    def _log_game(self, who, text, key):
+        if text:
+            self._store(key, {'kind': 'game', 'who': who, 'text': text,
+                              'ts': time.time()})
+
+    # ---------------- 烟花 ----------------
+
+    def _show_fireworks(self):
+        if self._fx is not None:
+            self._fx.stop()
+            self._fx_trash.append(self._fx)
+            if len(self._fx_trash) > 3:
+                self._fx_trash.pop(0)
+            self._fx = None
+        fx = Fireworks()
+        fx.show()
+        fx.raise_()
+        self._fx = fx
+
+    def play_fireworks(self, to=None):
+        """放一场烟花：纯视觉事件，所有人屏幕上各放各的。"""
+        me = self.me['role'] if self.me else None
+        if me is None:
+            return
+        if to and not self.players.get(to):
+            if self.chat is not None:
+                self.chat.set_note('「%s」不在线' % ROLE_NAME.get(to, to))
+            return
+        msg = {'t': 'event', 'kind': 'fx', 'text': 'fireworks'}
+        if to:
+            msg['to'] = to
+        self.net.send(**msg)
+        self._show_fireworks()
+        self._log_fx(me, '你 放了烟花', self._conv_key(to))
+
+    def on_fx_event(self, m):
+        actor = m.get('from')
+        if actor not in ROLES:
+            return
+        target = m.get('to') if isinstance(m.get('to'), str) else None
+        key = CONV_ALL if not target else actor
+        if self.remote_on:
+            self._show_fireworks()
+        self._log_fx(actor, '%s 放了烟花' % ROLE_NAME.get(actor, actor), key)
+
+    def _log_fx(self, who, text, key):
+        self._store(key, {'kind': 'fx', 'who': who, 'text': text,
+                          'ts': time.time()})
+
     # ---------------- 聊天 ----------------
 
     def client_of(self, role):
@@ -710,6 +990,14 @@ class App:
                                    client_of=self.client_of,
                                    log=self.chat_log,
                                    on_media=self.send_media,
+                                   on_game=self.play_game,
+                                   on_toy=self.start_toy,
+                                   on_fx=self.play_fireworks,
+                                   on_reminder=self.set_reminder,
+                                   water_on=self._water_on,
+                                   water_min=self._reminder_min,
+                                   sit_on=self._sit_on,
+                                   sit_min=self._sit_min,
                                    unread=self.unread,
                                    on_action=self.do_action,
                                    on_leave=self.do_leave,
@@ -752,8 +1040,9 @@ class App:
             return why
         key = self.chat.key
         to = None if key == CONV_ALL else key
-        self._emit_say(to, text=text)
-        self._log_msg(self.me['role'], text, key)
+        re_ = self.chat.take_quote()
+        self._emit_say(to, text=text, re_=re_)
+        self._log_msg(self.me['role'], text, key, re_=re_)
         return ''
 
     def send_media(self, mt, payload):
@@ -762,12 +1051,15 @@ class App:
             return why
         key = self.chat.key
         to = None if key == CONV_ALL else key
+        # 一条消息只带一个引用：多个附件时挂在第一件上
+        re_ = self.chat.take_quote()
 
         if mt == 'emoji':
             if not isinstance(payload, str) or not payload:
                 return '这个表情发不出去'
-            self._emit_say(to, mt='emoji', text=payload)
-            self._log_media(self.me['role'], 'emoji', key, char=payload)
+            self._emit_say(to, mt='emoji', text=payload, re_=re_)
+            self._log_media(self.me['role'], 'emoji', key, char=payload,
+                            re_=re_)
             self._say_media_line(mt)
             return ''
 
@@ -779,21 +1071,22 @@ class App:
                 path = payload
                 name = os.path.basename(path or '')
                 b64, size = media.encode_file(path)
-                self._emit_say(to, mt='file', img=b64, name=name, size=size)
+                self._emit_say(to, mt='file', img=b64, name=name, size=size,
+                               re_=re_)
             elif isinstance(payload, Image.Image):
                 b64, _w, _h = media.encode_pil(payload, side=media.MAX_SIDE)
-                self._emit_say(to, mt=mt, img=b64)
+                self._emit_say(to, mt=mt, img=b64, re_=re_)
             else:
                 path = payload
                 name = os.path.basename(path or '')
                 b64, _w, _h = media.encode_image(
                     path, side=media.MAX_SIDE, png=(mt == 'sticker'))
-                self._emit_say(to, mt=mt, img=b64)
+                self._emit_say(to, mt=mt, img=b64, re_=re_)
         except ValueError as e:
             return str(e)
 
         self._log_media(self.me['role'], mt, key, img=b64, name=name,
-                        size=size, path=path)
+                        size=size, path=path, re_=re_)
         self._say_media_line(mt)
         return ''
 
@@ -816,10 +1109,13 @@ class App:
             return False, '「%s」不在线，这句发不出去' % ROLE_NAME.get(to, to)
         return True, ''
 
-    def _emit_say(self, to, mt='text', text='', img='', name='', size=0):
+    def _emit_say(self, to, mt='text', text='', img='', name='', size=0,
+                  re_=None):
         msg = {'t': 'event', 'kind': 'say', 'text': text, 'mt': mt}
         if to:
             msg['to'] = to
+        if isinstance(re_, dict) and re_.get('text'):
+            msg['re'] = re_
         if mt in ('img', 'sticker', 'file'):
             msg['img'] = img
             if mt == 'file':
@@ -842,7 +1138,8 @@ class App:
         if len(log) > CHAT_HISTORY:
             del log[:-CHAT_HISTORY]
         me = self.me['role'] if self.me else None
-        if (entry.get('kind') == 'msg' and entry.get('who') != me
+        if (entry.get('kind') in ('msg', 'game', 'fx')
+                and entry.get('who') != me
                 and entry.get('who') != 'me'
                 and not self._watching(key)):
             self.unread[key] = self.unread.get(key, 0) + 1
@@ -868,11 +1165,13 @@ class App:
                 best, best_ts = key, ts
         return best
 
-    def _log_msg(self, who, text, key=CONV_ALL):
+    def _log_msg(self, who, text, key=CONV_ALL, re_=None):
         if not text:
             return
-        self._store(key, {'kind': 'msg', 'who': who, 'text': text,
-                          'ts': time.time()})
+        entry = {'kind': 'msg', 'who': who, 'text': text, 'ts': time.time()}
+        if isinstance(re_, dict) and re_.get('text'):
+            entry['re'] = re_
+        self._store(key, entry)
 
     def _log_tip(self, kind, actor, key, target=None):
         """互动痕迹：**TIP 里有这条指令才记**。
@@ -887,7 +1186,7 @@ class App:
                           'ts': time.time()})
 
     def _log_media(self, who, mt, key, img='', name='', size=0, path='',
-                   char=''):
+                   char='', re_=None):
         if mt == 'img':
             text = '[图片]'
         elif mt == 'emoji':
@@ -901,26 +1200,33 @@ class App:
             saved = media.save_chat_image(img, sticker=(mt == 'sticker'))
             if saved:
                 path = saved
-        self._store(key, {'kind': 'msg', 'mt': mt, 'who': who, 'text': text,
-                          'img': img if mt in ('img', 'sticker') else '',
-                          'char': char, 'name': name, 'size': size,
-                          'path': path, 'ts': time.time()})
+        entry = {'kind': 'msg', 'mt': mt, 'who': who, 'text': text,
+                 'img': img if mt in ('img', 'sticker') else '',
+                 'char': char, 'name': name, 'size': size,
+                 'path': path, 'ts': time.time()}
+        if isinstance(re_, dict) and re_.get('text'):
+            entry['re'] = re_
+        self._store(key, entry)
 
     def _accept_say(self, actor, mt, text, img, m, key):
+        re_in = m.get('re')
+        re_ = re_in if isinstance(re_in, dict) else None
         if mt == 'emoji' and text:
-            self._log_media(actor, 'emoji', key, char=text)
+            self._log_media(actor, 'emoji', key, char=text, re_=re_)
         elif mt in ('img', 'sticker') and img:
-            self._log_media(actor, mt, key, img=img)
+            self._log_media(actor, mt, key, img=img, re_=re_)
         elif mt == 'file' and img:
             name = m.get('name') or '文件'
             size = m.get('size') if isinstance(m.get('size'), int) else 0
             path = self._save_incoming(name, img)
             if not path:
-                self._log_msg(actor, '（收到一个文件，但存不下来）', key)
+                self._log_msg(actor, '（收到一个文件，但存不下来）', key,
+                              re_=re_)
                 return
-            self._log_media(actor, 'file', key, name=name, size=size, path=path)
+            self._log_media(actor, 'file', key, name=name, size=size,
+                            path=path, re_=re_)
         else:
-            self._log_msg(actor, text, key)
+            self._log_msg(actor, text, key, re_=re_)
 
     def _save_incoming(self, name, b64):
         safe = ''.join(ch for ch in str(name or '')
@@ -1239,7 +1545,7 @@ class App:
                 '连不上' if on else '已连上',
                 config.format_endpoint(self.host, self.port)))
 
-    def say_role(self, role, text):
+    def say_role(self, role, text, sec=None):
         pet = self.pets.get(role) if role else None
         if not pet or not text:
             return
@@ -1247,7 +1553,7 @@ class App:
         if b is None:
             b = self.bubbles[role] = windows.Bubble(None)
         b.show_at(text, *pet.bubble_anchor())
-        self._bubble_until[role] = time.monotonic() + BUBBLE_SEC
+        self._bubble_until[role] = time.monotonic() + (sec or BUBBLE_SEC)
 
     def toast(self, text):
         QMessageBox.warning(None, 'pet-club', text)

@@ -12,6 +12,7 @@
 """
 import os
 import sys
+import time
 import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -94,6 +95,7 @@ class FakePet:
 
     def __init__(self, x, w=180.0):
         self.x = float(x)
+        self.y = 900.0
         self.win = types.SimpleNamespace(win_w=w, win_h=220.0,
                                          body_w=w * 2 / 3.0)
         self.body_w = self.win.body_w
@@ -107,8 +109,8 @@ class FakePet:
     def take_off(self):
         self.calls.append(('launch',))
 
-    def start_crawl(self, x):
-        self.calls.append(('crawl', x))
+    def start_crawl(self, x, y=None):
+        self.calls.append(('crawl', x, y))
 
     def bubble_anchor(self):
         return self.x, 100.0
@@ -306,6 +308,64 @@ def test_crawl():
     _step(v, 600)
     chk('起飞也顶掉爬行，落地不会又跑去集合',
         v.phase == 'idle' and abs(v.x - at) < 1e-6, (v.phase, v.x))
+
+    print('\n--- 自由摆放 / 二维逗猫棒 ---')
+    d = Pet(None, FakeWin(), 1000.0, 900.0, drop=False)
+    d.grab()
+    d.move_to(700.0, 420.0)
+    d.release()
+    _step(d, 20)
+    chk('松手停在原地，不再自由落体',
+        d.phase == 'idle' and abs(d.x - 700.0) < 1e-6
+        and abs(d.y - 420.0) < 1e-6, (d.phase, d.x, d.y))
+
+    c = Pet(None, FakeWin(), 1000.0, 900.0, drop=False)
+    c.chase(400.0, 500.0)
+    _step(c, 600)
+    chk('逗猫棒横竖都能追到光标',
+        c.phase == 'idle' and abs(c.x - 400.0) < 1e-6
+        and abs(c.y - 500.0) < 1e-6, (c.x, c.y))
+
+    e = Pet(None, FakeWin(), 1000.0, 900.0, drop=False)
+    e.grab()
+    e.move_to(900.0, 500.0)
+    e.release()
+    e.start_crawl(300.0)
+    _step(e, 600)
+    chk('不传高度时保持原来那一层（旧的横向调用）',
+        abs(e.x - 300.0) < 1e-6 and abs(e.y - 500.0) < 1e-6, (e.x, e.y))
+
+    f = Pet(None, FakeWin(), 800.0, 900.0, drop=False)
+    f.grab()
+    f.move_to(800.0, 420.0)
+    f.release()
+    f.take_off()
+    _step(f, 600)
+    chk('起飞后落回起飞前的高度，不掉回地面',
+        f.phase == 'idle' and abs(f.y - 420.0) < 1e-6, (f.phase, f.y))
+
+    g = Pet(None, FakeWin(), 1000.0, 900.0, drop=False)
+    g.start_crawl(400.0, 520.0)
+    _step(g, 600)
+    chk('集合会连高度一起爬（人放在任意位置也能靠拢）',
+        abs(g.x - 400.0) < 1e-6 and abs(g.y - 520.0) < 1e-6, (g.x, g.y))
+
+    # App 这一层也要把光标的 y 传下去，否则「上下跟手」只是 Pet 自己的能力
+    import petclub.app as appmod
+    real_cursor = appmod.cursor_pos
+    appmod.cursor_pos = lambda: (300, 500)
+    try:
+        toy = Pet(None, FakeWin(), 1000.0, 900.0, drop=False)
+        fake = types.SimpleNamespace(
+            pets={'p1': toy}, sw=1920.0, sh=1080.0, _toy_role='p1',
+            _toy_until=time.monotonic() + 5.0, _toy_hop=0.0)
+        appmod.App._tick_toy(fake, time.monotonic())
+        _step(toy, 600)
+        chk('逗猫棒在 App 层横竖都朝鼠标走',
+            abs(toy.x - 300.0) < 1.0 and abs(toy.y - 500.0) < 1.0,
+            (toy.x, toy.y))
+    finally:
+        appmod.cursor_pos = real_cursor
 
 
 def test_routing():

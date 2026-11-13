@@ -12,14 +12,27 @@ const CRAWL_BODY_PER_SEC = 1.5;
 export class PetLayer {
   constructor({ onPetClick, onMenu } = {}) {
     this.onPetClick = onPetClick;
+    this.onClick = onPetClick;
     this.onMenu = onMenu;
     this.root = document.getElementById('pet-layer');
     this.bubbles = new BubbleLayer();
     this.pets = new Map();
     this.spawning = new Set();
     this.last = performance.now();
+    this.pointerX = window.innerWidth / 2;
+    this.pointerY = window.innerHeight / 2;
+    this.toy = null;
     this._loop = this._loop.bind(this);
+    window.addEventListener('pointermove', (e) => {
+      this.pointerX = e.clientX;
+      this.pointerY = e.clientY;
+    }, { passive: true });
     requestAnimationFrame(this._loop);
+  }
+
+  startToy(role) {
+    if (!this.pets.has(role)) return;
+    this.toy = { role, until: performance.now() / 1000 + 8 };
   }
 
   get(role) { return this.pets.get(role) || null; }
@@ -131,7 +144,7 @@ export class PetLayer {
       half,
       Math.max(half, window.innerWidth - half),
     );
-    roles.forEach((r, i) => this.pets.get(r).startCrawl(targets[i]));
+    roles.forEach((r, i) => this.pets.get(r).startCrawl(targets[i], anchor.y));
     return roles;
   }
 
@@ -143,8 +156,37 @@ export class PetLayer {
     const dt = Math.min(0.05, Math.max(0, (now - this.last) / 1000));
     this.last = now;
     for (const pet of this.pets.values()) pet.update(dt);
+    this._toyTick(now / 1000);
     this.bubbles.update();
     requestAnimationFrame(this._loop);
+  }
+
+  _toyTick(now) {
+    const toy = this.toy;
+    if (!toy) return;
+    const pet = this.pets.get(toy.role);
+    if (!pet || now >= toy.until) {
+      if (pet) pet.stopChase();
+      this.toy = null;
+      return;
+    }
+    if (pet.phase === 'hold' || pet.phase === 'fall'
+      || pet.phase === 'rise' || !pet.landed) return;
+    const half = pet.winW / 2;
+    const targetX = Math.min(Math.max(this.pointerX, half),
+      Math.max(half, window.innerWidth - half));
+    const targetY = Math.min(Math.max(this.pointerY, pet.winH),
+      Math.max(pet.winH, this.groundY()));
+    if (Math.abs(this.pointerX - pet.x) > 48
+      || Math.abs(targetY - pet.y) > 48) {
+      pet.chase(targetX, targetY);
+    } else {
+      pet.stopChase();
+      if (!toy.hop || now >= toy.hop) {
+        toy.hop = now + 1.2;
+        pet.act('jump', 0.6);
+      }
+    }
   }
 }
 
@@ -168,6 +210,9 @@ class Pet {
     this.timer = 0;
     this.landed = !drop;
     this.crawlTo = null;
+    this.crawlToY = null;
+    this.landY = null;
+    this.afterCrawl = null;
     this.crawlT = 0;
     this.landingText = '';
     this.drag = null;
@@ -237,7 +282,10 @@ class Pet {
       if (d.moved) {
         this.release();
       } else {
-        this.layer.onClick && this.layer.onClick(this.role);
+        const rect = this.el.getBoundingClientRect();
+        const zone = Math.min(1, Math.max(0,
+          (e.clientY - rect.top) / Math.max(1, rect.height)));
+        this.layer.onClick && this.layer.onClick(this.role, zone);
       }
     };
     this.hit.addEventListener('pointerup', finish);
@@ -303,14 +351,18 @@ class Pet {
 
   release() {
     if (this.phase !== 'hold') return;
-    this.phase = 'fall';
-    this.pose = 'fall';
-    this.setPose('fall');
+    // 松手就停在原地：桌宠可以摆在桌面任意位置，不再掉回底边
+    this.phase = 'idle';
+    this.pose = 'idle';
+    this.setPose('idle');
     this.vy = 0;
+    this.landed = true;
+    this.landY = null;
   }
 
   takeOff() {
     this.stopCrawl();
+    this.landY = this.y;        // 飞一圈还回到起飞前那一层
     if (this.y <= this.top + 1) {
       this.phase = 'fall';
       this.pose = 'fall';
@@ -326,16 +378,26 @@ class Pet {
     this.landed = false;
   }
 
-  startCrawl(targetX) {
+  startCrawl(targetX, targetY = null, onArrive = null) {
     this.crawlTo = targetX;
+    // targetY 为 null 时保持当前高度；集合会传发起人的高度，横竖一起爬
+    this.crawlToY = targetY === null ? null : targetY;
+    this.afterCrawl = onArrive;
     if (this.phase !== 'fall' && this.phase !== 'hold' && this.phase !== 'rise') {
       this.beginCrawl();
     }
   }
 
   beginCrawl() {
-    if (this.crawlTo === null || Math.abs(this.crawlTo - this.x) < 1) {
+    if (this.crawlTo === null) return;
+    if (this.crawlToY === null) this.crawlToY = this.y;
+    if (Math.abs(this.crawlTo - this.x) < 1
+      && Math.abs(this.crawlToY - this.y) < 1) {
       this.crawlTo = null;
+      this.crawlToY = null;
+      const cb = this.afterCrawl;
+      this.afterCrawl = null;
+      if (cb) cb();
       return;
     }
     this.phase = 'crawl';
@@ -347,20 +409,43 @@ class Pet {
 
   stopCrawl() {
     this.crawlTo = null;
+    this.crawlToY = null;
+    this.afterCrawl = null;
     if (this.phase === 'crawl') this.phase = 'idle';
+  }
+
+  chase(targetX, targetY = null) {
+    this.crawlTo = targetX;
+    this.crawlToY = targetY === null ? this.y : targetY;
+    this.afterCrawl = null;
+    if (this.phase === 'fall' || this.phase === 'hold'
+      || this.phase === 'rise') return;
+    if (this.phase !== 'crawl') this.beginCrawl();
+  }
+
+  stopChase() {
+    this.crawlTo = null;
+    this.crawlToY = null;
+    if (this.phase === 'crawl') {
+      this.phase = 'idle';
+      this.pose = 'idle';
+      this.setPose('idle');
+    }
   }
 
   update(dt) {
     if (this.phase === 'fall') {
       this.vy += (state.meta?.gravity ?? 2400) * dt;
       this.y += this.vy * dt;
-      if (this.y >= this.ground) {
-        this.y = this.ground;
+      const landY = this.landY === null ? this.ground : this.landY;
+      if (this.y >= landY) {
+        this.y = landY;
         this.vy = 0;
         this.phase = 'idle';
         this.pose = 'idle';
         this.setPose('idle');
         this.landed = true;
+        this.landY = null;
         if (this.crawlTo !== null) this.beginCrawl();
         if (this.landingText) {
           this.layer.say(this.role, this.landingText);
@@ -380,18 +465,26 @@ class Pet {
       // 位置由拖动直接写入
     } else if (this.phase === 'crawl') {
       const remain = this.crawlTo - this.x;
+      const remainY = (this.crawlToY === null ? this.y : this.crawlToY) - this.y;
       const step = this.winW * CRAWL_BODY_PER_SEC * dt;
       this.x += Math.abs(remain) <= step ? remain : (remain > 0 ? step : -step);
+      this.y += Math.abs(remainY) <= step ? remainY : (remainY > 0 ? step : -step);
       this.crawlT += dt;
       const frame = CRAWL_FRAMES[Math.floor(this.crawlT / CRAWL_FRAME_SEC) % 2];
       this.pose = frame;
       this.setPose(frame);
-      if (Math.abs(this.crawlTo - this.x) <= 0.5) {
+      if (Math.abs(this.crawlTo - this.x) <= 0.5
+        && Math.abs(remainY) <= step) {
         this.x = this.crawlTo;
+        this.y = this.crawlToY === null ? this.y : this.crawlToY;
         this.crawlTo = null;
+        this.crawlToY = null;
         this.phase = 'idle';
         this.pose = 'idle';
         this.setPose('idle');
+        const cb = this.afterCrawl;
+        this.afterCrawl = null;
+        if (cb) cb();
       }
     } else if (this.timer > 0) {
       this.timer -= dt;
@@ -406,11 +499,16 @@ class Pet {
   onResize() {
     this.ground = this.layer.groundY();
     this.top = -this.winH - 40;
+    // 位置原样保留：放在半空的人不会因为窗口变高/变矮就掉回地面
     const p = this.clamp(this.x, this.y);
     this.x = p.x;
-    if (this.phase === 'idle' || this.phase === 'hold') this.y = this.ground;
-    else if (this.y > this.ground) this.y = this.ground;
-    if (this.phase === 'crawl') this.y = this.ground;
+    this.y = p.y;
+    if (this.crawlToY !== null) {
+      this.crawlToY = Math.min(this.crawlToY, this.ground);
+    }
+    if (this.landY !== null) {
+      this.landY = Math.min(this.landY, this.ground);
+    }
     this.render();
   }
 

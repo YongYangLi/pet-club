@@ -12,22 +12,42 @@ import { ChatUI } from './chat.js';
 import { PetLayer } from './pets.js';
 import { initMenu, showMenu, closeMenu } from './menu.js';
 import { initHistory, loadHistory } from './history.js';
+import { playFireworks as showFireworks } from './fx.js';
+import { watchVersion } from './version.js';
 
 class App {
   constructor() {
     this.quitting = false;
     this.joinedAt = 0;
+    // 刷新回来后自动坐回上次身份的尝试只有一次，失败就老老实实回认领页
+    this.autoTried = false;
+    this.taps = new Map();
+    this.reminderTimer = null;
+    this.waterOn = false;
+    this.waterMin = 45;
+    this.sitTimer = null;
+    this.sitOn = false;
+    this.sitMin = 60;
+    this.sitDue = false;
 
     this.claim = new ClaimUI({
       onJoin: (role) => this.join(role),
     });
     this.chat = new ChatUI({
-      onSend: (text) => this.sendChat(text),
+      onSend: (text, re) => this.sendChat(text, re),
       onAction: (key, to) => this.doAction(key, to),
       onLeave: () => this.leave(),
       onQuit: () => this.quit(),
       onRemote: (on) => this.setRemote(on),
-      onMedia: (kind, payload) => this.sendMedia(kind, payload),
+      onMedia: (kind, payload, re) => this.sendMedia(kind, payload, re),
+      onGame: (key, to) => this.playGame(key, to),
+      onFx: (to) => this.playFireworks(to),
+      onToy: (role) => this.startToy(role),
+      onReminder: (kind, on, min) => this.setReminder(kind, on, min),
+      reminderState: () => ({
+        water: { on: this.waterOn, min: this.waterMin },
+        sit: { on: this.sitOn, min: this.sitMin },
+      }),
       onPetSize: (level) => this.setPetSize(level),
     });
     this.pets = new PetLayer({
@@ -87,10 +107,23 @@ class App {
       this.net.reconnectNow();
       if (this.net.connected) this.net.send({ t: 'query' });
     });
+    // 有新版本就提示刷新。页面在后台时 version.js 会自己刷掉，
+    // 走到这里的一定是用户正盯着的页面，不能抢他的输入框。
+    document.getElementById('update-go').addEventListener('click', () => location.reload());
+    watchVersion((info) => this.showUpdate(info));
+
     window.addEventListener('beforeunload', () => {
       this.net.send({ t: 'leave' });
       this.net.stop();
     });
+  }
+
+  showUpdate(info) {
+    const bar = document.getElementById('update-banner');
+    if (!bar) return;
+    const text = document.getElementById('update-text');
+    if (text) text.textContent = `新版本 ${info.version || ''} 已发布`;
+    bar.classList.remove('hidden');
   }
 
   // ---------------- 连接 ----------------
@@ -132,6 +165,24 @@ class App {
     state.players = m.players || {};
     this.chat.updateOnline();
 
+    // 刷新后自动坐回上次的身份。版本更新会让人被动刷新一次，
+    // 不接回来的话每次更新都把人踢回认领页重选 —— 那没人愿意点「刷新」。
+    if (!state.me && !state.pendingRole && !this.autoTried) {
+      this.autoTried = true;
+      const last = state.lastRole;
+      if (last) {
+        if (!m.players[last]) {
+          this.claim.setStatus(`正在回到「${roleName(last)}」…`);
+          this.join(last);
+          return;
+        }
+        savePref('petclub.role', '');
+        state.lastRole = '';
+        this.claim.show('上次的身份已经被别人认领了，重新选一个吧');
+        this.claim.setStatus('已连接 · 选一个身份');
+      }
+    }
+
     if (state.claimVisible) this.claim.render();
 
     if (state.me) {
@@ -153,6 +204,8 @@ class App {
 
     state.me = { role: m.role };
     state.pendingRole = null;
+    state.lastRole = m.role;
+    savePref('petclub.role', m.role);
     this.joinedAt = Date.now();
 
     if (fresh) {
@@ -175,6 +228,9 @@ class App {
 
   onReject(m) {
     state.pendingRole = null;
+    // 这次没坐上去（被占 / 不合法），别再让下次刷新重复撞一次
+    state.lastRole = '';
+    savePref('petclub.role', '');
     if (m.players && typeof m.players === 'object') state.players = m.players;
     if (state.me) {
       state.me = null;
@@ -223,6 +279,8 @@ class App {
   releaseLocal(note) {
     state.me = null;
     state.pendingRole = null;
+    state.lastRole = '';
+    savePref('petclub.role', '');
     this.pets.clear();
     this.chat.resetForClaim();
     this.showClaim(note);
@@ -239,6 +297,8 @@ class App {
   quit() {
     if (this.quitting) return;
     this.quitting = true;
+    state.lastRole = '';
+    savePref('petclub.role', '');
     this.net.send({ t: 'leave' });
     this.net.stop();
     closeMenu();
@@ -271,6 +331,14 @@ class App {
   // ---------------- 动作 ----------------
 
   onEvent(m) {
+    if (m.kind === 'game') {
+      this.onGameEvent(m);
+      return;
+    }
+    if (m.kind === 'fx') {
+      this.onFxEvent(m);
+      return;
+    }
     const spec = getAction(m.kind);
     const actor = m.from;
     const hasPet = this.pets.has(actor);
@@ -299,6 +367,7 @@ class App {
         else this.pets.say(actor, mediaLine(mt, actor));
       }
       const entry = { kind: 'msg', who: actor, mt, ts: nowSec() };
+      if (m.re && typeof m.re === 'object' && m.re.text) entry.re = m.re;
       if (mt === 'text') {
         entry.text = text;
       } else if (mt === 'emoji') {
@@ -348,6 +417,84 @@ class App {
         if (reply) this.pets.say(me, reply);
       }
     }
+  }
+
+  onGameEvent(m) {
+    const actor = m.from;
+    if (!roleName(actor)) return;
+    const parts = (m.text || '').split(':');
+    if (parts[0] !== 'dice' || parts.length !== 2) return;
+    const target = typeof m.to === 'string' ? m.to : null;
+    const key = target ? actor : CONV_ALL;
+    if (state.remoteOn) {
+      this.pets.play(actor, 'jump', 1.0);
+      this.pets.say(actor, parts[1]);
+    }
+    this.chat.store(key, {
+      kind: 'game',
+      who: actor,
+      text: `${roleName(actor)} 掷出了 ${parts[1]}`,
+      ts: nowSec(),
+    });
+  }
+
+  onFxEvent(m) {
+    const actor = m.from;
+    if (!roleName(actor)) return;
+    const target = typeof m.to === 'string' ? m.to : null;
+    const key = target ? actor : CONV_ALL;
+    if (state.remoteOn) showFireworks();
+    this.chat.store(key, {
+      kind: 'fx',
+      who: actor,
+      text: `${roleName(actor)} 放了烟花`,
+      ts: nowSec(),
+    });
+  }
+
+  playGame(key, to) {
+    const me = state.me ? state.me.role : null;
+    if (!me || key !== 'dice') return;
+    const why = this.guardSay();
+    if (why) {
+      this.chat.note(why);
+      return;
+    }
+    if (to && !state.players[to]) {
+      this.chat.note(`「${roleName(to)}」不在线`);
+      return;
+    }
+    const conv = to || CONV_ALL;
+    const n = 1 + Math.floor(Math.random() * 6);
+    const msg = { t: 'event', kind: 'game', text: `dice:${n}` };
+    if (to) msg.to = to;
+    this.net.send(msg);
+    this.pets.play(me, 'jump', 1.0);
+    this.pets.say(me, String(n));
+    this.chat.store(conv, {
+      kind: 'game', who: me, text: `你 掷出了 ${n}`, ts: nowSec(),
+    });
+  }
+
+  playFireworks(to) {
+    const me = state.me ? state.me.role : null;
+    if (!me) return;
+    const why = this.guardSay();
+    if (why) {
+      this.chat.note(why);
+      return;
+    }
+    if (to && !state.players[to]) {
+      this.chat.note(`「${roleName(to)}」不在线`);
+      return;
+    }
+    const msg = { t: 'event', kind: 'fx', text: 'fireworks' };
+    if (to) msg.to = to;
+    this.net.send(msg);
+    showFireworks();
+    this.chat.store(to || CONV_ALL, {
+      kind: 'fx', who: me, text: '你 放了烟花', ts: nowSec(),
+    });
   }
 
   doAction(key, to) {
@@ -402,6 +549,7 @@ class App {
 
   emitSay(to, extra = {}) {
     const msg = { t: 'event', kind: 'say', mt: 'text', ...extra };
+    if (!msg.re) delete msg.re;
     if (to) msg.to = to;
     this.net.send(msg);
   }
@@ -417,22 +565,24 @@ class App {
     if (line && this.pets.get(role)) this.pets.say(role, line);
   }
 
-  sendChat(text) {
+  sendChat(text, re = null) {
     const why = this.guardSay();
     if (why) return why;
     const me = state.me.role;
     const key = state.currentKey;
     const to = key === CONV_ALL ? null : key;
 
-    this.emitSay(to, { mt: 'text', text });
+    this.emitSay(to, { mt: 'text', text, re });
     this.playSay();
     if (this.pets.get(me)) this.pets.say(me, text);
 
-    this.chat.store(key, { kind: 'msg', who: me, mt: 'text', text, ts: nowSec() });
+    const entry = { kind: 'msg', who: me, mt: 'text', text, ts: nowSec() };
+    if (re && re.text) entry.re = re;
+    this.chat.store(key, entry);
     return '';
   }
 
-  async sendMedia(kind, payload) {
+  async sendMedia(kind, payload, re = null) {
     const why = this.guardSay();
     if (why) return why;
     const me = state.me.role;
@@ -442,24 +592,28 @@ class App {
     if (kind === 'emoji') {
       const ch = String(payload || '');
       if (!ch) return '这个表情发不出去';
-      this.emitSay(to, { mt: 'emoji', text: ch });
+      this.emitSay(to, { mt: 'emoji', text: ch, re });
       this.playSay();
       this.sayMedia('emoji', me);
-      this.chat.store(key, {
+      const entry = {
         kind: 'msg', who: me, mt: 'emoji', char: ch, text: ch, ts: nowSec(),
-      });
+      };
+      if (re && re.text) entry.re = re;
+      this.chat.store(key, entry);
       return '';
     }
 
     if (kind === 'sticker') {
       const b64 = await urlToBase64(payload);
       if (!b64) return '这个表情包读取失败';
-      this.emitSay(to, { mt: 'sticker', img: b64 });
+      this.emitSay(to, { mt: 'sticker', img: b64, re });
       this.playSay();
       this.sayMedia('sticker', me);
-      this.chat.store(key, {
+      const entry = {
         kind: 'msg', who: me, mt: 'sticker', img: b64, text: '[表情包]', ts: nowSec(),
-      });
+      };
+      if (re && re.text) entry.re = re;
+      this.chat.store(key, entry);
       return '';
     }
 
@@ -469,22 +623,24 @@ class App {
       if (file.type && file.type.startsWith('image/')) {
         const b64 = await compressImage(file);
         if (!b64) return '这张图片处理失败';
-        this.emitSay(to, { mt: 'img', img: b64 });
+        this.emitSay(to, { mt: 'img', img: b64, re });
         this.playSay();
         this.sayMedia('img', me);
-        this.chat.store(key, {
+        const entry = {
           kind: 'msg', who: me, mt: 'img', img: b64, text: '[图片]', ts: nowSec(),
-        });
+        };
+        if (re && re.text) entry.re = re;
+        this.chat.store(key, entry);
         return '';
       }
       if (file.size > 2 * 1024 * 1024) return '文件太大了（上限 2MB）';
       const b64 = await fileToBase64(file);
       this.emitSay(to, {
-        mt: 'file', img: b64, name: file.name, size: file.size,
+        mt: 'file', img: b64, name: file.name, size: file.size, re,
       });
       this.playSay();
       this.sayMedia('file', me);
-      this.chat.store(key, {
+      const entry = {
         kind: 'msg',
         who: me,
         mt: 'file',
@@ -493,7 +649,9 @@ class App {
         size: file.size,
         text: `[文件] ${file.name}`,
         ts: nowSec(),
-      });
+      };
+      if (re && re.text) entry.re = re;
+      this.chat.store(key, entry);
       return '';
     }
     return '';
@@ -501,11 +659,18 @@ class App {
 
   // ---------------- 角色交互 ----------------
 
-  onPetClick(role) {
+  onPetClick(role, zone = 0.35) {
     const me = state.me ? state.me.role : null;
     if (!me || role !== me) return;
     const pet = this.pets.get(role);
     if (!pet || pet.phase === 'hold') return;
+
+    if (this.sitDue) {
+      this.sitDue = false;
+      pet.act('jump', 1.0);
+      this.pets.say(role, '起来动动');
+      return;
+    }
 
     if (pet.poseName === 'sleep') {
       pet.act('jump', 1.0);
@@ -514,11 +679,99 @@ class App {
       return;
     }
 
-    const spec = getAction('pet');
-    if (!spec) return;
-    pet.act(spec.pose, spec.dur);
-    const line = sayLine('pet', role);
+    // 点哪儿反应不一样：头顶摸头、肚子吓一跳、脚边轻拍
+    let part = 'head';
+    let key = 'pet';
+    if (zone >= 0.72) {
+      part = 'feet';
+      key = 'pat';
+    } else if (zone >= 0.38) {
+      part = 'belly';
+      key = 'jump';
+    }
+
+    // 同一部位连点三下：复用「被戳」的回应，不用再写一套台词
+    const now = performance.now() / 1000;
+    const hist = (this.taps.get(role) || []).filter((t) => now - t.ts < 4);
+    hist.push({ part, ts: now });
+    this.taps.set(role, hist.slice(-3));
+    if (hist.length >= 3 && hist.slice(-3).every((t) => t.part === part)) {
+      this.taps.set(role, []);
+      pet.act('jump', 1.3);
+      const combo = replyLine(key, role);
+      if (combo) this.pets.say(role, combo);
+      return;
+    }
+
+    const pose = { head: 'wave', belly: 'jump', feet: 'knock' }[part];
+    pet.act(pose, part === 'belly' ? 1.0 : 1.2);
+    const line = sayLine(key, role);
     if (line) this.pets.say(role, line);
+  }
+
+  startToy(role) {
+    this.pets.startToy(role);
+    this.chat.setNote('逗一逗：它会跟着鼠标跑 8 秒');
+  }
+
+  setReminder(kind, on, minutes = null) {
+    if (kind !== 'water' && kind !== 'sit') return;
+    const clamped = minutes === null ? null
+      : Math.max(5, Math.min(600, Number(minutes) || 45));
+    if (kind === 'water') {
+      if (clamped !== null) this.waterMin = clamped;
+      this.waterOn = !!on;
+      clearTimeout(this.reminderTimer);
+      this.reminderTimer = null;
+      if (this.waterOn) {
+        this.reminderTimer = setTimeout(
+          () => this.fireWater(), this.waterMin * 60 * 1000);
+      }
+      this.chat.setNote(this.waterOn
+        ? `喝水提醒已开启：每 ${this.waterMin} 分钟`
+        : '喝水提醒已关闭');
+      return;
+    }
+    if (clamped !== null) this.sitMin = clamped;
+    this.sitOn = !!on;
+    this.sitDue = false;
+    clearTimeout(this.sitTimer);
+    this.sitTimer = null;
+    if (this.sitOn) {
+      this.sitTimer = setTimeout(() => this.fireSit(), this.sitMin * 60 * 1000);
+    }
+    this.chat.setNote(this.sitOn
+      ? `久坐提醒已开启：每 ${this.sitMin} 分钟`
+      : '久坐提醒已关闭');
+  }
+
+  fireWater() {
+    const me = state.me ? state.me.role : null;
+    const pet = me ? this.pets.get(me) : null;
+    if (!me || !pet) return;
+    const text = '该喝水啦，润润嗓子';
+    const go = () => {
+      pet.act('drink', 2.8);
+      this.pets.say(me, text);
+    };
+    const target = window.innerWidth / 2;
+    if (Math.abs(pet.x - target) < 2) go();
+    else pet.startCrawl(target, pet.y, go);
+    if (this.waterOn) {
+      this.reminderTimer = setTimeout(
+        () => this.fireWater(), this.waterMin * 60 * 1000);
+    }
+  }
+
+  fireSit() {
+    const me = state.me ? state.me.role : null;
+    if (!me || !this.pets.get(me)) return;
+    this.sitDue = true;
+    this.pets.say(me, '坐挺久了，起来动动？');
+    setTimeout(() => { this.sitDue = false; }, 120 * 1000);
+    if (this.sitOn) {
+      this.sitTimer = setTimeout(() => this.fireSit(), this.sitMin * 60 * 1000);
+    }
   }
 
   onPetMenu(role, x, y) {
@@ -526,6 +779,8 @@ class App {
       onAction: (key, to) => this.doAction(key, to),
       onLeave: () => this.leave(),
       onQuit: () => this.quit(),
+      onToy: () => this.startToy(role),
+      onFx: (to) => this.playFireworks(to),
     });
   }
 }

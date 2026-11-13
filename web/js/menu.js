@@ -40,10 +40,14 @@ export function showMenu(x, y, role, handlers) {
   for (const key of state.meta.order) {
     const spec = state.meta.actions[key];
     if (!spec) continue;
+    // 网页里本来就站在聊天窗口里，「传个话…」没有意义
+    if (key === 'say') continue;
     parts.push(
       `<button type="button" class="ctx-item" data-key="${escapeHtml(key)}" title="${escapeHtml(spec.hint || '')}"><span>${escapeHtml(spec.label)}</span></button>`,
     );
   }
+  parts.push('<button type="button" class="ctx-item" data-cmd="toy"><span>逗一逗</span></button>');
+  parts.push('<button type="button" class="ctx-item" data-cmd="fx"><span>烟花</span></button>');
 
   if (isSelf) {
     parts.push('<div class="ctx-sep"></div>');
@@ -75,6 +79,10 @@ export function showMenu(x, y, role, handlers) {
       closeMenu();
       if (key) {
         handlers.onAction(key, isSelf ? null : role);
+      } else if (cmd === 'toy') {
+        if (handlers.onToy) handlers.onToy(role);
+      } else if (cmd === 'fx') {
+        if (handlers.onFx) handlers.onFx(isSelf ? null : role);
       } else if (cmd === 'leave') {
         handlers.onLeave();
       } else if (cmd === 'quit') {

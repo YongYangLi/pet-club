@@ -3,14 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>pet-club 1.6.0</title>
+  <title>pet-club __VERSION__</title>
+  <!-- 这两个占位符由 web_gateway.py 在响应时替换。build 号必须写进 HTML：
+       页面靠它判断手里这份是不是旧的，不能让 JS 去问服务端（问到的永远是最新）。 -->
+  <meta name="petclub-version" content="__VERSION__">
+  <meta name="petclub-build" content="__BUILD__">
+  <link id="favicon" rel="icon" href="/favicon.ico">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <!-- 认领页：进入网页先选人物 -->
   <div id="claim-screen" class="screen">
     <div class="claim-card">
-      <div class="claim-kicker">pet-club <span class="ver">v1.6.0</span></div>
+      <div class="claim-kicker">pet-club <span class="ver">v__VERSION__</span></div>
       <h1>挑一个身份坐下</h1>
       <p class="claim-sub">同一时间每个身份只能有一个人</p>
       <div id="role-grid" class="role-grid"></div>
@@ -27,7 +32,7 @@
     <div class="chat-shell">
       <aside class="sidebar">
         <div class="side-head">
-          <div class="brand">pet-club <span class="ver">v1.6.0</span></div>
+          <div class="brand">pet-club <span class="ver">v__VERSION__</span></div>
           <div id="online-pill" class="online-pill"><span class="dot"></span><span>0/6 在线</span></div>
         </div>
         <div class="search-wrap">
@@ -57,11 +62,14 @@
           <div id="quick-actions" class="quick-actions"></div>
           <div class="composer-card">
             <div id="attach-strip" class="attach-strip hidden"></div>
+            <div id="quote-strip" class="quote-strip hidden"></div>
             <textarea id="composer-input" rows="3" placeholder="说点什么…"></textarea>
             <div class="composer-foot">
               <div class="composer-tools">
                 <button id="emoji-btn" class="tool-btn" type="button" title="表情 / 表情包">表情</button>
                 <button id="file-btn" class="tool-btn" type="button" title="图片 / 文件">文件</button>
+                <button id="mention-btn" class="tool-btn tool-at" type="button" title="提到某个人">@</button>
+                <button id="dice-btn" class="tool-btn" type="button" title="掷骰子">骰子</button>
               </div>
               <div class="composer-target"><span id="target-label">发送到 全体群聊</span></div>
               <div class="composer-hint">Enter 发送 · Shift+Enter 换行</div>
@@ -76,11 +84,19 @@
 
     <div id="pet-layer" class="pet-layer"></div>
     <div id="bubble-layer" class="bubble-layer"></div>
+    <canvas id="fx-canvas" class="fx-canvas"></canvas>
     <div id="picker-preview" class="picker-preview hidden"></div>
     <div id="image-viewer" class="image-viewer hidden"><img id="image-viewer-img" alt=""></div>
     <div id="ctx-menu" class="ctx-menu hidden"></div>
     <div id="toast" class="toast hidden"></div>
     <div id="offline-banner" class="offline-banner hidden"><span class="dot"></span>连不上服务器，正在重试…</div>
+  </div>
+
+  <!-- 新版本提示。放在 main-screen 外面：认领页上也要能弹，
+       否则用户卡在认领页就永远等不到刷新提示。 -->
+  <div id="update-banner" class="update-banner hidden">
+    <span id="update-text" class="update-text">有新版本</span>
+    <button id="update-go" class="update-go" type="button">立即刷新</button>
   </div>
 
   <script type="module" src="/static/js/main.js"></script>

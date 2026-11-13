@@ -90,6 +90,13 @@ if IS_WIN:
     def foreground():
         return user32.GetForegroundWindow()
 
+    def cursor_pos():
+        """鼠标位置（屏幕物理像素）；失败返回 None。"""
+        pt = wintypes.POINT()
+        if user32.GetCursorPos(ctypes.byref(pt)):
+            return int(pt.x), int(pt.y)
+        return None
+
     def owner_at(x, y, me):
         """屏幕点 (x, y) 上压着的窗口属于谁。
 

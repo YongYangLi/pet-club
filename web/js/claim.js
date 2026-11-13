@@ -1,6 +1,7 @@
 // 进入网页先选人物：六张立绘卡片，已被认领的现场变灰。
 import { state, roleName, escapeHtml } from './state.js';
 import { loadImage, cropAlpha } from './sprites.js';
+import { assetUrl } from './asset.js';
 
 export class ClaimUI {
   constructor({ onJoin }) {
@@ -42,7 +43,7 @@ export class ClaimUI {
 
   async loadPreview(role, card) {
     try {
-      const img = await loadImage(`/assets/roles/${role}/wave.png`);
+      const img = await loadImage(assetUrl(`/assets/roles/${role}/wave.png`));
       const portrait = card.querySelector('.role-portrait');
       const im = document.createElement('img');
       im.src = cropAlpha(img, 118, 138);

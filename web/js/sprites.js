@@ -2,6 +2,8 @@
 // 浏览器和 Qt 的差别只在「画到哪儿」：这里用同一个最大包围盒、
 // 同一套底部居中 + crawl 两帧质心修正。
 
+import { assetUrl } from './asset.js';
+
 const POSES = ['idle', 'wave', 'jump', 'sleep', 'fall', 'drag',
   'drink', 'heart', 'knock', 'crawl_1', 'crawl_2'];
 const CRAWL_FRAMES = ['crawl_1', 'crawl_2'];
@@ -31,7 +33,7 @@ export async function loadRole(role) {
     const poses = {};
     await Promise.all(POSES.map(async (pose) => {
       try {
-        poses[pose] = await loadImage(`/assets/roles/${role}/${pose}.png`);
+        poses[pose] = await loadImage(assetUrl(`/assets/roles/${role}/${pose}.png`));
       } catch (_) {
         // 素材缺一张不影响整个角色，和 sprites.load_all 的退化一致
       }
@@ -143,11 +145,11 @@ export function cropAlpha(img, maxW, maxH) {
 
 export async function avatarFor(role, size = 64) {
   try {
-    const img = await loadImage(`/assets/roles/${role}/wave.png`);
+    const img = await loadImage(assetUrl(`/assets/roles/${role}/wave.png`));
     return cropAlpha(img, size, size);
   } catch (_) {
     try {
-      const img = await loadImage(`/assets/roles/${role}/idle.png`);
+      const img = await loadImage(assetUrl(`/assets/roles/${role}/idle.png`));
       return cropAlpha(img, size, size);
     } catch (_) {
       return '';

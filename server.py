@@ -56,7 +56,7 @@ B64_RE = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
 # 起因很实在 —— 客户端发了新版、服务端没重启，客户端那边表现是「图片发了对方收不到」，
 # 而两边看起来都「是最新的」（客户端版本号是对的，服务端根本不会说自己是谁）。
 # 现在握手消息里带一个 v，连上去看一眼就知道。
-SERVER_VERSION = '1.6.0'
+SERVER_VERSION = '1.7.0'
 
 
 def log(msg):
@@ -355,12 +355,25 @@ class Handler(socketserver.BaseRequestHandler):
                         size = 0
             elif mt == 'emoji' and not text:
                 return c.send({'t': 'error', 'msg': '表情是空的'})
+            # 引用回复：只带「谁 + 一句摘要 + 类型」，不需要消息 id ——
+            # 历史记录只在本机，对方的 id 和我这边的对不上，带摘要反而更稳。
+            # 老客户端不发这个字段，转发出去就是 null，新客户端忽略即可。
+            re_out = None
+            re_in = msg.get('re')
+            if isinstance(re_in, dict):
+                r_who = clean(re_in.get('who'), 16)
+                r_text = clean(re_in.get('text'), 120)
+                r_mt = re_in.get('mt')
+                if r_who in ROLES and r_text:
+                    re_out = {'who': r_who, 'text': r_text,
+                              'mt': r_mt if r_mt in MTYPES else 'text'}
             to = msg.get('to')
             # to 也要带上：客户端靠它分清「对大家说的」和「专门对我说的」，
             # 聊天记录才能分别落进群聊和那个人。群发时是 None。
             payload = {'t': 'event', 'kind': kind, 'from': m.role,
                        'text': text, 'to': to if to in ROLES else None,
-                       'mt': mt, 'img': img, 'name': name, 'size': size}
+                       'mt': mt, 'img': img, 'name': name, 'size': size,
+                       're': re_out}
             room = REG.room
             with room.lock:
                 if to in ROLES:
