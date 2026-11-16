@@ -707,7 +707,7 @@ assets/roles/<role>/<pose>.png     站姿 210px 高、脚贴底边、客户端�
 服务端跑在 `47.94.21.34:8765` 上（客户端写死的就是它）。要迁到别的机器：
 改 `petclub/config.py` 的两行常量 → 发新版客户端；服务端本身不用改一行代码。
 
-网页版是 `web_gateway.py`（HTTP + WebSocket，默认 8766），上游接同一个 `server.py`。
+网页版是 `web_gateway.py`（HTTP + WebSocket，默认 80；同时监听 8766 供桌面端同步素材），上游接同一个 `server.py`。
 CentOS 8 上「上传哪些文件 + 一键启停」的最简步骤见
 [docs/部署服务端.md](docs/部署服务端.md) 第六节；脚本在 `deploy/`。
 
