@@ -4,7 +4,8 @@ import {
   state, CONV_ALL, roleName, nowSec, savePref,
 } from './state.js';
 import {
-  loadMeta, getAction, what, sayLine, replyLine, mediaLine, tipText,
+  loadMeta, getAction, what, sayLine, replyLine, mediaLine, actionTip,
+  normName,
 } from './actions.js';
 import { Net } from './net.js';
 import { ClaimUI } from './claim.js';
@@ -14,6 +15,12 @@ import { initMenu, showMenu, closeMenu } from './menu.js';
 import { initHistory, loadHistory } from './history.js';
 import { playFireworks as showFireworks } from './fx.js';
 import { watchVersion } from './version.js';
+import {
+  loadSprites, startSpritePolling, applySprites, refreshSprites,
+} from './spritefeed.js';
+import { spriteManifest } from './asset.js';
+import { clearRole } from './sprites.js';
+import { openUpload, resetPose } from './upload.js';
 
 class App {
   constructor() {
@@ -22,6 +29,9 @@ class App {
     // 刷新回来后自动坐回上次身份的尝试只有一次，失败就老老实实回认领页
     this.autoTried = false;
     this.taps = new Map();
+    // 上一次见到的「每个角色有哪些覆盖图」。清单是整份下发的，
+    // 但别人换的是他自己的图 —— 靠这份快照只重建真的变了的角色。
+    this.posesSeen = {};
     this.reminderTimer = null;
     this.waterOn = false;
     this.waterMin = 45;
@@ -49,9 +59,11 @@ class App {
         sit: { on: this.sitOn, min: this.sitMin },
       }),
       onPetSize: (level) => this.setPetSize(level),
+      onPoseAdd: (role) => this.uploadSprite(role),
+      onPoseReset: (role, key, act) => this.removeSpriteChange(role, key, act),
     });
     this.pets = new PetLayer({
-      onPetClick: (role) => this.onPetClick(role),
+      onPetClick: (role, zone) => this.onPetClick(role, zone),
       onMenu: (role, x, y) => this.onPetMenu(role, x, y),
     });
     this.net = new Net({
@@ -64,6 +76,13 @@ class App {
   async init() {
     initMenu();
     try {
+      // 素材清单要先于第一次 loadRole：角色出生时才需要知道该去哪儿取图。
+      // 拿不到不算失败 —— 会退回出厂素材，页面照常能用。
+      await loadSprites();
+      // 记下第一屏的素材快照：后面判断「谁变了」要和它比。
+      // 不记的话，进页面后第一次改图会被算成「什么都没变」——
+      // 因为对比基准是空的，空对空永远是空。
+      this.posesSeen = JSON.parse(JSON.stringify(spriteManifest().poses || {}));
       await loadMeta();
     } catch (e) {
       this.claim.show('页面加载失败，刷新重试');
@@ -111,6 +130,8 @@ class App {
     // 走到这里的一定是用户正盯着的页面，不能抢他的输入框。
     document.getElementById('update-go').addEventListener('click', () => location.reload());
     watchVersion((info) => this.showUpdate(info));
+    // 别人传了新图/新动作：不走版本机制（那会整页刷新），只换素材
+    startSpritePolling(() => this.onSpritesChanged());
 
     window.addEventListener('beforeunload', () => {
       this.net.send({ t: 'leave' });
@@ -157,6 +178,8 @@ class App {
       case 'event': this.onEvent(m); break;
       case 'error': this.onError(m); break;
       case 'left': this.onLeft(); break;
+      // 别人换了素材。不用等下一轮轮询，也不用刷新页面。
+      case 'sprites': this.onSpritesPush(); break;
       default: break; // pong 等
     }
   }
@@ -215,6 +238,9 @@ class App {
 
     this.claim.hide();
     this.chat.showMain();
+    // 自定义动作按身份过滤，认领前 state.me 是空的、会被整条滤掉，
+    // 所以坐下来之后要重排一次互动条。
+    this.chat.renderQuick();
     this.chat.switch(CONV_ALL, { focus: false });
     this.claim.setStatus('');
     this.claim.setNote('');
@@ -340,28 +366,37 @@ class App {
       return;
     }
     const spec = getAction(m.kind);
+    const an = typeof m.an === 'string' ? m.an : '';
+    // 自定义动作靠**名字**配对：本地没有这条 kind（对方刚删、我还没同步到）
+    // 时，只要事件带了名字，我照样能演自己那份同名动作。
+    const isCustom = !!(spec && spec.custom) || (!spec && !!an);
     const actor = m.from;
-    const hasPet = this.pets.has(actor);
-    if (!spec || !roleName(actor)) return;
+    if (!roleName(actor) || (!spec && !isCustom)) return;
+    const label = an || (spec && spec.label) || '';
 
     const target = typeof m.to === 'string' ? m.to : null;
     const key = target ? actor : CONV_ALL;
     const text = (m.text || '').trim();
     const mt = m.mt || 'text';
+    const tip = actionTip(m.kind, roleName(actor), !!target,
+      target ? roleName(target) : null)
+      || (label ? `${roleName(actor)} 发起了「${label}」` : '');
 
     if (!state.remoteOn && m.kind !== 'say') {
       // 关了同步远程互动：人不动，但聊天记录里仍留一条
-      this.chat.store(key, {
-        kind: 'tip',
-        text: tipText(m.kind, roleName(actor), !!target,
-          target ? roleName(target) : null),
-        ts: nowSec(),
-      });
+      this.chat.store(key, { kind: 'tip', text: tip, ts: nowSec() });
+      return;
+    }
+
+    if (isCustom) {
+      // 名字是共享语义，图是各人一份：谁有同名动作谁就演自己那份。
+      this.performCustom(actor, spec, label, target);
+      this.chat.store(key, { kind: 'tip', text: tip, ts: nowSec() });
       return;
     }
 
     if (m.kind === 'say') {
-      if (hasPet) {
+      if (this.pets.has(actor)) {
         this.pets.play(actor, spec.pose, spec.dur);
         if (mt === 'text' || mt === 'emoji') this.pets.say(actor, text);
         else this.pets.say(actor, mediaLine(mt, actor));
@@ -385,13 +420,13 @@ class App {
       return;
     }
 
-    if (hasPet) {
+    if (this.pets.has(actor)) {
       this.pets.play(actor, what(spec), spec.dur);
       this.pets.say(actor, text || sayLine(m.kind, actor));
     }
     this.chat.store(key, {
       kind: 'tip',
-      text: tipText(m.kind, roleName(actor), !!target,
+      text: actionTip(m.kind, roleName(actor), !!target,
         target ? roleName(target) : null),
       ts: nowSec(),
     });
@@ -416,6 +451,41 @@ class App {
         const reply = replyLine(m.kind, me);
         if (reply) this.pets.say(me, reply);
       }
+    }
+  }
+
+  /** 某个身份自己的同名动作；没有就是 null。
+   *
+   * 自定义动作的名字是**共享语义**，图却是各人一份：「我做比耶、对方有比耶」
+   * 时，对方演他自己的那张图，不是我的。比较用 normName，和上传去重同一套规则。
+   */
+  customLike(role, label) {
+    const want = normName(label);
+    if (!role || !want) return null;
+    const acts = (state.meta && state.meta.actions) || {};
+    for (const key of (state.meta && state.meta.order) || []) {
+      const spec = acts[key];
+      if (!spec || !spec.custom || spec.role !== role) continue;
+      if (normName(spec.label) === want) return { ...spec, key };
+    }
+    return null;
+  }
+
+  /** 自定义动作：各演各的那一份（和桌面端 App._perform_custom 同一套规则）。
+   *
+   * 发起人演被点的那条 `spec`；其他人按名字找自己那份，没有就站着不动。
+   * 对全员：所有有同名动作的人都跟上；点名：只有被点的那位跟。
+   */
+  performCustom(actor, spec, label, target = null) {
+    if (spec && this.pets.has(actor)) {
+      this.pets.play(actor, what(spec), spec.dur);
+    }
+    let peers;
+    if (target) peers = target === actor ? [] : [target];
+    else peers = [...this.pets.pets.keys()].filter((r) => r !== actor);
+    for (const r of peers) {
+      const mine = this.customLike(r, label);
+      if (mine) this.pets.play(r, what(mine), mine.dur);
     }
   }
 
@@ -512,18 +582,25 @@ class App {
     if (!pet) return;
 
     const msg = { t: 'event', kind: key, text: '' };
+    // 自定义动作除了 kind（各人自己的图号）还要带上名字：
+    // 收信端靠它找自己那份同名动作（见 performCustom）。
+    if (spec.custom) msg.an = spec.label || '';
     if (to) msg.to = to;
     this.net.send(msg);
 
     // 自己这边也要演：动作 + 镜像 + 台词，和桌面版 do_action 一致
-    this.pets.play(me, what(spec), spec.dur);
-    if (spec.gather) {
-      this.pets.gather(me, to ? [to] : null);
-    } else if (spec.mirror) {
-      const peers = to
-        ? [to]
-        : [...this.pets.pets.keys()].filter((r) => r !== me);
-      for (const r of peers) this.pets.play(r, spec.mirror, spec.dur);
+    if (spec.custom) {
+      this.performCustom(me, spec, spec.label || '', to || null);
+    } else {
+      this.pets.play(me, what(spec), spec.dur);
+      if (spec.gather) {
+        this.pets.gather(me, to ? [to] : null);
+      } else if (spec.mirror) {
+        const peers = to
+          ? [to]
+          : [...this.pets.pets.keys()].filter((r) => r !== me);
+        for (const r of peers) this.pets.play(r, spec.mirror, spec.dur);
+      }
     }
 
     const line = sayLine(key, me);
@@ -531,7 +608,7 @@ class App {
 
     this.chat.store(to || CONV_ALL, {
       kind: 'tip',
-      text: tipText(key, '你', !!to, to ? roleName(to) : null),
+      text: actionTip(key, '你', !!to, to ? roleName(to) : null),
       ts: nowSec(),
     });
   }
@@ -659,13 +736,23 @@ class App {
 
   // ---------------- 角色交互 ----------------
 
+  // 点谁谁有反应，但**只在本机**：不发 event、不进聊天记录。
+  // 别人屏幕上不会看到自己被动了一下 —— 那是菜单里「摸摸头」那条指令的事。
   onPetClick(role, zone = 0.35) {
     const me = state.me ? state.me.role : null;
-    if (!me || role !== me) return;
+    if (!me || !role) return;
+    const mine = role === me;
     const pet = this.pets.get(role);
     if (!pet || pet.phase === 'hold') return;
 
-    if (this.sitDue) {
+    // 点谁都在他自己头上说那一句 —— 和点自己完全一样，不加旁白。
+    // 这一下只在本机发生、不进聊天记录，所以说什么不影响别人。
+    const say = (line) => {
+      if (line) this.pets.say(role, line);
+    };
+
+    // 「该起来动动了」是给自己的提醒，不去戳别人的角色
+    if (mine && this.sitDue) {
       this.sitDue = false;
       pet.act('jump', 1.0);
       this.pets.say(role, '起来动动');
@@ -674,8 +761,7 @@ class App {
 
     if (pet.poseName === 'sleep') {
       pet.act('jump', 1.0);
-      const line = sayLine('wake', role);
-      if (line) this.pets.say(role, line);
+      say(sayLine('wake', role));
       return;
     }
 
@@ -698,15 +784,13 @@ class App {
     if (hist.length >= 3 && hist.slice(-3).every((t) => t.part === part)) {
       this.taps.set(role, []);
       pet.act('jump', 1.3);
-      const combo = replyLine(key, role);
-      if (combo) this.pets.say(role, combo);
+      say(replyLine(key, role));
       return;
     }
 
     const pose = { head: 'wave', belly: 'jump', feet: 'knock' }[part];
     pet.act(pose, part === 'belly' ? 1.0 : 1.2);
-    const line = sayLine(key, role);
-    if (line) this.pets.say(role, line);
+    say(sayLine(key, role));
   }
 
   startToy(role) {
@@ -782,6 +866,72 @@ class App {
       onToy: () => this.startToy(role),
       onFx: (to) => this.playFireworks(to),
     });
+  }
+
+  uploadSprite(role) {
+    openUpload(role, (manifest) => this.afterUpload(manifest));
+  }
+
+  afterUpload(manifest) {
+    applySprites(manifest);
+    this.onSpritesChanged();
+    // 广播一句「素材变了」：别人那边收到就立刻换图，不用等下一轮轮询、
+    // 也不用刷新页面。断线时发不出去也不要紧，重连后各端会自己拉清单。
+    this.net.send({ t: 'sprites' });
+    this.chat.setNote('动作已加好，大家都能看到');
+  }
+
+  // 头像菜单里删掉 / 还原：和上传走同一条刷新链，只是提示语不一样。
+  // 失败时菜单已经关了，用聊天顶上那行 note 报错 —— 静默失败最难受。
+  async removeSpriteChange(role, key, act) {
+    try {
+      const manifest = await resetPose(role, key);
+      this.chat.closeMeMenu();
+      applySprites(manifest);
+      this.onSpritesChanged();
+      this.net.send({ t: 'sprites' });
+      this.chat.setNote(act === 'del' ? '动作已删掉' : '已还原成出厂那张图');
+    } catch (e) {
+      this.chat.closeMeMenu();
+      this.chat.setNote(e.message || '操作失败，稍后再试');
+    }
+  }
+
+  // 服务端说「有人动了素材」。它只发通知，不带清单（清单里有谁、rev 多少
+  // 得自己拉），所以这里先比一遍：没变就什么都不做，别白白重建一圈。
+  async onSpritesPush() {
+    const m = await refreshSprites();
+    if (!m) return;
+    this.onSpritesChanged();
+  }
+
+  // 清单变了：动作表可能多了一项，图也可能换了一批。
+  // 只清角色缓存，不重开聊天 —— init() 里有事件绑定，不能重复调用。
+  async onSpritesChanged() {
+    try {
+      await loadMeta();
+    } catch (_) {
+      return;
+    }
+    const now = spriteManifest().poses || {};
+    const touched = state.roles.filter((role) => {
+      const a = this.posesSeen[role] || {};
+      const b = now[role] || {};
+      const ka = Object.keys(a);
+      return ka.length !== Object.keys(b).length
+        || ka.some((k) => a[k] !== b[k]);
+    });
+    this.posesSeen = JSON.parse(JSON.stringify(now));
+
+    // 只有图真的变了的角色才重建。别人传自己的图，我这边其他人不该
+    // 跟着闪一下；动作表（互动条 / 右键菜单）每次都重画，加了动作要能点。
+    if (!touched.length) {
+      this.chat.renderQuick();
+      return;
+    }
+    for (const role of touched) clearRole(role);
+    this.pets.rebuild(touched);
+    this.chat.renderQuick();
   }
 }
 

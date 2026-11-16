@@ -15,36 +15,43 @@ from PySide6.QtWidgets import (QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
 
 from . import host
 from .config import assets_dir
+from .tokens import load as _load_tokens
 
 # ---------------- 配色 ----------------
-WINDOW = '#ffffff'
-BORDER = '#e4e7ef'
-FG = '#111827'
-SUB = '#6b7280'
-MUTED = '#9ca3af'
-LINE = '#e5e7eb'
-FIELD = '#f7f8fb'
+# 值全在 assets/theme.json 里，网页端读的是同一份（web_gateway 注入成 CSS 变量）。
+# 这里只做一次改名：json 的 chrome_line -> 代码里的 CHROME_LINE。
+_TOKENS = _load_tokens()
+_C = _TOKENS['color']
+RADIUS = _TOKENS['radius']
+
+WINDOW = _C['window']
+BORDER = _C['border']
+FG = _C['fg']
+SUB = _C['sub']
+MUTED = _C['muted']
+LINE = _C['line']
+FIELD = _C['field']
 
 # 聊天窗的「外框色」：顶部标题带和左侧会话栏共用它，中间没有分隔线，
 # 视觉上是连在一起的一整块。
-CHROME = '#f1f2f6'
-CHROME_LINE = '#e3e5ee'
-CHROME_HOVER = '#e7e9f2'
-CHROME_SEL = '#ffffff'
-CARD_BG = '#f7f8fc'
-CARD_LINE = '#eaecf4'
+CHROME = _C['chrome']
+CHROME_LINE = _C['chrome_line']
+CHROME_HOVER = _C['chrome_hover']
+CHROME_SEL = _C['chrome_sel']
+CARD_BG = _C['card_bg']
+CARD_LINE = _C['card_line']
 
-ACCENT = '#5b5bf0'
-ACCENT_DOWN = '#4a4ade'
-ACCENT_SOFT = '#f1f2ff'
-ACCENT_EDGE = '#b9bbff'
+ACCENT = _C['accent']
+ACCENT_DOWN = _C['accent_down']
+ACCENT_SOFT = _C['accent_soft']
+ACCENT_EDGE = _C['accent_edge']
 
-ERR = '#e5484d'
+ERR = _C['err']
 
-OK_FG = '#0f9d76'
-OK_BG = '#e9f8f2'
-TAKEN_FG = '#a8aeba'
-TAKEN_BG = '#f1f2f5'
+OK_FG = _C['ok']
+OK_BG = _C['ok_bg']
+TAKEN_FG = _C['taken']
+TAKEN_BG = _C['taken_bg']
 
 FAMILY = host.ui_font()
 

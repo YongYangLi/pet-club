@@ -35,12 +35,22 @@ from socketserver import ThreadingMixIn
 from urllib.parse import unquote, urlparse
 
 from petclub import actions
+from petclub import custom
+from petclub import tokens
 from petclub import __version__ as WEB_VERSION
 import server as game_server
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, 'web')
 ASSETS_DIR = os.path.join(ROOT, 'assets')
+MAX_POST = 4 * 1024 * 1024      # 上传请求体上限：2MB 的图 base64 之后约 2.7MB
+
+# 可以直接换图、但不对应任何动作的姿势。
+#
+# 动作表只管「能发起的指令」，站立（idle）不是指令 —— 它是角色的默认姿态。
+# 但用户想换掉的是「我站着的样子」，这跟换打招呼的图没有区别，所以让它
+# 也能走同一个上传 / 还原接口：`action` 字段收到的是姿势名本身。
+LOOSE_POSES = ('idle',)
 
 # 发布脚本写进 web/build.json 的版本标识。前端靠它判断自己是不是过期了：
 # 页面 HTML 里有 __BUILD__（渲染时替换），服务端在 /api/version 里说当前的，
@@ -120,15 +130,52 @@ def file_etag(path):
     return '"%x-%x"' % (st.st_mtime_ns, st.st_size)
 
 
+_theme_cache = {'key': None, 'value': b''}
+
+
+def theme_css():
+    """把 assets/theme.json 的颜色拼成一段 :root，追加在 style.css 末尾。
+
+    为什么是追加而不是去改文件里的 :root：那段是给人看的默认值，追加在后面、
+    同优先级，后者胜。结构不用动，单独打开 style.css 也还是对的。
+    """
+    path = tokens.path_of()
+    try:
+        st = os.stat(path)
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return b''
+    if _theme_cache['key'] == key:
+        return _theme_cache['value']
+    try:
+        body = ':root{%s}\n' % tokens.css_vars(tokens.load())
+        value = ('\n/* 下面这段由 web_gateway 从 assets/theme.json 生成，'
+                 '改颜色请改那份 json */\n' + body).encode('utf-8')
+    except (OSError, ValueError, TypeError):
+        value = b''
+    _theme_cache['key'] = key
+    _theme_cache['value'] = value
+    return value
+
+
 def build_meta():
-    """前端需要的静态数据。台词、动作只从 actions.py 取，不另写一份。"""
+    """前端需要的静态数据。台词、动作只从 actions.py 取，不另写一份。
+
+    自定义动作在这里并进 `actions`：网页端的互动条和右键菜单都是遍历
+    `order` 渲染的（chat.js / menu.js），所以合并完前端自动多出几项，
+    不用改渲染逻辑。自定义动作排在内置之后，不打乱原有顺序。
+    """
     b = read_build()
+    extra = custom.actions()
+    merged = dict(actions.ACTIONS)
+    merged.update(extra)
+    order = list(actions.ORDER) + [k for k in custom.order() if k in extra]
     return {
         'roles': list(game_server.ROLES),
         'role_names': dict(game_server.ROLE_NAMES),
-        'actions': actions.ACTIONS,
-        'order': list(actions.ORDER),
-        'chat_order': list(actions.CHAT_ORDER),
+        'actions': merged,
+        'order': order,
+        'chat_order': [k for k in order if k != 'say'],
         'tip': actions.TIP,
         'voice': actions.VOICE,
         'media_line': actions.MEDIA_LINE,
@@ -438,7 +485,17 @@ class WebHandler(BaseHTTPRequestHandler):
             return
         ext = os.path.splitext(path)[1].lower()
         ctype = MIME.get(ext) or mimetypes.guess_type(path)[0] or 'application/octet-stream'
-        self._send_bytes(data, ctype, cache=cache, etag=file_etag(path))
+        etag = file_etag(path)
+        if ext == '.css':
+            # 颜色 token 从 theme.json 来，style.css 本身没变、json 变了的时候
+            # ETag 也得跟着变，否则浏览器拿 304 继续用旧配色。
+            inject = theme_css()
+            if inject:
+                data = data + inject
+                stamp = file_etag(tokens.path_of())
+                if etag and stamp:
+                    etag = etag[:-1] + '-' + stamp[1:]
+        self._send_bytes(data, ctype, cache=cache, etag=etag)
 
     # ---- 路由 ----
 
@@ -459,6 +516,17 @@ class WebHandler(BaseHTTPRequestHandler):
                 # 前端轮询就看这一个，绝不能被任何一层缓存挡住。
                 data = json.dumps(read_build(), ensure_ascii=False).encode('utf-8')
                 self._send_bytes(data, 'application/json; charset=utf-8', cache='no-store')
+                return
+            if path == '/api/sprites':
+                # 素材清单：有哪些自定义动作、每个角色有哪些覆盖图、各自的 rev。
+                # 客户端（网页 / 桌面）靠它决定去哪张图，也靠 rev 判断要不要重下。
+                data = json.dumps(custom.manifest(), ensure_ascii=False).encode('utf-8')
+                self._send_bytes(data, 'application/json; charset=utf-8', cache='no-store')
+                return
+            if path.startswith('/sprites/'):
+                # 用户上传的图。URL 带 ?v=<rev>，换图就换 URL，缓存自然失效。
+                self._serve_file(safe_path(custom.data_dir(), path[len('/sprites/'):]),
+                                 cache='public, max-age=31536000, immutable')
                 return
             if path in ('/', '/index.html'):
                 # HTML 每次现渲染：里面带着这一份的 build 号，缓存住就失去意义了。
@@ -483,6 +551,117 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_error(404)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
+
+    # ---- 上传 ----
+
+    def _json(self, obj, status=200):
+        data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        self._send_bytes(data, 'application/json; charset=utf-8',
+                         cache='no-store', status=status)
+
+    def _read_json(self, limit):
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except (TypeError, ValueError):
+            return None, 'Content-Length 不合法'
+        if length <= 0:
+            return None, '请求体是空的'
+        if length > limit:
+            return None, '请求体超过 %d KB' % (limit // 1024)
+        raw = self.rfile.read(length)
+        try:
+            obj = json.loads(raw.decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            return None, '不是合法 JSON'
+        if not isinstance(obj, dict):
+            return None, 'JSON 顶层必须是对象'
+        return obj, ''
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        try:
+            if path == '/api/sprites':
+                self._upload()
+                return
+            if path == '/api/sprites/restore':
+                self._restore()
+                return
+            self.send_error(404)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
+        except Exception as e:
+            # 不留这一层的话，任何意外都会变成「连接被重置」——
+            # 浏览器只显示"网络错误"，日志里一个字都没有，没法查。
+            log('上传出错：%r' % e)
+            try:
+                self._json({'ok': False, 'error': '服务端出错：%s' % e}, 500)
+            except OSError:
+                self.close_connection = True
+
+    def _upload(self):
+        """收一张姿势图。
+
+        两种模式，靠 `action` 字段区分：
+          · 给了 action（内置 key 或已有自定义 key）→ 只换图，动作表不动
+          · 没给                                      → 新建动作，key 由服务端发号
+
+        `action` 也可以是一个**姿势名**（LOOSE_POSES 里的那些，比如站立
+        `idle`）—— 它们不对应任何动作，但同样是角色的一张图，用户想换就换。
+        """
+        body, err = self._read_json(MAX_POST)
+        if err:
+            return self._json({'ok': False, 'error': err}, 400)
+        role = str(body.get('role') or '')
+        if role not in game_server.ROLES:
+            return self._json({'ok': False, 'error': '身份不合法'}, 400)
+        try:
+            png = base64.b64decode(''.join(str(body.get('data') or '').split()),
+                                   validate=True)
+        except (ValueError, TypeError):
+            return self._json({'ok': False, 'error': '图片编码坏了，重试一次'}, 400)
+
+        key = str(body.get('action') or '')
+        if key:
+            spec = actions.ACTIONS.get(key) or custom.actions().get(key)
+            pose = (spec or {}).get('pose')
+            if not pose and key in LOOSE_POSES:
+                pose = key
+            if not pose:
+                return self._json({'ok': False, 'error': '没有这个动作'}, 400)
+            out, err = custom.replace_pose(role, pose, png)
+        else:
+            out, err = custom.add_action(role, png, body.get('label'), body.get('dur'))
+        if err:
+            return self._json({'ok': False, 'error': err}, 400)
+        log('素材更新 %s/%s（%d 字节）' % (role, out.get('pose') or key, len(png)))
+        self._json({'ok': True, 'spec': out, 'manifest': custom.manifest()})
+
+    def _restore(self):
+        """撤销上传：自定义动作整个删掉，内置动作只删覆盖图（回到出厂）。
+
+        没有这一步，一张传错的图就再也收不回去了 —— 那比传不上去更难受。
+        """
+        body, err = self._read_json(64 * 1024)
+        if err:
+            return self._json({'ok': False, 'error': err}, 400)
+        role = str(body.get('role') or '')
+        if role not in game_server.ROLES:
+            return self._json({'ok': False, 'error': '身份不合法'}, 400)
+        key = str(body.get('action') or '')
+        if key in custom.actions():
+            custom.remove_action(key)
+            log('删除自定义动作 %s' % key)
+        elif key in LOOSE_POSES:
+            custom.restore_pose(role, key)
+            log('恢复出厂图 %s/%s' % (role, key))
+        else:
+            spec = actions.ACTIONS.get(key)
+            pose = (spec or {}).get('pose')
+            if not pose:
+                return self._json({'ok': False, 'error': '没有这个动作'}, 400)
+            custom.restore_pose(role, pose)
+            log('恢复出厂图 %s/%s' % (role, pose))
+        self._json({'ok': True, 'manifest': custom.manifest()})
 
     # ---- WebSocket 升级 ----
 

@@ -6,7 +6,8 @@ import {
   escapeHtml,
 } from './state.js';
 import { avatarFor } from './sprites.js';
-import { assetUrl } from './asset.js';
+import { assetUrl, spriteRev, spriteUrl } from './asset.js';
+import { LOOSE_POSES } from './actions.js';
 import { saveHistory } from './history.js';
 
 // 和 petclub/media.py 保持同一份表情字符 / 表情包姿势。
@@ -15,7 +16,7 @@ const EMOJI_CHARS = ['😀', '😄', '😅', '😂', '😊', '😉', '😍', '�
 const STICKER_POSES = ['idle', 'wave', 'drink', 'heart', 'jump', 'sleep', 'knock', 'drag'];
 
 export class ChatUI {
-  constructor({ onSend, onAction, onLeave, onQuit, onRemote, onMedia, onPetSize, onGame, onFx, onToy, onReminder, reminderState }) {
+  constructor({ onSend, onAction, onLeave, onQuit, onRemote, onMedia, onPetSize, onGame, onFx, onToy, onReminder, reminderState, onPoseAdd, onPoseReset }) {
     this.onSend = onSend;
     this.onAction = onAction;
     this.onLeave = onLeave;
@@ -28,6 +29,8 @@ export class ChatUI {
     this.onToy = onToy;
     this.onReminder = onReminder;
     this.reminderState = reminderState || (() => ({ on: false, min: 45 }));
+    this.onPoseAdd = onPoseAdd;
+    this.onPoseReset = onPoseReset;
 
     this.root = document.getElementById('main-screen');
     this.list = document.getElementById('conv-list');
@@ -73,12 +76,17 @@ export class ChatUI {
     this.pickerTab = 'emoji';
   }
 
-  init() {
-    // 快捷互动：和桌面聊天窗同一份 CHAT_ORDER（不含「传个话…」）
+  // 快捷互动条：和桌面聊天窗同一份 CHAT_ORDER（不含「传个话…」）。
+  // 单独抽出来是因为上传完自定义动作后要重建它，而 init() 里其余部分
+  // 都带事件绑定，重复调用会把监听器叠好几层。
+  renderQuick() {
     this.quick.innerHTML = '';
+    const me = state.me ? state.me.role : null;
     for (const key of state.meta.chat_order) {
       const spec = state.meta.actions[key];
       if (!spec) continue;
+      // 自定义动作只属于创建它的身份，别人的互动条里不该出现
+      if (spec.custom && spec.role !== me) continue;
       const b = document.createElement('button');
       b.type = 'button';
       b.className = 'chip';
@@ -104,6 +112,11 @@ export class ChatUI {
       if (this.onFx) this.onFx(this.currentTarget());
     });
     this.quick.appendChild(fx);
+  }
+
+  init() {
+    this.renderQuick();
+
 
     this.sendBtn.addEventListener('click', () => this.submit());
     this.input.addEventListener('keydown', (e) => {
@@ -1082,6 +1095,39 @@ export class ChatUI {
     }
   }
 
+  // 「我的动作」子菜单里那几行：**只列自己动过的** ——
+  // 新增的自定义动作可以删掉，被换过图的内置动作可以还原。
+  // 没动过的内置动作一行都不出现，否则六个动作永远挂在那儿占地方。
+  poseRows() {
+    const me = state.me ? state.me.role : null;
+    if (!me) return '';
+    const meta = state.meta || {};
+    const acts = meta.actions || {};
+    // 站立不在动作表里，但它同样可能被换过，所以先摆进来
+    const items = LOOSE_POSES.map((p) => ({
+      key: p.key, label: p.label, pose: p.pose, custom: false,
+    }));
+    for (const key of (meta.order || [])) {
+      const spec = acts[key];
+      if (!spec || !spec.pose) continue;
+      if (spec.custom && spec.role !== me) continue;
+      items.push({ key, label: spec.label, pose: spec.pose, custom: !!spec.custom });
+    }
+
+    const rows = [];
+    for (const it of items) {
+      if (!spriteRev(me, it.pose)) continue;      // 没动过，不列
+      rows.push(`<div class="pose-row" data-key="${escapeHtml(it.key)}">
+        <img class="pose-row-thumb" src="${spriteUrl(me, it.pose)}" alt="">
+        <span class="pose-row-name">${escapeHtml(it.label)}</span>
+        <span class="pose-row-tag">${it.custom ? '新增' : '已换'}</span>
+        <button type="button" class="pose-row-act" data-act="${it.custom ? 'del' : 'undo'}"
+          title="${it.custom ? '删掉这个动作' : '还原成出厂图'}">${it.custom ? '删掉' : '还原'}</button>
+      </div>`);
+    }
+    return rows.join('');
+  }
+
   toggleMeMenu() {
     if (this.meMenu) {
       this.closeMeMenu();
@@ -1123,6 +1169,18 @@ export class ChatUI {
         <span>同步远程互动</span><span>${state.remoteOn ? '✓' : ''}</span>
       </button>
       <div class="ctx-sep"></div>
+      <div class="ctx-sub">
+        <button type="button" class="ctx-item ctx-parent">
+          <span>我的动作</span><span class="ctx-arrow">›</span>
+        </button>
+        <div class="ctx-submenu pose-sub">
+          <button type="button" class="ctx-item" data-cmd="pose-add">
+            <span>加个动作…</span>
+          </button>
+          ${this.poseRows()}
+        </div>
+      </div>
+      <div class="ctx-sep"></div>
       ${remRow('water', '喝水提醒')}
       ${remRow('sit', '久坐提醒')}
       <div class="ctx-sep"></div>
@@ -1157,6 +1215,8 @@ export class ChatUI {
           if (this.onPetSize) this.onPetSize(size);
         } else if (cmd === 'remote') {
           this.onRemote(!state.remoteOn);
+        } else if (cmd === 'pose-add') {
+          if (this.onPoseAdd && state.me) this.onPoseAdd(state.me.role);
         } else if (cmd === 'leave') {
           this.onLeave();
         } else if (cmd === 'quit') {
@@ -1190,6 +1250,22 @@ export class ChatUI {
         const now = this.reminderState()[kind];
         row.querySelector('.rem-min').textContent = `${now.min} 分钟`;
         row.classList.toggle('on', now.on);
+      });
+    });
+
+    menu.querySelectorAll('.pose-row-act').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        // 在子菜单里，别让点击冒泡到 .ctx-item 的「点完就关」逻辑上：
+        // 删失败时菜单还开着，用户能直接再点一次。
+        e.stopPropagation();
+        const row = btn.closest('.pose-row');
+        if (!row || !state.me) return;
+        btn.disabled = true;
+        const label = row.querySelector('.pose-row-name');
+        if (label) label.textContent = '处理中…';
+        if (this.onPoseReset) {
+          this.onPoseReset(state.me.role, row.dataset.key, btn.dataset.act);
+        }
       });
     });
   }

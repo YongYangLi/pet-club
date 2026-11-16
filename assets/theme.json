@@ -1,0 +1,33 @@
+{
+  "_note": "桌面端与网页端共用的视觉 token。真源就是这份文件：petclub/theme.py 读它生成配色，web_gateway.py 读它注入 CSS 变量。改名用 snake_case，CSS 那边自动转成 kebab-case（chrome_line -> --chrome-line）。",
+  "color": {
+    "window": "#ffffff",
+    "border": "#e4e7ef",
+    "fg": "#111827",
+    "sub": "#6b7280",
+    "muted": "#9ca3af",
+    "line": "#e5e7eb",
+    "field": "#f7f8fb",
+    "chrome": "#f1f2f6",
+    "chrome_line": "#e3e5ee",
+    "chrome_hover": "#e7e9f2",
+    "chrome_sel": "#ffffff",
+    "card_bg": "#f7f8fc",
+    "card_line": "#eaecf4",
+    "accent": "#5b5bf0",
+    "accent_down": "#4a4ade",
+    "accent_soft": "#f1f2ff",
+    "accent_edge": "#b9bbff",
+    "ok": "#0f9d76",
+    "ok_bg": "#e9f8f2",
+    "err": "#e5484d",
+    "taken": "#a8aeba",
+    "taken_bg": "#f1f2f5"
+  },
+  "radius": {
+    "sm": 8,
+    "md": 10,
+    "lg": 14,
+    "card": 16
+  }
+}

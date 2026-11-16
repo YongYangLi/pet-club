@@ -89,8 +89,28 @@ class FakeTray:
         self.ok = False
 
 
+def isolate_prefs():
+    """把偏好指到 .tmp 下的一份空文件，别碰项目里那份。
+
+    源码模式下 `prefs.json` 就在 `petclub-data/` 里 —— 那是**这台机器上
+    真实的摆放**。探针既读它（历史 spots 会让「新角色落在均分位置」这类
+    断言偶发失败，于是只能把整个工作树拷到 /tmp 才能稳定通过），也写它
+    （拖动那一段会 `_remember_spot`），等于跑一次测试就把自己的桌面布局
+    改了。这里换成临时文件，跑完留在 .tmp 里当证据。
+    """
+    from petclub import config as C
+    path = os.path.join(TMP, 'prefs.json')
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+    C.prefs_path = lambda: path
+    return path
+
+
 def main():
     os.makedirs(TMP, exist_ok=True)
+    isolate_prefs()
     S.HEARTBEAT_TIMEOUT = 30.0
     S.REAP_INTERVAL = 0.5
     srv = S.Server(('127.0.0.1', 0), S.Handler)
@@ -324,8 +344,13 @@ def main():
     probes = actions_of(self_menu)
     chk('动作项数量和 ORDER 一致', len(probes) == len(A.ORDER),
         (len(probes), len(A.ORDER)))
-    chk('动作项顺序和 ORDER 一致',
-        [k for _act, k in probes] == list(A.ORDER))
+    # 「传个话」被特意提到第一位（右键桌宠的主要目的就是开聊），其余按
+    # ORDER。这里钉的是这个**有意的**排列：以前直接和 list(A.ORDER) 比，
+    # 于是「传话置顶」这个产品决定一落地，用例就红了 —— 不是程序退步。
+    expect_order = ['say'] + [k for k in A.ORDER if k != 'say']
+    chk('动作项顺序：传话置顶，其余按 ORDER',
+        [k for _act, k in probes] == expect_order,
+        [k for _act, k in probes])
     chk('菜单里不再列服务器成员（在线状态已经不在这一层看）',
         not any('服务器成员' in t for t in self_texts), self_texts)
     chk('菜单里没有每人一条的「在线 / 空闲」',
@@ -369,16 +394,37 @@ def main():
         pet.phase == 'hold', pet.phase)
     moved_x = pet.x
     chk('位置跟手（x 变了）', abs(moved_x - start[0]) > 20, (start[0], moved_x))
+    released = (pet.x, pet.y)
     app.on_pet_drop(me_win, QPoint(int(moved_x), int(pet.y)))
-    chk('松手后开始下落', pet.phase == 'fall', pet.phase)
-    chk('松手后落回地面', settle(), pet.phase)
-    chk('落地位置就是松开时的 x', abs(pet.x - moved_x) < 2.0,
-        (pet.x, moved_x))
+    # 松手**不落回地面**：桌宠可以摆在桌面任意高度（Pet.release 的既定行为，
+    # 位置记忆里的 up 也建立在这上面）。以前这里断言 fall / 落回地面，那是
+    # 「只能站屏幕底边」那个版本的残留。
+    chk('松手后停在放手处，不弹回地面', pet.phase == 'idle', pet.phase)
+    settle()
+    chk('松手后位置没变（高度也留着）',
+        abs(pet.x - released[0]) < 2.0 and abs(pet.y - released[1]) < 2.0,
+        (pet.x, pet.y, released))
 
-    # 点一下（不拖动）= 摸摸头
-    app.on_pet_press(me_win, QPoint(int(pet.x), int(pet.y - 40)))
-    app.on_pet_drop(me_win, QPoint(int(pet.x), int(pet.y - 40)))
-    chk('原地按一下 = 摸摸头（伸手的 wave 姿势）', pet.pose == 'wave', pet.pose)
+    # 点一下（不拖动）= 摸摸头：点的是**头顶**（窗口上方 10% 那一带）。
+    # 用窗口自己的逻辑坐标算 —— 真实 Qt 事件给的就是这套（globalPosition），
+    # 别拿 pet.y / win_h 的物理像素去凑，125% 缩放下会差 1.25 倍。
+    head_y = int(round(me_win.y() + me_win.height() * 0.1))
+    app.on_pet_press(me_win, QPoint(int(pet.x), head_y))
+    app.on_pet_drop(me_win, QPoint(int(pet.x), head_y))
+    chk('原地按一下头顶 = 摸摸头（伸手的 wave 姿势）', pet.pose == 'wave',
+        pet.pose)
+
+    # 点别人：和点自己说同一套话 —— 他自己的台词，不加括号。
+    # 这一下只在本机发生，说什么都不影响他那边的屏幕。
+    other = app.pets.get('p2')
+    owin = other.win
+    oy = int(round(owin.y() + owin.height() * 0.1))
+    app.on_pet_press(owin, QPoint(int(other.x), oy))
+    app.on_pet_drop(owin, QPoint(int(other.x), oy))
+    bub = app.bubbles.get('p2')
+    chk('点别人：说的是他自己的台词（和点自己同一套）',
+        bub is not None and getattr(bub, '_text', '') in A.VOICE['p2']['s.pet'],
+        getattr(bub, '_text', None) if bub else None)
 
     # 拖动不发网络消息：别人屏幕上不该有变化
     c3.drain('event')

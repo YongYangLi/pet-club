@@ -9,6 +9,56 @@ const CRAWL_FRAMES = ['crawl_1', 'crawl_2'];
 const CRAWL_FRAME_SEC = 0.16;
 const CRAWL_BODY_PER_SEC = 1.5;
 
+// 「上次把谁放在哪儿」。x 存屏幕宽度比例，y 存**离地面多高**。
+// 不能存整屏比例：地面会动（输入框变高、窗口变矮），同一个比例换算出来的
+// 高度和现在的地面差几十像素 —— 人会悬在半空，或者压在输入框上，
+// 而且拖动上限（地面）也被这个数带偏，看起来就是「怎么拖都拖不下去」。
+const SPOT_KEY = 'petclub.spots';
+
+function readSpots() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SPOT_KEY) || '{}');
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+// 读成像素：{x, y}。floor 是当前地面（脚底）的高度。
+function readSpot(role, floor) {
+  const s = readSpots()[role];
+  if (Array.isArray(s)) {
+    // 旧格式：[x, y] 都是整屏比例。y 是绝对高度，只能夹到地面以内 ——
+    // 旧数据没记过「地面在哪儿」，按现在的算。
+    if (s.length < 2 || !Number.isFinite(s[0]) || !Number.isFinite(s[1])) return null;
+    return {
+      x: s[0] * window.innerWidth,
+      y: Math.min(s[1] * window.innerHeight, floor),
+    };
+  }
+  if (s && typeof s === 'object') {
+    const x = Number(s.x);
+    const up = Number(s.up);
+    if (!Number.isFinite(x)) return null;
+    return {
+      x: x * window.innerWidth,
+      y: floor - (Number.isFinite(up) ? Math.max(0, up) : 0) * window.innerHeight,
+    };
+  }
+  return null;
+}
+
+function writeSpot(role, x, y, floor) {
+  try {
+    const all = readSpots();
+    all[role] = {
+      x: Math.round((x / Math.max(1, window.innerWidth)) * 1e5) / 1e5,
+      up: Math.round((Math.max(0, floor - y) / Math.max(1, window.innerHeight)) * 1e5) / 1e5,
+    };
+    localStorage.setItem(SPOT_KEY, JSON.stringify(all));
+  } catch (_) { /* 隐私模式下写不进去，位置就只在这一次有效 */ }
+}
+
 export class PetLayer {
   constructor({ onPetClick, onMenu } = {}) {
     this.onPetClick = onPetClick;
@@ -76,8 +126,17 @@ export class PetLayer {
       if (!state.players[role] && !isMine) return;
       if (this.pets.has(role)) return;
       const i = state.roles.indexOf(role);
-      const x = window.innerWidth * (i + 1) / (state.roles.length + 1);
-      const pet = new Pet(this, role, sp, x, this.groundY(), drop);
+      const f = this.sizeFactor();
+      // 地面永远按现在这一屏算；记住的位置只是「这次停在哪儿」。
+      const floor = this.groundY();
+      const spot = readSpot(role, floor);
+      const x0 = spot ? spot.x
+        : window.innerWidth * (i + 1) / (state.roles.length + 1);
+      const y0 = spot
+        ? Math.min(Math.max(spot.y, sp.h * f), floor)
+        : floor;
+      const x = this.freeSpot(x0, y0, sp, role);
+      const pet = new Pet(this, role, sp, x, floor, drop, y0);
       pet.landingText = landingText;
       this.pets.set(role, pet);
     } catch (e) {
@@ -85,6 +144,48 @@ export class PetLayer {
     } finally {
       this.spawning.delete(role);
     }
+  }
+
+  // 这个位置跟别人**真的重叠了**，才往旁边挪一个身位。
+  // 判定是二维的：一上一下分两层站着、彼此根本不挡的人不该被推开
+  // （桌面端以前只比 x，实测把三层站位的人推了 90 / 270 像素）。
+  freeSpot(x, y, sp, role) {
+    const pad = 12;
+    const w = window.innerWidth;
+    const factor = this.sizeFactor();
+    const bodyW = (sp.bodyW || sp.w || 100) * factor;
+    const myH = (sp.h || 240) * factor;
+    const gap = Math.max(56, Math.min(160, bodyW * 0.9));
+    const others = [...this.pets.entries()]
+      .filter(([r]) => r !== role)
+      .map(([, p]) => ({
+        x: p.x,
+        // 还在下落的按落点算：那时 y 是负数，会被当成「上下两层」。
+        // 落点可能是记住的那一层（半空），不是地面。
+        y: (p.phase === 'fall' || p.phase === 'rise')
+          ? (p.landY === null ? p.ground : p.landY) : p.y,
+        w: (p.sp?.bodyW || p.sp?.w || 100) * p.scale,
+        h: p.winH,
+      }));
+    const clamp = (v) => Math.max(pad, Math.min(w - pad, v));
+    const free = (v) => others.every((o) => (
+      Math.abs(o.y - y) >= ((myH + o.h) / 2) * 0.85
+      || Math.abs(o.x - v) >= ((bodyW + o.w) / 2) * 0.9
+    ));
+
+    x = clamp(x);
+    if (free(x)) return x;
+    for (let k = 1; k <= 4; k += 1) {
+      for (const dir of [1, -1]) {
+        const cand = clamp(x + dir * gap * k);
+        if (free(cand)) return cand;
+      }
+    }
+    return x;
+  }
+
+  rememberSpot(role, x, y, floor) {
+    writeSpot(role, x, y, floor);
   }
 
   remove(role) {
@@ -99,13 +200,39 @@ export class PetLayer {
     this.bubbles.clear();
   }
 
-  async rebuild() {
-    const roles = new Set(this.pets.keys());
-    for (const role of state.roles) {
-      if (state.players[role] || (state.me && state.me.role === role)) roles.add(role);
+  // 重建贴图。传了 only 就只换这几个人，其余原样不动 —— 别人换了
+  // 他自己的图，我屏幕上不该所有人都掉一下再站起来。
+  async rebuild(only = null) {
+    let roles;
+    if (only && only.length) {
+      roles = [...only];
+    } else {
+      const s = new Set(this.pets.keys());
+      for (const role of state.roles) {
+        if (state.players[role] || (state.me && state.me.role === role)) s.add(role);
+      }
+      roles = [...s];
     }
-    this.clear();
-    for (const role of roles) await this.spawn(role);
+    // 重建是为了换贴图（素材更新 / 改桌宠大小），不是重新站位：
+    // 用户拖到哪儿就还回哪儿，否则每传一张图所有人的角色都弹回默认位置。
+    const spot = new Map();
+    for (const [role, pet] of this.pets) {
+      if (roles.includes(role)) spot.set(role, [pet.x, pet.y]);
+    }
+    // 局部重建不碰别人的气泡，也不该让主角从天上掉下来 —— 换张图而已。
+    if (only && only.length) {
+      for (const role of roles) this.remove(role);
+    } else {
+      this.clear();
+    }
+    for (const role of roles) {
+      await this.spawn(role, { drop: !only || !only.length });
+      const pet = this.pets.get(role);
+      if (pet && spot.has(role)) {
+        [pet.x, pet.y] = spot.get(role);
+        pet.render();
+      }
+    }
   }
 
   play(role, what, dur) {
@@ -191,7 +318,7 @@ export class PetLayer {
 }
 
 class Pet {
-  constructor(layer, role, sp, x, ground, drop) {
+  constructor(layer, role, sp, x, ground, drop, landY = null) {
     this.layer = layer;
     this.role = role;
     this.sp = sp;
@@ -217,6 +344,12 @@ class Pet {
     this.landingText = '';
     this.drag = null;
     this.alive = true;
+    // 「这次停在哪儿」：可以比地面高（上次被摆在半空）。ground 仍只是地面，
+    // 用来定拖动上限和默认落点 —— 以前两者合一，记住的落点就成了天花板。
+    if (landY !== null && landY < ground - 0.5) {
+      if (drop) this.landY = landY;
+      else this.y = landY;
+    }
 
     this.el = document.createElement('div');
     this.el.className = 'pet';
@@ -358,6 +491,8 @@ class Pet {
     this.vy = 0;
     this.landed = true;
     this.landY = null;
+    // 拖完就记下来：刷新之后还在这儿，不用每次重新摆
+    this.layer.rememberSpot(this.role, this.x, this.y, this.ground);
   }
 
   takeOff() {
@@ -497,10 +632,14 @@ class Pet {
   }
 
   onResize() {
+    // 站着的人跟着地面走（输入框变高、窗口变矮都会挪地面）；摆到半空的人
+    // 保住「离地面那一截」。两边都是相对地面算的，换个窗口高度就不会被
+    // 顶到半空、或者压到输入框上。
+    const gap = Math.max(0, this.ground - this.y);
+    const resting = this.phase === 'idle' && this.drag === null;
     this.ground = this.layer.groundY();
     this.top = -this.winH - 40;
-    // 位置原样保留：放在半空的人不会因为窗口变高/变矮就掉回地面
-    const p = this.clamp(this.x, this.y);
+    const p = this.clamp(this.x, resting ? this.ground - gap : this.y);
     this.x = p.x;
     this.y = p.y;
     if (this.crawlToY !== null) {

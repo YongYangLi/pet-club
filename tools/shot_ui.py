@@ -24,6 +24,7 @@ import petclub.app as APP                                  # noqa: E402
 from petclub.chat import CONV_ALL                          # noqa: E402
 from petclub.claim import ClaimDialog                      # noqa: E402
 from petclub.config import ROLE_NAME, ROLES                # noqa: E402
+from petclub.upload_dlg import UploadDialog                # noqa: E402
 
 OUT = os.path.join(ROOT, 'docs', 'preview')
 
@@ -135,11 +136,31 @@ def main():
     chat._pop = None
 
     print('右键菜单')
+    # 摆上两个自定义动作：文档里要看得到「上下各一条分隔线」的分组
+    app._custom = {
+        'c1': {'label': '跳舞', 'role': ROLES[0], 'pose': 'c1'},
+        'c2': {'label': '比耶', 'role': ROLES[0], 'pose': 'c2'},
+    }
     menu = app.build_self_menu()
     menu.adjustSize()
     qapp.processEvents()
     save(menu, 'menu.png')
     menu.close()
+    app._custom = {}
+
+    print('「加个动作」弹层')
+    role = ROLES[0]
+    up = UploadDialog(role, (200, 240), app._upload_targets(role),
+                      on_restore=lambda _k: None)
+    up._path = os.path.join(ROOT, 'assets', 'roles', role, 'wave.png')
+    up._load()
+    up.show()
+    qapp.processEvents()
+    save(up, 'upload_dlg_new.png', plain=True)
+    up.select('wave')
+    qapp.processEvents()
+    save(up, 'upload_dlg_edit.png', plain=True)
+    up.close()
 
     print('认领窗')
     players = {ROLES[1]: {'role': ROLES[1]}, ROLES[3]: {'role': ROLES[3]}}

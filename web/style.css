@@ -1,5 +1,7 @@
 /* pet-club 网页版：全屏聊天 + 底部宠物舞台。
-   配色和桌面版 theme.py 对齐；布局是全屏的，不照搬 860×620 的窗口尺寸。 */
+   下面的 :root 是给人看的默认值。真源是 assets/theme.json —— web_gateway.py
+   会在响应这个文件时，把那份 json 的颜色拼成一段 :root 追加在末尾（同优先级
+   后者胜）。也就是说改颜色请改 json，桌面端 theme.py 读的是同一份。 */
 
 :root {
   --fg: #111827;
@@ -1130,6 +1132,48 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 .ctx-sub:hover .ctx-submenu,
 .ctx-sub.open .ctx-submenu { display: block; }
 .ctx-arrow { color: var(--muted); font-size: 13px; }
+
+/* 「我的动作」子菜单：一行一个自己改过的动作，右边是删掉 / 还原 */
+.pose-sub {
+  min-width: 218px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.pose-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 7px;
+}
+.pose-row:hover { background: var(--accent-soft); }
+.pose-row-thumb {
+  flex: none;
+  width: 20px;
+  height: 26px;
+  object-fit: contain;
+}
+.pose-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pose-row-tag { flex: none; font-size: 10px; color: var(--muted); }
+.pose-row-act {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--sub);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.pose-row-act:hover { border-color: var(--err); color: var(--err); }
+.pose-row-act:disabled { opacity: .45; cursor: default; }
 .ctx-sep { height: 1px; margin: 4px 6px; background: var(--line); }
 
 .toast {
@@ -1356,3 +1400,243 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   visibility: hidden;
 }
 .rem-row.on .rem-check { visibility: visible; }
+
+/* ---------------- 上传自定义动作 ---------------- */
+/* 弹层比右键菜单高一层：它从菜单里点开，菜单已经关了，但层级要盖住角色层。 */
+.upload-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(17, 24, 39, .38);
+}
+.upload-mask.hidden { display: none; }
+
+.upload-card {
+  width: min(420px, 92vw);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  border-radius: 16px;
+  background: #ffffff;
+  box-shadow: 0 24px 64px rgba(17, 24, 39, .24);
+  overflow: hidden;
+}
+
+.upload-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.upload-x {
+  border: 0;
+  background: transparent;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 2px;
+}
+.upload-x:hover { color: var(--fg); }
+
+.upload-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+}
+
+.upload-pickrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.upload-pick {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 14px;
+  border: 1px dashed var(--accent-edge);
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.upload-pick:hover { background: #e8e9ff; }
+.upload-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+/* 棋盘格底：能一眼看出图有没有真的透明 */
+.upload-stage {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  min-height: 132px;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background-color: #f7f8fb;
+  background-image:
+    linear-gradient(45deg, #e9ebf2 25%, transparent 25%),
+    linear-gradient(-45deg, #e9ebf2 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #e9ebf2 75%),
+    linear-gradient(-45deg, transparent 75%, #e9ebf2 75%);
+  background-size: 12px 12px;
+  background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+}
+.upload-stage canvas { display: block; image-rendering: auto; }
+
+.upload-fields { display: flex; flex-direction: column; gap: 8px; }
+.upload-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.upload-row.hidden { display: none; }
+.upload-row > label {
+  width: 40px;
+  flex: none;
+  color: var(--sub);
+}
+.upload-row input[type="text"],
+.upload-row input:not([type]),
+.upload-row input[type="number"],
+.upload-row select {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--field);
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--fg);
+}
+.upload-row input[type="number"] { max-width: 96px; }
+.upload-row input:focus,
+.upload-row select:focus { outline: 2px solid var(--accent-edge); outline-offset: 0; }
+.upload-unit { color: var(--muted); font-size: 12px; }
+
+/* 「换哪个动作」：缩略图格子。
+   内置动作一律显示出厂原图 —— 六个动作只给一行文字，谁也认不出哪个是挥手。 */
+.upload-pose-row { align-items: flex-start; }
+.pose-pick {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(62px, 1fr));
+  gap: 6px;
+  max-height: 178px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.pose-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 5px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #ffffff;
+  color: var(--sub);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.pose-tile:hover { border-color: var(--accent-edge); background: var(--accent-soft); }
+.pose-tile.on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.pose-tile.is-new { border-style: dashed; }
+.pose-thumb {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 100%;
+  height: 48px;
+  overflow: hidden;
+}
+.pose-thumb img {
+  max-width: 100%;
+  max-height: 48px;
+  object-fit: contain;
+  display: block;
+}
+.pose-tile.is-new .pose-thumb {
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  color: var(--accent);
+}
+.pose-tile-name {
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pose-badge {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  padding: 0 3px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 13px;
+}
+
+.upload-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.upload-note.bad { color: var(--err); }
+
+.upload-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--card-bg);
+}
+.upload-msg {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--sub);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-msg.bad { color: var(--err); }
+.upload-foot .btn { padding: 8px 14px; font-size: 13px; }
+.upload-foot .btn-ghost {
+  background: transparent;
+  color: var(--sub);
+  border: 1px solid var(--border);
+}
+.upload-foot .btn-ghost:hover:not(:disabled) { background: var(--field); color: var(--fg); }

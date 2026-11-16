@@ -38,14 +38,36 @@ class Sprites:
 
     窗口尺寸取所有姿势的最大包围盒，精灵在窗口内「底部居中」贴 ——
     于是不同姿势的脚底始终落在同一个 y 上，换姿势时人不会上下跳。
+
+    `overlay_dir` 是用户上传的覆盖层（见 sprite_sync）：同一文件名优先用
+    覆盖版，覆盖层里多出来的名字（自定义动作）也算这个角色的姿势。
+    出厂素材一份都不少 —— 删掉覆盖文件就自动回到原来的样子。
     """
 
-    def __init__(self, role_dir):
+    def __init__(self, role_dir, overlay_dir=None):
         self.poses = {}
-        for name in POSES:
-            p = os.path.join(role_dir, name + '.png')
-            if os.path.exists(p):
+        names = list(POSES)
+        if overlay_dir:
+            try:
+                for name in sorted(os.listdir(overlay_dir)):
+                    if name.endswith('.png') and name[:-4] not in names:
+                        names.append(name[:-4])
+            except OSError:
+                overlay_dir = None
+        for name in names:
+            p = None
+            if overlay_dir:
+                cand = os.path.join(overlay_dir, name + '.png')
+                if os.path.exists(cand):
+                    p = cand
+            if p is None:
+                p = os.path.join(role_dir, name + '.png')
+            if not os.path.exists(p):
+                continue
+            try:
                 self.poses[name] = Image.open(p).convert('RGBA')
+            except OSError:
+                continue            # 半张坏图不该拖垮整个角色
         if 'idle' not in self.poses:
             raise FileNotFoundError('缺少 idle.png：%s' % role_dir)
         self.w = max(im.width for im in self.poses.values())
@@ -72,12 +94,13 @@ class Sprites:
         return self.poses.get(pose) or self.poses['idle']
 
 
-def load_all(assets_dir, roles):
+def load_all(assets_dir, roles, overlay_dir=None):
     """加载指定角色。素材缺失的角色直接跳过，不让一个坏目录拖垮整个程序。"""
     out = {}
     for r in roles:
         try:
-            out[r] = Sprites(os.path.join(assets_dir, 'roles', r))
+            over = os.path.join(overlay_dir, r) if overlay_dir else None
+            out[r] = Sprites(os.path.join(assets_dir, 'roles', r), over)
         except (OSError, FileNotFoundError):
             pass
     return out

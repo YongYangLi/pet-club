@@ -153,7 +153,6 @@ TIP = {
              'from_one': '让你跳一下', 'from_all': '招呼大家跳一下'},
 }
 
-
 def tip_text(kind, actor, one=False, target=None):
     """一条互动提示的文案。不认识的指令返回空串（不记）。"""
     pat = TIP.get(kind)

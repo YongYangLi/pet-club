@@ -105,7 +105,7 @@ class Pet:
     CRAWL_FRAME_SEC = 0.16      # 一帧 0.16 秒：手脚交替约每秒 3 次
     CRAWL_BODY_PER_SEC = 1.5    # 每秒爬 1.5 个身位；按窗口宽算，缩放档位下观感一致
 
-    def __init__(self, sp, win, x, ground_y, drop=True):
+    def __init__(self, sp, win, x, ground_y, drop=True, land_y=None):
         # 窗口由调用方造好再传进来：角色只关心「怎么动」，不关心窗口是谁家的。
         self.sp = sp
         self.win = win
@@ -123,6 +123,14 @@ class Pet:
         self._crawl_to_y = None         # 逗猫棒是二维的：光标在哪儿就爬到哪儿
         self._land_y = None             # 起飞后落回哪一层（空中松手 / 摆放过的位置）
         self._crawl_t = 0.0             # 爬行循环帧的计时
+        # 「这次下来停在哪儿」：可以比地面高（上次被摆在半空）。ground 仍旧
+        # 是地面，只用来定拖动上限和默认落点，不再兼任「记住的位置」。
+        if land_y is not None:
+            land = min(float(land_y), self.ground)
+            if drop:
+                self._land_y = land
+            else:
+                self.y = land
 
     # ---- 集合：爬过去 ----
 
@@ -254,6 +262,16 @@ class Pet:
     @property
     def held(self):
         return self.phase == 'hold'
+
+    @property
+    def land_y(self):
+        """这次下来停在哪儿：还没落地时是落点，落地后就是当前位置。"""
+        return self.y if self._land_y is None else self._land_y
+
+    @property
+    def land_target(self):
+        """正在空中那只最后会落在哪个高度（没指定就是地面）。"""
+        return self.ground if self._land_y is None else self._land_y
 
     @property
     def airborne(self):

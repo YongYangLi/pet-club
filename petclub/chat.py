@@ -979,7 +979,8 @@ class ChatWindow(CardWindow):
                  remote_on=True, on_remote=None, remote_hint=None,
                  on_update=None, update_label=None, update_enabled=None,
                  on_game=None, on_toy=None, on_fx=None, on_reminder=None,
-                 water_on=False, water_min=45, sit_on=False, sit_min=60):
+                 water_on=False, water_min=45, sit_on=False, sit_min=60,
+                 my_actions_menu=None):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
@@ -999,6 +1000,9 @@ class ChatWindow(CardWindow):
         self.on_leave = on_leave
         self.on_quit = on_quit
         self.on_pet_size = on_pet_size
+        # 「我的动作」子菜单由 App 提供：里面是上传入口和每个改过的项，
+        # 数据（谁有哪些动作）只在 App 那边有。给 None 就整块不出现。
+        self.my_actions_menu = my_actions_menu
         self.on_remote = on_remote
         self.remote_hint = remote_hint or (lambda: '')
         self.remote_on = remote_on
@@ -1114,7 +1118,7 @@ class ChatWindow(CardWindow):
         me_lb.setStyleSheet('color: %s; background: transparent;' % SUB)
         mb.addWidget(me_lb)
         mb.addStretch(1)
-        me_bar.setToolTip('点一下：桌宠大小 / 同步远程互动 / 换身份 / 退出')
+        me_bar.setToolTip('点一下：我的动作 / 桌宠大小 / 同步远程互动 / 换身份 / 退出')
         me_bar.clicked.connect(self._show_me_menu)
         lv.addWidget(me_bar)
         body.addWidget(left)
@@ -1360,7 +1364,7 @@ class ChatWindow(CardWindow):
     # ---------------- 快捷互动 ----------------
 
     def _show_me_menu(self):
-        """左下角头像的菜单：桌宠大小 / 同步远程互动 / 换一个身份 / 退出。
+        """左下角头像的菜单：我的动作 / 桌宠大小 / 同步远程互动 / 换身份 / 退出。
 
         「同步远程互动」和托盘里那一项是同一个开关，只是人坐在聊天窗里时
         不必再去右下角找托盘图标。勾选状态每次开菜单时按当前值重新读。
@@ -1379,6 +1383,9 @@ class ChatWindow(CardWindow):
             act.setChecked(level == self.pet_size)
             act.triggered.connect(
                 lambda _=False, lv=level: self._on_pet_size(lv))
+        if callable(self.my_actions_menu):
+            m.addSeparator()
+            m.addMenu(self.my_actions_menu(m))
         m.addSeparator()
         act = m.addAction('同步远程互动')
         act.setCheckable(True)

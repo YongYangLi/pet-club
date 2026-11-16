@@ -56,7 +56,7 @@ B64_RE = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
 # 起因很实在 —— 客户端发了新版、服务端没重启，客户端那边表现是「图片发了对方收不到」，
 # 而两边看起来都「是最新的」（客户端版本号是对的，服务端根本不会说自己是谁）。
 # 现在握手消息里带一个 v，连上去看一眼就知道。
-SERVER_VERSION = '1.7.1'
+SERVER_VERSION = '1.8.0'
 
 
 def log(msg):
@@ -287,8 +287,13 @@ class Handler(socketserver.BaseRequestHandler):
         except (OSError, TimeoutError):
             pass
         finally:
-            REG.leave(self.client.member)
+            freed = REG.leave(self.client.member)
             REG.unregister(self.client)
+            # 连接断掉（关客户端 / 断网 / 换身份后重连）也要广播一次。
+            # 只有主动发 leave 才广播的话，别人屏幕上的他就一直站着 ——
+            # 要等巡查线程十几秒后才清，表现是「换身份了但那只宠物不走」。
+            if freed:
+                REG.broadcast()
             log('连接断开 %s' % peer)
 
     def dispatch(self, msg):
@@ -323,6 +328,23 @@ class Handler(socketserver.BaseRequestHandler):
             if c.member:
                 c.member.last_seen = time.monotonic()
             c.send({'t': 'pong'})
+
+        elif t == 'sprites':
+            # 「房间里的素材变了」（有人传图 / 换了图 / 删了动作）。
+            # 服务端不下发清单本身：图在哪、rev 是多少，各端自己去网关取，
+            # 这里只负责通知 —— 免得六个身份的动作表在每条连接上存六份。
+            #
+            # 不带附件、不进聊天记录，也不理会伪造：最坏的结果是别人多拉
+            # 一次清单，几十字节，不值得为它加签名。
+            m = c.member
+            if not m:
+                return
+            room = REG.room
+            with room.lock:
+                targets = [x for x in room.members.values() if x.mid != m.mid]
+            log('素材变更 %s → %d 人' % (m.role, len(targets)))
+            for x in targets:
+                x.client.send({'t': 'sprites', 'from': m.role})
 
         elif t == 'event':
             m = c.member
@@ -368,12 +390,17 @@ class Handler(socketserver.BaseRequestHandler):
                     re_out = {'who': r_who, 'text': r_text,
                               'mt': r_mt if r_mt in MTYPES else 'text'}
             to = msg.get('to')
+            # 自定义动作的**名字**。动作 key（c1、c2…）只标识「哪一张图」，
+            # 名字才是「大家在做什么」：我做「比耶」，对方有同名动作就做他
+            # 自己那份（图各人一份，key 各不相同）。服务端不认识动作表，
+            # 只把名字原样捎上，和 kind 一样属于「转发的字段」。
+            an = clean(msg.get('an'), 24)
             # to 也要带上：客户端靠它分清「对大家说的」和「专门对我说的」，
             # 聊天记录才能分别落进群聊和那个人。群发时是 None。
             payload = {'t': 'event', 'kind': kind, 'from': m.role,
                        'text': text, 'to': to if to in ROLES else None,
                        'mt': mt, 'img': img, 'name': name, 'size': size,
-                       're': re_out}
+                       'an': an or None, 're': re_out}
             room = REG.room
             with room.lock:
                 if to in ROLES:

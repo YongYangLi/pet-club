@@ -9,14 +9,16 @@ import os
 import queue
 import random
 import sys
+import threading
 import time
 
 from PIL import Image
-from PySide6.QtCore import QPoint, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication, QIcon
-from PySide6.QtWidgets import QApplication, QMenu, QMessageBox
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
-from . import config, media, store, update, windows
+from . import (config, custom, media, sprite_sync, store, update, upload,
+               windows)
 from .actions import (ORDER, get, media_line, reply_line, say_line,
                       tip_text)
 from .actors import Pet, gather_targets
@@ -26,6 +28,7 @@ from .host import cursor_pos, foreground, hwnd_at, owner_at, tray_icons, work_ar
 from .net import Net
 from .chat import CONV_ALL, ChatWindow
 from .claim import ClaimDialog
+from .upload_dlg import UploadDialog
 from .theme import QSS as UI_QSS
 from .tray import Tray
 from .sprites import load_all
@@ -42,6 +45,13 @@ WATER_MIN = 45          # 喝水提醒默认间隔（分钟）
 SIT_MIN = 60            # 久坐提醒默认间隔（分钟）
 
 OFFLINE_NOTE = '连不上服务器，正在重试…'
+
+# 「players 里没有我」到「我确实被释放了」之间要等这么久。
+# 服务端在连接建立的那一刻就推一条 state，那时 join 还没处理；快速刷新 /
+# 掉线重连时这条一定比 joined 早到。拿它当「我被踢了」，就会把刚上场的
+# 角色全清掉、弹认领窗 —— 网页端靠 joinedAt 的 1.5 秒宽限躲过了这一下。
+ORPHAN_GRACE = 2.0
+HEAL_EVERY = 1.0        # 补漏自愈的节拍（见 _heal_pets）
 
 
 def endpoint(host=None, port=None):
@@ -68,7 +78,16 @@ class App:
         # 所以弹出去的菜单（不是任何窗口的后代）也一样吃得到。
         self.qapp.setStyleSheet(UI_QSS)
 
-        self.sprites = load_all(assets_dir(), ROLES)
+        # 覆盖层是用户上传的姿势（见 sprite_sync）：同名优先，多出来的名字
+        # 就是自定义动作。出厂素材仍从 assets_dir 读，删掉覆盖文件即还原。
+        self.sprites = load_all(assets_dir(), ROLES, config.sprite_cache_dir())
+        # 素材同步：远程只负责分发，渲染只读磁盘，所以它永远在后台线程里跑。
+        self._custom = {}            # 自定义动作（清单里的 actions）
+        self._poses = {}             # 远程有覆盖图的姿势（角色 → {姿势: rev}）
+        self.sprite_q = queue.Queue()
+        self._sprite_busy = False
+        self._sprite_next = 0.0
+        self._sprite_sig = ''
         # 本机偏好：桌宠大小、要不要同步别人发来的互动（见托盘菜单）。
         # 文件坏了 / 没写过都回到默认：默认大小、默认开着远程互动。
         self._prefs = config.load_prefs()
@@ -77,6 +96,9 @@ class App:
                            else 'default')
         self.remote_on = self._prefs.get('remote_actions') is not False
         left, top, right, bottom = work_area()
+        # 工作区原点：任务栏在左边 / 上边时不是 0。位置一律按「相对工作区
+        # 左上角」存取，屏幕坐标 = 原点 + 相对值，任务栏换边也不会整体平移。
+        self.ox, self.oy = float(left), float(top)
         self.sw = right - left
         self.sh = bottom - top
 
@@ -89,11 +111,15 @@ class App:
         self.me = None
         self.players = {}
         self.pets = {}
+        self._me_since = 0.0        # 认领成功的时刻（单调时钟）
+        self._orphan_probe = False  # 「players 里没我」是否已复查过
+        self._heal_at = 0.0
 
         self._pending_role = None
         self._pending_sent = False
         self._claim_open = False
         self._claim_dlg = None
+        self._upload_dlg = None      # 上一次的上传对话框，多留一拍再换
         self._note = ''
         self._state_seen = False
         self._stash = []
@@ -195,10 +221,15 @@ class App:
         self._stash = []
 
         self._pump_update()
+        self._pump_sprites()
         self._tray_tick(now)
         if update.enabled() and self._upd_next and now >= self._upd_next:
             self._upd_next = now + config.UPDATE_EVERY
             self.check_update()
+
+        if now >= self._sprite_next and not self._sprite_busy:
+            self._sprite_next = now + config.SPRITE_SYNC_SEC
+            self._sprite_start()
 
         if self._pending_role and not self._pending_sent and self.net.connected:
             if self.net.send(t='join', role=self._pending_role,
@@ -209,6 +240,8 @@ class App:
             self._last_hb = now
             self.net.send(t='ping')
 
+        self._tick_drag()
+        self._heal_pets(now)
         for pet in list(self.pets.values()):
             pet.update(dt)
         self._tick_toy(now)
@@ -266,9 +299,10 @@ class App:
             dpr = float(scr.devicePixelRatio()) if scr is not None else pet.win.dpr
             cx, cy = cur.x() * dpr, cur.y() * dpr
         half = pet.win.win_w / 2.0
-        target_x = min(max(cx, half), max(half, self.sw - half))
-        target_y = min(max(cy, pet.win.win_h),
-                       max(pet.win.win_h, self.sh - GROUND_MARGIN))
+        target_x = min(max(cx, self.ox + half),
+                       max(self.ox + half, self.ox + self.sw - half))
+        target_y = min(max(cy, self.oy + pet.win.win_h),
+                       max(self.oy + pet.win.win_h, self._floor_y()))
         if abs(cx - pet.x) > 48 or abs(target_y - pet.y) > 48:
             pet.chase(target_x, target_y)
         else:
@@ -320,7 +354,7 @@ class App:
             me = self.me['role'] if self.me else None
             pet = self.pets.get(me) if me else None
             if pet is not None:
-                pet.start_crawl(self.sw / 2.0, pet.y)
+                pet.start_crawl(self.ox + self.sw / 2.0, pet.y)
                 self._reminder_act = (me, 'drink', '该喝水啦，润润嗓子')
 
         act = self._reminder_act
@@ -422,9 +456,17 @@ class App:
             self.on_event(m)
         elif t == 'error':
             self.on_error(m)
+        elif t == 'sprites':
+            # 别人传了图 / 换了图 / 删了动作。不用等下一轮轮询 ——
+            # 把下一轮提前到现在，tick 里会立刻起一个同步线程。
+            self._sprite_next = 0.0
         elif t == '_up':
             self._set_offline(False)
             self._pending_sent = False
+            # 重连后服务端会先推一条「谁都不在」的 state，再处理我的 join。
+            # 从这一刻起算宽限，别把那条当成「我被释放了」。
+            self._me_since = time.monotonic()
+            self._orphan_probe = False
             if self.me:
                 self.net.send(t='join', role=self.me['role'], client='desktop')
             else:
@@ -440,12 +482,29 @@ class App:
         if self.chat is not None and self.chat.alive():
             self.chat.refresh_state()
         if self.me:
-            if not self.players.get(self.me['role']):
-                self.me = None
-                self._clear_pets()
-                self._claim_soon('你的身份已被释放，重新认领一个吧')
-                return
-            self.sync_pets()
+            role = self.me['role']
+            if self.players.get(role):
+                self._orphan_probe = False
+                self.sync_pets()
+            else:
+                # players 里没有我 ≠ 我被释放了。服务端在连接建立时先发一条
+                # state，那一刻 join 还没处理，快速刷新 / 掉线重连时这条
+                # 一定比 joined 早到 —— 照旧逻辑就会把刚上场的人清光、弹认领窗，
+                # 而且 joined 不会再补发，人就一直不回来。
+                now = time.monotonic()
+                if now - self._me_since < ORPHAN_GRACE:
+                    pass
+                elif not self._orphan_probe:
+                    # 过了宽限还是没有我：请服务端现拍一条，别拿可能过期的
+                    # 广播把人清掉。下一轮 state 仍没有我才认。
+                    self._orphan_probe = True
+                    self.net.send(t='query')
+                else:
+                    self.me = None
+                    self._orphan_probe = False
+                    self._clear_pets()
+                    self._claim_soon('你的身份已被释放，重新认领一个吧')
+                    return
         if self._claim_dlg is not None:
             self._claim_dlg.set_players(self.players)
         elif not self.me and not self._pending_role and not self._claim_open:
@@ -455,6 +514,8 @@ class App:
         role = m.get('role')
         first = self.me is None
         self.me = {'role': role}
+        self._me_since = time.monotonic()
+        self._orphan_probe = False
         self._pending_role = None
         self._pending_sent = False
         # joined 一定先于下一次 state 到：那一刻 players 里还没有自己，
@@ -485,6 +546,46 @@ class App:
     def _what(spec):
         """这条指令要让角色「做什么」：起飞的 launch，其余是姿势名。"""
         return 'launch' if spec.get('launch') else spec.get('pose')
+
+    def _custom_like(self, role, label):
+        """某个身份自己的同名动作；没有就是 None。
+
+        自定义动作的名字是**共享语义**，图却是各人一份（`data/custom/<role>/`）：
+        「我做比耶、对方有比耶」时，对方演的是他自己的那张图，不是我的。
+        比名字用 norm_label，和上传时的去重规则完全一致。
+        """
+        want = custom.norm_label(label)
+        if not role or not want:
+            return None
+        for key, spec in self._custom.items():
+            if spec.get('role') != role:
+                continue
+            if custom.norm_label(spec.get('label')) == want:
+                return dict(spec, key=key)
+        return None
+
+    def _perform_custom(self, actor, spec, label, target=None):
+        """自定义动作：各演各的那一份。
+
+        发起人（`actor`）演被点的那条 `spec`；其他人按名字找自己那份 ——
+        我有「比耶」就比我的耶，没有就站着不动（拿别人的图贴过来是别人的样子）。
+        对全员：桌上所有有同名动作的人都跟上；点名：只有被点的那位跟。
+
+        和内置动作的 mirror 是同一件事的两种实现：内置动作全房共用一个姿势名，
+        自定义动作的「姿势名」就是动作名字，各人自己去查表。
+        """
+        if actor in self.pets and spec is not None:
+            self._play(self.pets[actor], self._what(spec), spec.get('dur'))
+        if target:
+            peers = [target] if target != actor else []
+        else:
+            peers = [r for r in self.pets if r != actor]
+        for role in peers:
+            if role not in self.pets:
+                continue
+            mine = self._custom_like(role, label)
+            if mine is not None:
+                self._play(self.pets[role], self._what(mine), mine.get('dur'))
 
     def _play(self, pet, what, dur=None):
         """让一只角色动一下。
@@ -525,7 +626,8 @@ class App:
                                  [p.body_w for p in pets],
                                  host.body_w,
                                  body * GATHER_GAP,
-                                 half, max(half, self.sw - half))
+                                 self.ox + half,
+                                 max(self.ox + half, self.ox + self.sw - half))
         for r, x in zip(roles, targets):
             self.pets[r].start_crawl(x, host.y)
         return roles
@@ -539,10 +641,16 @@ class App:
         if kind == 'fx':
             self.on_fx_event(m)
             return
-        spec = get(kind)
         actor = m.get('from')
-        if spec is None or actor not in self.pets:
+        spec = self._spec(kind)
+        an = m.get('an') if isinstance(m.get('an'), str) else ''
+        # 自定义动作靠**名字**对上号：本地清单里没有这条 kind（对方刚删、
+        # 老版本还没同步到）时，只要事件带了名字，我照样能演自己那份同名动作。
+        is_custom = bool(spec and spec.get('custom')) or (
+            spec is None and bool(an))
+        if actor not in self.pets or (spec is None and not is_custom):
             return
+        label = (an or (spec or {}).get('label') or '') if is_custom else ''
         target = m.get('to') if isinstance(m.get('to'), str) else None
         key = CONV_ALL if not target else actor
         text = (m.get('text') or '').strip()
@@ -553,7 +661,14 @@ class App:
             # 关了「同步远程互动」：桌面一点不动。但聊天记录里仍旧留一条 ——
             # 否则对方以为没发出去，我这边事后也说不清刚才为什么没反应。
             # 传话（kind='say'）不受影响：那是聊天消息，不是互动动作。
-            self._log_tip(kind, ROLE_NAME.get(actor, actor), key)
+            self._log_tip(kind, ROLE_NAME.get(actor, actor), key, label=label)
+            return
+
+        if is_custom:
+            # 自定义动作：谁有同名动作谁就演自己那份（见 _perform_custom）。
+            self._perform_custom(actor, spec, label, target)
+            self.say_role(actor, text or say_line(kind, actor))
+            self._log_tip(kind, ROLE_NAME.get(actor, actor), key, label=label)
             return
 
         self._play(self.pets[actor], self._what(spec), spec.get('dur'))
@@ -652,18 +767,192 @@ class App:
                 self._spawn(role)
         for role in list(self.pets):
             if not self.players.get(role):
-                self.pets.pop(role).destroy()
+                self._drop_pet(role)
 
-    def _spawn(self, role):
+    def _heal_pets(self, now):
+        """补漏：在线却没上场的角色。
+
+        state 与 joined 交错时（快速刷新、换身份、重连）有几条路径会把
+        角色清掉却没再建回来 —— 以前只能等下一次 state 广播，如果那条
+        广播已经错过了，人就再也不出现。这里每秒兜一次。
+
+        **只补不删**：删除仍然只由 on_state 明确说「这个人不在了」来驱动，
+        否则一条过期的快照就能把全屋的人误清一遍。
+        """
+        if now - self._heal_at < HEAL_EVERY:
+            return
+        self._heal_at = now
+        if self._claim_dlg is not None or not self.me:
+            return
+        if not self.players.get(self.me['role']):
+            # state 里还没有我自己：这会儿的 players 不可信，不动
+            return
+        for role in ROLES:
+            if self.players.get(role) and role not in self.pets:
+                self._spawn(role, drop=False)
+
+    def _drop_pet(self, role):
+        """让一只角色下场。
+
+        单只出问题要接着处理别人：这里是「别人换了身份，我屏幕上那只得
+        消失」的唯一落点，断在这儿就会留下一个永远不走的窗口。
+        """
+        pet = self.pets.pop(role, None)
+        if pet is None:
+            return
+        try:
+            pet.destroy()
+        except RuntimeError:
+            # 底层窗口已经没了（Qt 那边先销毁），只剩 Python 壳子，丢掉就行
+            pass
+
+    def _spawn(self, role, drop=True):
+        """让一个角色上场。drop 是「从天上掉下来」那个入场动画。
+
+        换贴图时传 False：图换了但人没走，掉一下反而像是重新加入。
+        """
         sp = self.sprites.get(role)
         if sp is None:
-            return
+            # 素材还没加载好（或这台机器上缺这个角色的图）。不抛，交给
+            # _heal_pets 每秒补一次 —— 以前这里直接 return，角色就永远
+            # 缺席，因为没有任何地方会再调 _spawn。
+            return False
         i = ROLES.index(role)
-        x = self.sw * (i + 1) / (len(ROLES) + 1)
+        # 地面和落点是两件事：
+        #   floor = 脚底最低能到哪儿（拖动上限、掉下来停的地方）
+        #   y     = 这次记住的落点，可以在地面之上（拖到半空摆着的人）
+        # 以前把记住的 y 直接当 ground，等于给这个人封了一层天花板：
+        # 换个工作区高度（任务栏 / 缩放变了）比例乘出来的高度和现在的
+        # 地面差几十像素，人就悬在半空，而且拖都拖不下去。
+        floor = self._floor_y()
+        spot = self._spot_of(role)
+        if spot:
+            x, y = spot
+        else:
+            x = self.ox + self.sw * (i + 1) / (len(ROLES) + 1)
+            y = floor
         win = windows.PetWindow(self, sp)
         win.role = role
-        pet = Pet(sp, win, x, self.sh - GROUND_MARGIN, drop=True)
+        y = min(max(y, self.oy + win.win_h), floor)
+        x = self._free_x(role, x, y, sp)
+        pet = Pet(sp, win, x, floor, drop=drop, land_y=y)
         self.pets[role] = pet
+        return True
+
+    def _floor_y(self):
+        """脚底最低能到哪儿：工作区下沿留出 GROUND_MARGIN。"""
+        return self.oy + self.sh - GROUND_MARGIN
+
+    def _spot_of(self, role):
+        """上次把这个角色放在哪儿，返回屏幕坐标 (x, 脚底 y)。没有就是 None。
+
+        x 存屏幕宽度比例：换一台分辨率不同的机器、或者改过缩放，位置还在
+        原来的相对位置上，不会跑到屏幕外面去。
+
+        y 存的是**离地面多高**，不是屏幕比例。地面会动（任务栏换边、缩放、
+        工作区高度变了），按比例存的话同一个 0.95 在不同工作区里离地面
+        差着几十像素 —— 表现就是「重新进来高度没落回来」。旧数据是
+        [x 比例, y 比例]，按绝对位置读出来再夹到地面以内。
+        """
+        spots = self._prefs.get('spots')
+        if not isinstance(spots, dict):
+            return None
+        spot = spots.get(role)
+        floor = self._floor_y()
+        if isinstance(spot, dict):
+            try:
+                x = self.ox + float(spot['x']) * self.sw
+                up = max(0.0, float(spot.get('up') or 0.0)) * self.sh
+            except (KeyError, TypeError, ValueError):
+                return None
+            return x, floor - up
+        if isinstance(spot, (list, tuple)) and len(spot) >= 2:
+            try:
+                x = self.ox + float(spot[0]) * self.sw
+                y = self.oy + float(spot[1]) * self.sh
+            except (TypeError, ValueError):
+                return None
+            # 老数据：记的是绝对高度。贴着下沿的按旧版的地面处理，
+            # 别让它沉到工作区底下去；摆在半空的照旧留在那一层。
+            return x, min(y, floor)
+        return None
+
+    def _remember_spot(self, role):
+        pet = self.pets.get(role)
+        if pet is None or not self.sw or not self.sh:
+            return
+        spots = self._prefs.get('spots')
+        if not isinstance(spots, dict):
+            spots = {}
+        spots[role] = {
+            'x': round((pet.x - self.ox) / self.sw, 5),
+            'up': round(max(0.0, self._floor_y() - pet.y) / self.sh, 5),
+        }
+        self._prefs['spots'] = spots
+        config.save_prefs(self._prefs)
+
+    def _free_x(self, role, x, y, sp):
+        """这个位置跟别人**真的重叠了**，才往旁边挪一个身位。
+
+        判定是二维的。以前只比 x：一上一下分两层站着、彼此根本不挡的人，
+        也会被推开 —— 实测三个人分别站在屏幕右侧的上/中/下三层，重启后
+        中间那个被推 90px、下面那个被推 270px，用户看到的就是「位置全变了」。
+
+        重叠才让；让也最多 4 个身位，再挤就叠着 —— 总比一个人飞出半个屏好。
+        """
+        pad = 12.0
+        ox = getattr(self, 'ox', 0.0)
+        body_w = float(getattr(sp, 'body_w', 100.0) or 100.0)
+        # 高度要按**实际窗口**算：素材是高分辨率图，窗口按档位缩过
+        # （PET_SIZE_FACTOR），拿原图高当人高会把阈值放大一截。
+        factor = config.PET_SIZE_FACTOR.get(config.PET_SIZE, 1.0)
+        my_h = (float(getattr(sp, 'h', 0) or 0) or 240.0) * factor
+        gap = max(56.0, min(160.0, body_w * 0.9))
+
+        def height_of(pet):
+            win = getattr(pet, 'win', None)
+            h = float(getattr(win, 'win_h', 0) or 0)
+            if h > 0:
+                return h
+            return (float(getattr(getattr(pet, 'sp', None), 'h', 0) or 0)
+                    or 240.0) * factor
+
+        others = []
+        for r, p in self.pets.items():
+            if r == role:
+                continue
+            psp = getattr(p, 'sp', None)
+            # 还在天上掉的用落点算：几人人同时上场时 y 都是 -h，拿它跟
+            # 别人的落点比会被当成「上下两层」，结果全堆在同一处。
+            # 落点可能是记住的那一层（半空），不一定是地面。
+            p_y = (p.land_target
+                   if getattr(p, 'airborne', False) else p.y)
+            others.append((
+                p.x, p_y,
+                float(getattr(psp, 'body_w', body_w) or body_w),
+                height_of(p)))
+
+        def clamp(v):
+            return max(ox + pad, min(ox + self.sw - pad, v))
+
+        def free(v):
+            for other_x, other_y, ow, oh in others:
+                # 脚底中心差超过半个身高 = 上下两层，互不遮挡
+                if abs(other_y - y) >= (my_h + oh) / 2.0 * 0.85:
+                    continue
+                if abs(other_x - v) < (body_w + ow) / 2.0 * 0.9:
+                    return False
+            return True
+
+        x = clamp(x)
+        if free(x):
+            return x
+        for k in range(1, 5):
+            for d in (1, -1):
+                cand = clamp(x + d * gap * k)
+                if free(cand):
+                    return cand
+        return x
 
     def _clear_pets(self):
         self._drag = None
@@ -726,39 +1015,92 @@ class App:
             return
         if d['moved']:
             pet.release()
+            # 拖完就记下来：重启之后还在这儿，不用每次重新摆
+            self._remember_spot(d['role'])
             return
-        if self.me and d['role'] == self.me['role']:
-            # 点哪儿反应不一样：头顶摸头、肚子吓一跳、脚边轻拍。
-            zone = pos.y() / max(1.0, float(win.win_h))
-            self.on_pet_click(zone)
+        # 点哪儿反应不一样：头顶摸头、肚子吓一跳、脚边轻拍。
+        # 点别人也走这条路 —— 但仅限本机：不满足「只看自己」的话，
+        # 摸一下屏幕上的同事就变成往所有人推送一条指令了。
+        self.on_pet_click(self._click_zone(win, pos), d['role'])
+
+    @staticmethod
+    def _click_zone(win, pos):
+        """指针落在角色窗口的哪一层：0 = 头顶，1 = 脚底。
+
+        必须用**窗口自己的逻辑坐标**算（`win.y()` / `win.height()`）：Qt 的
+        鼠标全局坐标是逻辑像素，而 App 里的 pet.x / pet.y / win_h 是屏幕物理
+        像素。本机 125% 缩放时两者差 1.25 倍，拿物理顶端去减逻辑 y 会得到
+        负数，夹到 0 之后三个部位全变成「头顶」—— 摸哪儿都是摸头那句。
+        """
+        top = float(win.y())
+        h = max(1.0, float(win.height()))
+        return min(1.0, max(0.0, (pos.y() - top) / h))
+
+    def _tick_drag(self):
+        """拖动的兜底收尾。
+
+        正常松手会走 on_pet_drop，但窗口是跟着手一起动的：指针快速甩出
+        角色范围再松开时，mouseRelease 可能落到别的窗口（或桌面上），
+        那只角色就永远停在 hold 状态 —— 看起来正是「掉到一半卡在屏幕
+        中间」，而且只能再抓一次才恢复。
+
+        这里不看有没有收到事件，只看左键还在不在按：已经松开了就把这次
+        拖动收掉。位置留在松手处，和正常拖动结束完全一致。
+        """
+        d = self._drag
+        if not d:
+            return
+        if QApplication.mouseButtons() & Qt.LeftButton:
+            return
+        self._drag = None
+        pet = self.pets.get(d['role'])
+        if pet is None or not pet.held:
+            return
+        pet.release()
+        if d.get('moved'):
+            self._remember_spot(d['role'])
 
     def _clamp(self, pet, x, y):
         half = pet.win.win_w / 2.0
-        x = min(max(x, half), max(half, self.sw - half))
-        y = min(max(y, pet.win.win_h), self.sh - GROUND_MARGIN)
+        x = min(max(x, self.ox + half),
+                max(self.ox + half, self.ox + self.sw - half))
+        y = min(max(y, self.oy + pet.win.win_h),
+                self._floor_y())
         return x, y
 
-    def on_pet_click(self, zone=0.35):
-        """点自己那只：睡着就戳醒，否则按部位给不同反应。
+    def on_pet_click(self, zone=0.35, role=None):
+        """点一只角色：睡着就戳醒，否则按部位给不同反应。
 
         这一下是本机的悄悄话，不发 event —— 菜单里的「摸摸头」才是会传给
-        别人的指令。不然手滑点一下自己，六个人的屏幕都得跟着跳。
+        别人的指令。不然手滑点一下，六个人的屏幕都得跟着跳。
+
+        自己那只和对别人的那几只都适用：点谁谁动，但只有我看得见。
+        别人屏幕上什么都不会发生，也不会在聊天里留痕 —— 这是一次「我逗了他
+        一下」，不是他做了什么。
 
         同一个部位连着点三下会触发一句「被戳烦了」的回应（复用 `.me` 台词），
         给「一直点」这件事一个小小的反馈。
         """
-        role = self.me['role'] if self.me else None
+        role = role or (self.me['role'] if self.me else None)
+        mine = bool(self.me and role == self.me['role'])
         pet = self.pets.get(role) if role else None
         if pet is None or pet.held:
             return
-        if self._sit_due:
+        # 「该起来动动了」是给自己的提醒，不应答别人的角色
+        if mine and self._sit_due:
             self._sit_due = False
             pet.act('jump', 1.0)
             self.say_role(role, '起来动动')
             return
+        # 点谁都在对方头上说他自己那句 —— 和点自己完全一样，不加旁白。
+        # 这一下只在本机发生、不进聊天记录，所以说什么不影响别人。
+        def speak(text):
+            if text:
+                self.say_role(role, text)
+
         if pet.pose == 'sleep':
             pet.act('jump', 1.0)
-            self.say_role(role, say_line('wake', role))
+            speak(say_line('wake', role))
             return
 
         if zone < 0.38:
@@ -775,13 +1117,13 @@ class App:
         if len(hist) >= 3 and all(z == part for z, _t in hist[-3:]):
             self._taps[role] = []
             pet.act('jump', 1.3)
-            self.say_role(role, reply_line(key, role) or say_line('wake', role))
+            speak(reply_line(key, role) or say_line('wake', role))
             return
 
         pose, dur = {'head': ('wave', 1.2), 'belly': ('jump', 1.0),
                      'feet': ('knock', 1.2)}[part]
         pet.act(pose, dur)
-        self.say_role(role, say_line(key, role))
+        speak(say_line(key, role))
 
     def on_pet_menu(self, win, pos):
         role = self._role_of(win)
@@ -830,12 +1172,255 @@ class App:
             act.setToolTip(spec.get('hint', ''))
             act.triggered.connect(lambda _=False, k=key, t=to: self.do_action(k, t))
 
+    def _fill_custom(self, menu, to):
+        """我加的动作，单独一组。
+
+        列的**一律是我自己的**：动作是「我做」的，图也只在我这儿
+        （`data/custom/<role>/`）。右键别人只是把目标收窄成「只对他」，
+        菜单内容不变 —— 换成列对方的动作，这里点了也没有能贴在我身上的图：
+        那张图是对方的形象，硬套过来是另一个人的样子。
+
+        一个都没有时整组（含分隔线）不出现，免得空着一堆线把人往
+        「这里是不是还有东西」上引。
+        """
+        me = self.me['role'] if self.me else None
+        mine = [(k, s) for k, s in self._custom.items() if s.get('role') == me]
+        if not mine:
+            return False
+        # 上下各一条普通分隔线：和菜单里其他分组（换身份 / 退出那一组）同一种
+        # 线，观感一致。QMenu 会把**相邻的**两个分隔符合并成一条，所以两条线
+        # 之间必须真的夹着内容 —— 这里夹的就是自定义动作。
+        menu.addSeparator()
+        for key, spec in mine:
+            act = menu.addAction(spec.get('label') or key)
+            act.setToolTip(spec.get('hint', ''))
+            act.triggered.connect(lambda _=False, k=key, t=to: self.do_action(k, t))
+        menu.addSeparator()
+        return True
+
     def _toy_actions(self, menu, role, to):
         """逗一逗 / 烟花：两条普通菜单项，跟在动作后面，不另起分组。"""
         toy = menu.addAction('逗一逗')
         toy.triggered.connect(lambda _=False, r=role: self.start_toy(r))
         fx = menu.addAction('烟花')
         fx.triggered.connect(lambda _=False, t=to: self.play_fireworks(t))
+
+    # ---- 我的动作（上传 / 还原） ----
+
+    @staticmethod
+    def _pose_key(pose):
+        """姿势名 → 动作 key。
+
+        好几个动作共用一张图（打招呼、摸摸头、集合都是 wave），菜单上只该
+        出现一次，所以取 ORDER 里第一个；换图换的是那张文件，几个动作一起变
+        —— 这一点和网页版一致。
+        """
+        for key in ORDER:
+            if get(key).get('pose') == pose:
+                return key
+        return ''
+
+    def _my_edits(self, role):
+        """我改过的东西：被换掉的出厂图 + 自己新增的动作。
+
+        只列「动过的」：六个内置动作全列出来，菜单会长到看不见底，而这些
+        条目除了「我还原一下」之外没有任何用处。
+        """
+        poses = self._poses.get(role) or {}
+        if not poses:
+            return []
+        factory = os.path.join(assets_dir(), 'roles', role)
+        cache = os.path.join(config.sprite_cache_dir(), role)
+        custom_poses = {s.get('pose') for s in self._custom.values()
+                        if s.get('pose')}
+        out = []
+        if 'idle' in poses:
+            out.append({'kind': 'pose', 'key': 'idle', 'pose': 'idle',
+                        'label': '站立', 'icon': os.path.join(factory, 'idle.png')})
+        seen = {'idle'}
+        for key in ORDER:
+            spec = get(key)
+            pose = spec.get('pose')
+            # 内置姿势被某个自定义动作占用了名字，就不算「换掉的出厂图」
+            if not pose or pose in seen or pose in custom_poses or pose not in poses:
+                continue
+            seen.add(pose)
+            out.append({'kind': 'pose', 'key': key, 'pose': pose,
+                        'label': spec['label'],
+                        'icon': os.path.join(factory, pose + '.png')})
+        for key, spec in self._custom.items():
+            if spec.get('role') != role:
+                continue
+            pose = spec.get('pose')
+            if not pose or pose not in poses:
+                continue
+            out.append({'kind': 'custom', 'key': key, 'pose': pose,
+                        'label': spec.get('label') or key,
+                        'icon': os.path.join(cache, pose + '.png')})
+        return out
+
+    def _upload_targets(self, role):
+        """选动作时的候选：新建、站立、每个出厂动作，加上我已建的动作。
+
+        图标一律用**出厂原图**（和网页版一样）：要认的是这个动作本来长什么样，
+        不是自己上次换上去的那张。`badge` 是格子右上角那半个字：「已换」表示
+        这个出厂动作被我换过，「新增」表示这是我自己加的动作。
+        """
+        sp = self.sprites.get(role)
+        factory = os.path.join(assets_dir(), 'roles', role)
+        cache = os.path.join(config.sprite_cache_dir(), role)
+        changed = set((self._poses.get(role) or {}).keys())
+        out = [{'key': '', 'label': '新建动作', 'tip': '传一张新图，多一个动作'}]
+        out.append({'key': 'idle', 'label': '站立',
+                    'icon': os.path.join(factory, 'idle.png'),
+                    'tip': '站着不动的样子',
+                    'badge': '已换' if 'idle' in changed else ''})
+        seen = {'idle'}
+        for key in ORDER:
+            spec = get(key)
+            pose = spec.get('pose')
+            if not pose or pose in seen:
+                continue
+            if sp is not None and pose not in sp.poses:
+                continue
+            seen.add(pose)
+            out.append({'key': key, 'label': spec['label'],
+                        'icon': os.path.join(factory, pose + '.png'),
+                        'tip': spec.get('hint', ''),
+                        'badge': '已换' if pose in changed else ''})
+        for key, spec in self._custom.items():
+            if spec.get('role') != role:
+                continue
+            # 自定义动作不检查本地有没有这张图：它一定在服务器上，
+            # 换图走的是 key，不需要先把图同步下来
+            out.append({'key': key, 'label': spec.get('label') or key,
+                        'icon': os.path.join(cache, (spec.get('pose') or '') + '.png'),
+                        'tip': spec.get('hint', ''),
+                        'badge': '新增'})
+        return out
+
+    def _my_actions_menu(self, parent=None):
+        """「我的动作」子菜单。角色右键和聊天窗左下角头像都挂这一份。"""
+        role = self.me['role'] if self.me else None
+        sub = QMenu('我的动作', parent)
+        if not role:
+            return sub
+        sub.addAction('加个动作…').triggered.connect(
+            lambda _=False, r=role: self.start_upload(r))
+        edits = self._my_edits(role)
+        sub.addSeparator()
+        if not edits:
+            a = sub.addAction('还没改过什么')
+            a.setEnabled(False)
+            return sub
+        for e in edits:
+            tag = '新增' if e['kind'] == 'custom' else '已换'
+            row = sub.addMenu(QIcon(e['icon']), '%s（%s）' % (e['label'], tag))
+            row.addAction('换一张…').triggered.connect(
+                lambda _=False, r=role, k=e['key']: self.start_upload(r, k))
+            if e['kind'] == 'custom':
+                row.addAction('删掉这个动作').triggered.connect(
+                    lambda _=False, r=role, k=e['key'], n=e['label']:
+                    self.drop_edit(r, k, n))
+            else:
+                row.addAction('恢复默认图').triggered.connect(
+                    lambda _=False, r=role, k=e['key']: self.restore_edit(r, k))
+        return sub
+
+    def start_upload(self, role=None, action=''):
+        """选图 → 归一化 → 传服务器。成功了所有人（含本机）都能看到。"""
+        role = role or (self.me['role'] if self.me else None)
+        if not role:
+            return
+        sp = self.sprites.get(role)
+        box = (sp.w, sp.h) if sp is not None else (upload.MAX_W, upload.MAX_H)
+        # 这个名字不能再用：内置动作的名字 + 我自己已有的自定义动作。
+        # 跨身份重名是允许的（各演各的靠它），所以只收自己这一份。
+        taken = [(get(k) or {}).get('label') for k in ORDER]
+        taken += [s.get('label') for s in self._custom.values()
+                  if s.get('role') == role]
+        dlg = UploadDialog(role, box, self._upload_targets(role),
+                           on_restore=lambda k, r=role: self._dialog_restore(r, k),
+                           taken=[t for t in taken if t])
+        if action:
+            dlg.select(action)
+        ok = dlg.exec() == QDialog.Accepted
+        data = dlg.payload() if ok else None
+        # 不 deleteLater：这一下还在菜单派发 triggered 的栈上。留一份引用，
+        # 等下一次上传再换掉 —— 和 self._menu 是同一套办法。
+        self._upload_dlg = dlg
+        if not data:
+            return
+        body, err = self._post_sprite(
+            upload.send, role, data['png'], data.get('action', ''),
+            data.get('label', ''), data.get('dur', 2.0))
+        if body is None:
+            self.toast('没传上去：%s' % err)
+            return
+        self._after_sprite_post(role, body, '动作加好了')
+
+    def restore_edit(self, role, action):
+        """把被换掉的出厂图收回来。"""
+        body, err = self._post_sprite(upload.restore, role, action)
+        if body is None:
+            self.toast('没还原成：%s' % err)
+            return
+        self._after_sprite_post(role, body, '已经改回原来的样子')
+
+    def _dialog_restore(self, role, key):
+        """弹层里那颗「恢复默认图 / 删掉这个动作」的落点。
+
+        自定义动作走和「我的动作」菜单同一条路：先确认，再从服务器删掉。
+        """
+        spec = self._custom.get(key)
+        if spec:
+            self.drop_edit(role, key, spec.get('label') or key)
+        else:
+            self.restore_edit(role, key)
+
+    def drop_edit(self, role, key, label=''):
+        """删掉自己新增的动作（图也会从服务器删掉）。"""
+        # 用自己写的按钮，不用 QMessageBox.question：那个在没装翻译的机器上
+        # 弹出来是 Yes / No，和满屏中文对不上。
+        box = QMessageBox(QMessageBox.Question, '删掉动作',
+                          '删掉「%s」？\n这张图会从服务器删除，别人也看不到了。'
+                          % (label or key), QMessageBox.NoButton)
+        yes = box.addButton('删掉', QMessageBox.AcceptRole)
+        box.addButton('算了', QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not yes:
+            return
+        body, err = self._post_sprite(upload.restore, role, key)
+        if body is None:
+            self.toast('没删成：%s' % err)
+            return
+        self._after_sprite_post(role, body, '那个动作删掉了')
+
+    def _post_sprite(self, fn, *args):
+        """上传/还原都是同步请求：失败必须当场说清楚，不能悄悄咽掉。
+
+        服务器通常在同一个局域网里，一次往返几十毫秒；只有连不上时才等满
+        超时，那种情况下用户本来也需要知道「没连上」。
+        """
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return fn(self.host, self.port + config.HTTP_PORT_OFFSET,
+                      *args), ''
+        except IOError as e:
+            return None, str(e)
+        except Exception as e:               # 兜底：别让一次上传带崩整个应用
+            return None, repr(e)
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _after_sprite_post(self, role, body, line):
+        manifest = body.get('manifest')
+        if isinstance(manifest, dict):
+            self._apply_sprites(manifest, 0)
+        # 告诉房间里的其他人：素材变了，自己去拉一份新的。
+        # 不发的话他们得等最多 SPRITE_SYNC_SEC 才看得到。
+        self.net.send(t='sprites')
+        self.say_role(role, line)
 
     def build_self_menu(self):
         me_role = self.me['role'] if self.me else None
@@ -845,11 +1430,20 @@ class App:
         m.addSeparator()
         self._fill_actions(m, None)
         self._toy_actions(m, me_role, None)
+        # 有自定义动作时，它下面那条线就是「换一个身份」这组的上线，
+        # 不再另加一条 —— 两条挨着的分隔符 Qt 会合并，靠这个吃饭太脆。
+        # 这里的第二个参数是**发给谁**，不是「列谁的动作」。右键自己 = 对全员，
+        # 所以必须是 None —— 传 me_role 会被当成点名发给自己：本机看得见
+        # （do_action 自己演了一遍），别人那边一条都收不到。
+        custom = self._fill_custom(m, None)
         if self.offline:
-            m.addSeparator()
+            if not custom:
+                m.addSeparator()
             act = m.addAction('连不上服务器 · 正在重试')
             act.setEnabled(False)
-        m.addSeparator()
+            m.addSeparator()
+        elif not custom:
+            m.addSeparator()
         m.addAction('换一个身份').triggered.connect(self.do_leave)
         m.addAction('退出').triggered.connect(self.quit)
         return m
@@ -861,6 +1455,7 @@ class App:
         m.addSeparator()
         self._fill_actions(m, role)
         self._toy_actions(m, role, role)
+        self._fill_custom(m, role)
         return m
 
     # ---- 执行 ----
@@ -875,8 +1470,12 @@ class App:
         mirror；指定某个人时只有他跟着做。两边屏幕看到的是**同一件事**，
         所以 mirror 在我这儿也要演一遍 —— 不然我这边只有自己在动，
         看起来像「发没发出去」都不知道。
+
+        自定义动作也走这一条路，只是「跟着做」换了个依据：不是 mirror
+        姿势，而是**自己的同名动作**（`_perform_custom`）。所以发出去的
+        事件除了 kind 还要带上名字（`an`）—— key 是各人自己的图号。
         """
-        spec = get(key)
+        spec = self._spec(key)
         me = self.me['role'] if self.me else None
         if spec is None or me is None:
             return
@@ -886,24 +1485,30 @@ class App:
         pet = self.pets.get(me)
         if pet is None:
             return
+        msg = {'t': 'event', 'kind': key, 'text': ''}
+        if spec.get('custom'):
+            msg['an'] = spec.get('label') or ''
         if to:
-            self.net.send(t='event', kind=key, text='', to=to)
+            msg['to'] = to
+        self.net.send(**msg)
+
+        if spec.get('custom'):
+            self._perform_custom(me, spec, spec.get('label') or '', to)
         else:
-            self.net.send(t='event', kind=key, text='')
-        self._play(pet, self._what(spec), spec.get('dur'))
-        # 对方那边他自己会做这个动作。我这边也得看得见 —— 否则
-        # 「拍一下他会跳」只有他自己知道，发起的人反而什么都没看到。
-        # 对全员时收信的是所有人，所以这边所有别人的角色都跟着做。
-        if spec.get('gather'):
-            # 集合是位移不是姿势：别的角色朝我爬过来，点名时只有那一位动。
-            self._gather(me, [to] if to else None)
-        else:
-            mirror = spec.get('mirror')
-            if mirror:
-                peers = [to] if to else [r for r in self.pets if r != me]
-                for r in peers:
-                    if r in self.pets:
-                        self._play(self.pets[r], mirror, spec.get('dur'))
+            self._play(pet, self._what(spec), spec.get('dur'))
+            # 对方那边他自己会做这个动作。我这边也得看得见 —— 否则
+            # 「拍一下他会跳」只有他自己知道，发起的人反而什么都没看到。
+            # 对全员时收信的是所有人，所以这边所有别人的角色都跟着做。
+            if spec.get('gather'):
+                # 集合是位移不是姿势：别的角色朝我爬过来，点名时只有那一位动。
+                self._gather(me, [to] if to else None)
+            else:
+                mirror = spec.get('mirror')
+                if mirror:
+                    peers = [to] if to else [r for r in self.pets if r != me]
+                    for r in peers:
+                        if r in self.pets:
+                            self._play(self.pets[r], mirror, spec.get('dur'))
         self.say_role(me, say_line(key, me))
         self._log_tip(key, '你', self._conv_key(to),
                       target=ROLE_NAME.get(to, to) if to else None)
@@ -1037,6 +1642,7 @@ class App:
                                    on_quit=self.quit,
                                    on_pet_size=self.set_pet_size,
                                    pet_size=config.PET_SIZE,
+                                   my_actions_menu=self._my_actions_menu,
                                    remote_on=self.remote_on,
                                    on_remote=self.remote_toggle,
                                    remote_hint=self.remote_hint,
@@ -1206,13 +1812,21 @@ class App:
             entry['re'] = re_
         self._store(key, entry)
 
-    def _log_tip(self, kind, actor, key, target=None):
+    def _log_tip(self, kind, actor, key, target=None, label=''):
         """互动痕迹：**TIP 里有这条指令才记**。
 
         sleep / jump 这些环境动作不在 TIP 里，tip_text 给空串，这里就此打住 ——
         不留痕没有第二个开关，判断只发生在 actions.TIP 一处。
         """
         text = tip_text(kind, actor, one=(key != CONV_ALL), target=target)
+        if not text:
+            # 自定义动作不在 TIP 里（那张表是内置指令的静态文案），
+            # 用动作名拼一条 —— 否则传了图、动了，聊天里什么都没有。
+            spec = self._custom.get(kind)
+            name = label or ((spec or {}).get('label') or '')
+            if name:
+                where = ('对%s' % target) if (key != CONV_ALL and target) else ''
+                text = '%s %s发起了「%s」' % (actor, where, name)
         if not text:
             return
         self._store(key, {'kind': 'tip', 'who': actor, 'text': text,
@@ -1287,6 +1901,86 @@ class App:
         if force:
             self._upd_asked = True
         return self._upd_checker.start(config.VERSION, force=force)
+
+    # ---------------- 素材同步 ----------------
+    #
+    # 远程只负责分发：清单说有新图就下到本地缓存；渲染照旧只读磁盘。
+    # 所以整件事放在后台线程，断网 / 服务器挂都不影响角色出现。
+
+    def _sprite_start(self):
+        self._sprite_busy = True
+        threading.Thread(target=self._sprite_job, daemon=True).start()
+
+    def _sprite_job(self):
+        try:
+            manifest, got = sprite_sync.sync(
+                self.host, self.port + config.HTTP_PORT_OFFSET,
+                config.sprite_cache_dir())
+        except Exception as e:          # 断网 / 服务没起：这轮当没更新，下轮再来
+            self._sprite_busy = False
+            self.sprite_q.put(('err', repr(e)))
+            return
+        self._sprite_busy = False
+        self.sprite_q.put(('ok', (manifest, got)))
+
+    def _pump_sprites(self):
+        while True:
+            try:
+                kind, payload = self.sprite_q.get_nowait()
+            except queue.Empty:
+                return
+            if kind == 'ok':
+                self._apply_sprites(*payload)
+
+    def _apply_sprites(self, manifest, got):
+        actions = manifest.get('actions') or {}
+        self._custom = {k: dict(v, key=k) for k, v in actions.items()
+                        if isinstance(v, dict)}
+        poses = manifest.get('poses') or {}
+        self._poses = {r: dict(per) for r, per in poses.items()
+                       if isinstance(per, dict)}
+        sig = repr(sorted((r, p, rev) for r, per in poses.items()
+                          for p, rev in per.items()))
+        changed = sig != self._sprite_sig
+        self._sprite_sig = sig
+        if got or changed:
+            self.reload_sprites()
+
+    def reload_sprites(self):
+        """换掉贴图，位置保住。只有清单真变了才走到这儿。
+
+        换图不是「重新上场」，所以 drop=False：人没走，图换了，不该再从
+        屏幕顶上掉一遍 —— 一两秒后别人传图，全屋的人集体掉一次很怪。
+        """
+        # 先读图，成功了再动人。读失败（半张图 / IO 错误）时保持原样：
+        # 旧的先清掉再加载的写法，一次异常就能把全屋的角色弄没，而清单
+        # 签名已经更新过，不会再触发第二轮。
+        try:
+            fresh = load_all(assets_dir(), ROLES, config.sprite_cache_dir())
+        except Exception:
+            return
+        spot = {r: (p.x, p.y) for r, p in self.pets.items()}
+        # 以「场上现有的人」为准，而不是 players 快照：刚认领成功、state
+        # 还没到的那一瞬间同步素材，快照里是没有自己的，按快照重建就会
+        # 把唯一的角色清掉。
+        roles = [r for r in ROLES
+                 if r in self.pets or self.players.get(r)
+                 or (self.me and r == self.me['role'])]
+        self._clear_pets()
+        self.sprites = fresh
+        for role in roles:
+            self._spawn(role, drop=False)
+            pet = self.pets.get(role)
+            if pet and role in spot:
+                pet.x, pet.y = spot[role]
+
+    def _spec(self, key):
+        """内置动作 + 自定义动作。自定义的只在清单里，统一从这里取。"""
+        spec = get(key)
+        if spec is not None:
+            return spec
+        item = self._custom.get(key)
+        return dict(item, key=key) if item else None
 
     def _pump_update(self):
         while True:

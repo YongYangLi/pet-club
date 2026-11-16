@@ -230,11 +230,42 @@ def main():
           and ev['text'] == '你好呀', repr(ev))
     check('事件不应回传给自己', b.wait('event', timeout=0.5) is None)
 
+    # 自定义动作的名字要透传：收信端靠它找自己那份同名动作。
+    # 服务端不认识动作表，只负责原样捎上（和 kind 一样是转发字段）。
+    b.send(t='event', kind='c7', text='', an='比耶')
+    ev = a.wait('event')
+    check('自定义动作的名字跟着事件走',
+          ev and ev['kind'] == 'c7' and ev.get('an') == '比耶', repr(ev))
+    # 不带名字的老客户端：字段是 None，不是空串，收信端好区分
+    b.send(t='event', kind='wave')
+    ev = a.wait('event')
+    check('不带名字时 an 是 None', ev and ev.get('an') is None, repr(ev))
+
     # ---- 7. 没认领身份不能发事件 ----
     z = C(port)
     z.wait('state')
     z.send(t='event', kind='wave')
     check('没认领身份发互动 → 报错', (z.wait('error') or {}).get('msg') is not None)
+
+    # ---- 8a. 直接断开（不发 leave）也要广播 ----
+    # 别人「换身份」多半是关掉再重开，走的正是这条路。不广播的话，
+    # 他那只宠物会一直在别人屏幕上站着，直到巡查线程下一轮才发现。
+    j2 = C(port)
+    j2.wait('state')
+    j2.send(t='join', role='p4')
+    check('断开测试：先认领 p4', j2.wait('joined') is not None)
+    a.drain('state')
+    j2.close()                     # 不发 leave，直接断
+    # 认领时那条广播可能还在路上，所以不能只等一条：一直等到 p4 空出来
+    st = None
+    for _ in range(30):
+        m2 = a.wait('state', timeout=0.5)
+        if m2 is not None:
+            st = m2
+            if st['players']['p4'] is None:
+                break
+    check('别人直接断开也会广播状态',
+          st is not None and st['players']['p4'] is None, repr(st))
 
     # ---- 8. 主动释放身份，别人可认领 ----
     b.send(t='leave')

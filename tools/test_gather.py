@@ -130,12 +130,14 @@ class FakeApp:
     _play = App._play
     _what = App.__dict__['_what']
     _gather = App._gather
+    _spec = App._spec
     do_action = App.do_action
     on_event = App.on_event
     _conv_key = App._conv_key
 
     def __init__(self, me='p1'):
         self.me = {'role': me}
+        self.ox, self.oy = 0.0, 0.0
         self.sw = 1920.0
         # 托盘里那个「同步远程互动」开关：这里是纯路由测试，按默认（开着）
         self.remote_on = True
@@ -145,11 +147,12 @@ class FakeApp:
         self.net = FakeNet()
         self.bubbles = []
         self.tips = []
+        self._custom = {}          # 没有自定义动作：这些用例只测内置路由
 
     def say_role(self, role, text):
         self.bubbles.append((role, text))
 
-    def _log_tip(self, kind, actor, key, target=None):
+    def _log_tip(self, kind, actor, key, target=None, label=''):
         self.tips.append((kind, actor, key, target))
 
 
@@ -357,7 +360,9 @@ def test_crawl():
     try:
         toy = Pet(None, FakeWin(), 1000.0, 900.0, drop=False)
         fake = types.SimpleNamespace(
-            pets={'p1': toy}, sw=1920.0, sh=1080.0, _toy_role='p1',
+            pets={'p1': toy}, sw=1920.0, sh=1080.0,
+            ox=0.0, oy=0.0, _toy_role='p1',
+            _floor_y=lambda: 1080.0 - appmod.GROUND_MARGIN,
             _toy_until=time.monotonic() + 5.0, _toy_hop=0.0)
         appmod.App._tick_toy(fake, time.monotonic())
         _step(toy, 600)

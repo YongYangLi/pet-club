@@ -34,6 +34,11 @@ HEARTBEAT_SEC = 5.0        # 心跳间隔，服务端 30 秒收不到就判离�
 RECONNECT_SEC = 3.0        # 断线重连的初始退避（会一路退到 20 秒）
 POLL_MS = 33               # 主循环节拍（约 30fps）
 
+# 姿势图和素材清单走网页网关的 HTTP 端口（SERVER_PORT + 1）。
+# 桌面端的 WebSocket 连 8765，静态资源在 8766，两个进程各管一摊。
+HTTP_PORT_OFFSET = 1
+SPRITE_SYNC_SEC = 60.0     # 每隔多久拉一次素材清单（有人在传图才会变）
+
 # ---------------- 桌面角色的大小 ----------------
 #
 # 素材是物理像素。Qt 版按屏幕 dpr 换算，1 个素材像素恒等于 1 个屏幕物理
@@ -72,7 +77,7 @@ def pet_scale(dpr):
 # （tools/build_app.py 读这里），发版时 tools/make_release.py 再把同一个号写进
 # COS 上的清单。三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
-VERSION = '1.7.1'
+VERSION = '1.8.0'
 
 # latest.json 的公网地址。**留空 = 关掉自动更新**（源码模式、内网都是这个状态）。
 # 形状：https://<桶名>.cos.<地域>.myqcloud.com/<目录>/latest.json
@@ -109,6 +114,25 @@ def assets_dir():
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, 'assets')
     return os.path.join(app_dir(), 'assets')
+
+
+def sprite_cache_dir():
+    """用户上传的姿势图同步到哪儿。
+
+    和 files_dir 同样的理由：打包后不能往 exe 旁边写（可能装在 Program Files），
+    而且卸载时会被一起删掉。源码模式放 petclub-data/，一眼能看到刚下下来的图。
+    """
+    if hasattr(sys, '_MEIPASS'):
+        d = os.path.join(host.data_dir(), 'sprites')
+    else:
+        d = os.path.join(app_dir(), 'petclub-data', 'sprites')
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except OSError:
+        d = os.path.join(tempfile.gettempdir(), 'pet-club-sprites')
+        os.makedirs(d, exist_ok=True)
+        return d
 
 
 def files_dir():
