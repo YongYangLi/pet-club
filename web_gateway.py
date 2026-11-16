@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """pet-club 网页版网关：HTTP 静态站 + WebSocket ↔ 裸 TCP 桥接。
 
-桌面端仍然直连 server.py 的 8765；浏览器连这里的 8766。
+桌面端仍然直连 server.py 的 8765；浏览器连这里的 80（可用 --port 改）。
 网关不解析业务消息，只做四件事：
 
   1. 把 web/ 和 assets/ 用 HTTP 发出去
@@ -16,7 +16,7 @@
 
 启动：
     python web_gateway.py
-    python web_gateway.py --host 0.0.0.0 --port 8766 --upstream 127.0.0.1:8765
+    python web_gateway.py --host 0.0.0.0 --port 80 --upstream 127.0.0.1:8765
 """
 
 import argparse
@@ -726,7 +726,9 @@ def parse_upstream(value):
 def main():
     ap = argparse.ArgumentParser(description='pet-club 网页版网关')
     ap.add_argument('--host', default='0.0.0.0', help='监听地址（默认所有网卡）')
-    ap.add_argument('--port', type=int, default=8766, help='网页端口（默认 8766）')
+    ap.add_argument('--port', type=int, default=80, help='网页端口（默认 80）')
+    ap.add_argument('--extra-port', type=int, default=8766,
+                    help='额外监听的端口：桌面端的素材同步还走 8766；0 = 不监听')
     ap.add_argument('--upstream', default='127.0.0.1:8765',
                     help='服务端地址 host:port（默认 127.0.0.1:8765）')
     args = ap.parse_args()
@@ -737,13 +739,35 @@ def main():
         pass
 
     upstream = parse_upstream(args.upstream)
-    with WebServer((args.host, args.port), upstream) as srv:
-        log('pet-club 网页版已启动：http://%s:%d/' % (args.host, args.port))
-        log('上游服务端：%s:%d' % upstream)
-        try:
-            srv.serve_forever()
-        except KeyboardInterrupt:
-            log('收到中断，退出')
+    ports = [args.port]
+    if args.extra_port and args.extra_port != args.port:
+        ports.append(args.extra_port)
+
+    servers = []
+    try:
+        for p in ports:
+            servers.append(WebServer((args.host, p), upstream))
+    except OSError as e:
+        for s in servers:
+            s.server_close()
+        log('端口监听失败：%s' % e)
+        log('80 端口需要 root 权限；也可以 --port 8766 换个端口。')
+        raise SystemExit(1)
+
+    for s in servers:
+        log('网页版已启动：http://%s:%d/' % (args.host, s.server_address[1]))
+    log('上游服务端：%s:%d' % upstream)
+
+    # 第一个端口跑主循环，其余端口各开一条线程（共用同一套 HTTP 处理）。
+    for s in servers[1:]:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    try:
+        servers[0].serve_forever()
+    except KeyboardInterrupt:
+        log('收到中断，退出')
+    finally:
+        for s in servers:
+            s.server_close()
 
 
 if __name__ == '__main__':

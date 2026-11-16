@@ -5,7 +5,10 @@
 #
 # 会启动两个进程：
 #   server.py      8765  桌面端直连的组队服务端（裸 TCP）
-#   web_gateway.py 8766  网页版：HTTP 静态站 + WebSocket 桥
+#   web_gateway.py  80   网页版：HTTP 静态站 + WebSocket 桥
+#
+# 网关默认同时监听 80（给浏览器访问）和 8766（桌面端同步自定义素材）。
+# 80 需要 root 权限；桌面端仍从 8766 拉素材，两个端口都要放行。
 #
 # PID 写到 run/，日志写到 logs/，重复执行不会起第二份。
 set -u
@@ -24,7 +27,8 @@ if ! command -v "$PY" >/dev/null 2>&1; then
 fi
 
 SERVER_PORT=${SERVER_PORT:-8765}
-WEB_PORT=${WEB_PORT:-8766}
+WEB_PORT=${WEB_PORT:-80}
+WEB_EXTRA_PORT=${WEB_EXTRA_PORT:-8766}
 
 start_one() {
     name=$1
@@ -50,7 +54,7 @@ echo "== pet-club 启动 =="
 start_one server "$PY" server.py --host 0.0.0.0 --port "$SERVER_PORT"
 sleep 1
 start_one web "$PY" web_gateway.py --host 0.0.0.0 --port "$WEB_PORT" \
-    --upstream "127.0.0.1:$SERVER_PORT"
+    --extra-port "$WEB_EXTRA_PORT" --upstream "127.0.0.1:$SERVER_PORT"
 sleep 1
 
 # 起完立刻确认一下，别让「看起来启动了」骗过去
@@ -74,12 +78,17 @@ IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 
 echo
 echo "== 启动完成 =="
-echo "  网页版：    http://$IP:$WEB_PORT/"
+if [ "$WEB_PORT" = "80" ]; then
+    echo "  网页版：    http://$IP/"
+else
+    echo "  网页版：    http://$IP:$WEB_PORT/"
+fi
 echo "  桌面端连：  $IP:$SERVER_PORT"
+echo "  素材同步：  $IP:$WEB_EXTRA_PORT（桌面端自定义素材走的端口）"
 echo
 echo "如果从外网还是打不开，检查防火墙："
-echo "  firewall-cmd --add-port=$SERVER_PORT/tcp --add-port=$WEB_PORT/tcp --permanent"
+echo "  firewall-cmd --add-port=$SERVER_PORT/tcp --add-port=$WEB_PORT/tcp --add-port=$WEB_EXTRA_PORT/tcp --permanent"
 echo "  firewall-cmd --reload"
-echo "阿里云/腾讯云控制台的安全组也要放行 $SERVER_PORT、$WEB_PORT 两个 TCP 端口。"
+echo "阿里云/腾讯云控制台的安全组也要放行 $SERVER_PORT、$WEB_PORT、$WEB_EXTRA_PORT 三个 TCP 端口。"
 echo
 echo "停服务：sh deploy/stop.sh    看状态：sh deploy/status.sh"

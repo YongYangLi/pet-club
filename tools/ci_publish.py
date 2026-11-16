@@ -139,24 +139,51 @@ def main(argv=None):
         print('\n先安装依赖：pip install cos-python-sdk-v5')
         return 1
 
+    # 海外 runner 直连上海桶可能很慢。给每个请求加超时，并允许打开 COS
+    # 全球加速（控制台开启后设 COS_RAPID=1，会走 cosrapid.<region> 域名）。
+    rapid = (os.environ.get('COS_RAPID') or '').strip() in ('1', 'true', 'yes')
     client = CosS3Client(CosConfig(
-        Region=region, SecretId=sid, SecretKey=skey, Scheme='https'))
+        Region=region, SecretId=sid, SecretKey=skey, Scheme='https',
+        Timeout=60, EnableRapidDomain=rapid))
+    if rapid:
+        print('已启用 COS 全球加速域名')
 
     def key(name):
         return ('%s/%s' % (prefix, name)) if prefix else name
 
-    with open(artifact, 'rb') as f:
-        client.put_object(
-            Bucket=bucket, Key=key(remote), Body=f,
+    last = [-1]
+
+    def progress(done, total):
+        pct = int(done * 100 / max(1, total))
+        if pct >= last[0] + 10 or pct >= 100:
+            last[0] = pct
+            print('  上传 %s：%d%%（%.1f / %.1f MB）' % (
+                remote, pct, done / 1048576.0, total / 1048576.0), flush=True)
+
+    print('\n开始上传 %s（%.1f MB）…' % (remote, size / 1048576.0), flush=True)
+    try:
+        client.upload_file(
+            Bucket=bucket, Key=key(remote), LocalFilePath=artifact,
+            PartSize=8, MAXThread=4, EnableMD5=False,
+            progress_callback=progress,
             ContentType=('application/zip' if target == 'mac'
                          else 'application/octet-stream'),
             CacheControl='no-cache')
+    except Exception as e:                       # 网络 / 权限 / 超时都要说清楚
+        print('\n上传失败：%s' % e)
+        print('可以先用 --dry-run 看清单，或在网络更好的机器上重跑本脚本。')
+        return 1
 
     body = (json.dumps(info, ensure_ascii=False, indent=2) + '\n').encode('utf-8')
-    client.put_object(
-        Bucket=bucket, Key=key(manifest_name), Body=body,
-        ContentType='application/json; charset=utf-8',
-        CacheControl='no-store')
+    print('开始上传清单 %s…' % manifest_name, flush=True)
+    try:
+        client.put_object(
+            Bucket=bucket, Key=key(manifest_name), Body=body,
+            ContentType='application/json; charset=utf-8',
+            CacheControl='no-store')
+    except Exception as e:
+        print('\n清单上传失败：%s' % e)
+        return 1
 
     print('\n已覆盖上传（桶里只保留最新一份）：')
     print('  %s/%s' % (base, remote))

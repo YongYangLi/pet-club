@@ -10,7 +10,8 @@ RUN_DIR="$APP_DIR/run"
 LOG_DIR="$APP_DIR/logs"
 
 SERVER_PORT=${SERVER_PORT:-8765}
-WEB_PORT=${WEB_PORT:-8766}
+WEB_PORT=${WEB_PORT:-80}
+WEB_EXTRA_PORT=${WEB_EXTRA_PORT:-8766}
 
 echo "== 运行状态 =="
 for name in server web; do
@@ -27,7 +28,7 @@ done
 
 echo
 echo "== 端口 =="
-for port in "$SERVER_PORT" "$WEB_PORT"; do
+for port in "$SERVER_PORT" "$WEB_PORT" "$WEB_EXTRA_PORT"; do
     if command -v ss >/dev/null 2>&1; then
         line=$(ss -lnt 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {print $4; exit}')
     else
