@@ -569,12 +569,16 @@ class App:
 
         发起人（`actor`）演被点的那条 `spec`；其他人按名字找自己那份 ——
         我有「比耶」就比我的耶，没有就站着不动（拿别人的图贴过来是别人的样子）。
+        右键别人的动作时 `spec` 属于对方，只有对方演，发起人不动。
         对全员：桌上所有有同名动作的人都跟上；点名：只有被点的那位跟。
 
         和内置动作的 mirror 是同一件事的两种实现：内置动作全房共用一个姿势名，
         自定义动作的「姿势名」就是动作名字，各人自己去查表。
         """
-        if actor in self.pets and spec is not None:
+        if actor in self.pets and spec is not None \
+                and spec.get('role') in (None, actor):
+            # 动作属于发起人就由他演；右键别人的动作时 spec 是对方的，
+            # 发起人没有那张图，不能硬套（会把自己的姿势顶成 idle）。
             self._play(self.pets[actor], self._what(spec), spec.get('dur'))
         if target:
             peers = [target] if target != actor else []
@@ -1173,18 +1177,18 @@ class App:
             act.triggered.connect(lambda _=False, k=key, t=to: self.do_action(k, t))
 
     def _fill_custom(self, menu, to):
-        """我加的动作，单独一组。
+        """被右键的那个人注册的动作，单独一组。
 
-        列的**一律是我自己的**：动作是「我做」的，图也只在我这儿
-        （`data/custom/<role>/`）。右键别人只是把目标收窄成「只对他」，
-        菜单内容不变 —— 换成列对方的动作，这里点了也没有能贴在我身上的图：
-        那张图是对方的形象，硬套过来是另一个人的样子。
-
-        一个都没有时整组（含分隔线）不出现，免得空着一堆线把人往
+        列的是**目标角色自己**的动作（`data/custom/<role>/` 里那份）：
+        右键自己就是我的，右键别人就是他的。右键谁、指令就作用在谁身上 ——
+        动作的图属于角色本人，列别人的动作没有意义。
+        目标没有动作时整组（含分隔线）不出现，免得空着一堆线把人往
         「这里是不是还有东西」上引。
         """
         me = self.me['role'] if self.me else None
-        mine = [(k, s) for k, s in self._custom.items() if s.get('role') == me]
+        role = to or me
+        mine = [(k, s) for k, s in self._custom.items()
+                if s.get('role') == role]
         if not mine:
             return False
         # 上下各一条普通分隔线：和菜单里其他分组（换身份 / 退出那一组）同一种

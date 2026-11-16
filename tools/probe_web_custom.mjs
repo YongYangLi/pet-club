@@ -177,16 +177,15 @@ try {
   await waitFor(A, landed('p2'), 15000, 'p1 页面上 p2 落地');
   await waitFor(B, landed('p2'), 15000, 'p2 自己页面落地');
 
-  // —— 右键别人：菜单列的是我自己的动作 ——
+  // —— 右键别人：菜单列的是那个人的动作 ——
   await rightClick(A, 'p2');
   const menu = await evalJS(A, `[...document.querySelectorAll('#ctx-menu .ctx-item')]
     .map(b => b.dataset.key || b.dataset.cmd).join(',')`);
-  chk('右键 p2 的菜单里有我的「' + LABEL + '」', menu.includes(keyA), menu);
-  chk('菜单里没有对方的同名动作（那是他的图）',
-    !menu.split(',').includes(keyB), menu);
+  chk('右键 p2 的菜单里有 p2 的「' + LABEL + '」', menu.includes(keyB), menu);
+  chk('右键 p2 不列我自己的同名动作', !menu.split(',').includes(keyA), menu);
 
-  // —— 点名 p2：我和他各做各的那份 ——
-  await evalJS(A, `document.querySelector('#ctx-menu [data-key="${keyA}"]').click()`);
+  // —— 点名 p2：被点的人演他自己那份 ——
+  await evalJS(A, `document.querySelector('#ctx-menu [data-key="${keyB}"]').click()`);
   await sleep(500);
 
   const aP1 = await evalJS(A, `window.petclub.pets.get('p1').poseName`);
@@ -194,9 +193,9 @@ try {
   const bP1 = await evalJS(B, `window.petclub.pets.get('p1').poseName`);
   const bP2 = await evalJS(B, `window.petclub.pets.get('p2').poseName`);
 
-  chk('发起方（p1）演自己那份', aP1 === keyA, aP1);
+  chk('发起方（p1）不套用对方的图', aP1 === 'idle', aP1);
   chk('被点的人（p2）演他自己那份', aP2 === keyB, aP2);
-  chk('对方屏幕上也是各演各的', bP1 === keyA && bP2 === keyB, `${bP1}/${bP2}`);
+  chk('对方屏幕上也是 p2 演自己那份', bP1 === 'idle' && bP2 === keyB, `${bP1}/${bP2}`);
 
   // 提示落在和 p2 的会话里
   await evalJS(A, `window.petclub.chat.switch('p2')`);

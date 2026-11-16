@@ -363,15 +363,15 @@ def test_app_wiring():
     menu2 = Menu()
     App._fill_actions(stub, menu2, 'p1')
     App._fill_custom(stub, menu2, 'p1')
-    check('右键别人时列他的动作', '跳舞' in [a.label for a in menu2.actions])
+    check('右键 p1 列 p1 的动作', '跳舞' in [a.label for a in menu2.actions])
 
-    # 菜单内容不随右键对象变：动作是「我做」的，列别人的点了也没图可演
+    # 列的必须是被右键那个人的动作：右键谁，指令就作用在谁身上
     menu3 = Menu()
     App._fill_actions(stub, menu3, 'p2')
     App._fill_custom(stub, menu3, 'p2')
     labels3 = [a.label for a in menu3.actions]
-    check('右键 p2 仍然列我自己的动作', '跳舞' in labels3, str(labels3))
-    check('右键 p2 不列 p2 的动作', '转圈' not in labels3, str(labels3))
+    check('右键 p2 列 p2 的动作', '转圈' in labels3, str(labels3))
+    check('右键 p2 不列 p1 的动作', '跳舞' not in labels3, str(labels3))
 
     stub.tips = []
     App._log_tip(stub, 'c1', '猥琐', 'p1')

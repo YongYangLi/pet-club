@@ -477,7 +477,9 @@ class App {
    * 对全员：所有有同名动作的人都跟上；点名：只有被点的那位跟。
    */
   performCustom(actor, spec, label, target = null) {
-    if (spec && this.pets.has(actor)) {
+    // 动作属于发起人才由他演；右键别人的动作时 spec 是对方的，发起人没有
+    // 那张图，不能硬套（会把自己的姿势顶成 idle）。
+    if (spec && this.pets.has(actor) && (!spec.role || spec.role === actor)) {
       this.pets.play(actor, what(spec), spec.dur);
     }
     let peers;
