@@ -1421,6 +1421,10 @@ class App:
         manifest = body.get('manifest')
         if isinstance(manifest, dict):
             self._apply_sprites(manifest, 0)
+        # 响应里只有清单，图还在服务器上：本地缓存没换之前 reload_sprites
+        # 读到的仍是旧图。所以这里要把下一轮同步提前到现在 —— 否则自己刚换
+        # 的图要等下一次 60 秒轮询才刷出来（别人收到通知反而比自己快）。
+        self._sprite_next = 0.0
         # 告诉房间里的其他人：素材变了，自己去拉一份新的。
         # 不发的话他们得等最多 SPRITE_SYNC_SEC 才看得到。
         self.net.send(t='sprites')
@@ -1917,7 +1921,7 @@ class App:
 
     def _sprite_job(self):
         try:
-            manifest, got = sprite_sync.sync(
+            manifest, got, pruned = sprite_sync.sync(
                 self.host, self.port + config.HTTP_PORT_OFFSET,
                 config.sprite_cache_dir())
         except Exception as e:          # 断网 / 服务没起：这轮当没更新，下轮再来
@@ -1925,7 +1929,7 @@ class App:
             self.sprite_q.put(('err', repr(e)))
             return
         self._sprite_busy = False
-        self.sprite_q.put(('ok', (manifest, got)))
+        self.sprite_q.put(('ok', (manifest, got, pruned)))
 
     def _pump_sprites(self):
         while True:
@@ -1936,7 +1940,7 @@ class App:
             if kind == 'ok':
                 self._apply_sprites(*payload)
 
-    def _apply_sprites(self, manifest, got):
+    def _apply_sprites(self, manifest, got, pruned=0):
         actions = manifest.get('actions') or {}
         self._custom = {k: dict(v, key=k) for k, v in actions.items()
                         if isinstance(v, dict)}
@@ -1947,7 +1951,9 @@ class App:
                           for p, rev in per.items()))
         changed = sig != self._sprite_sig
         self._sprite_sig = sig
-        if got or changed:
+        # pruned 也要重读：恢复默认时远程只是**少了**一张图，本地一张都不下载，
+        # 但缓存里那张必须删掉之后重新读，否则界面上一直显示旧的自定义图。
+        if got or pruned or changed:
             self.reload_sprites()
 
     def reload_sprites(self):

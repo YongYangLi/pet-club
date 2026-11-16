@@ -296,10 +296,11 @@ def test_sync_prune():
         for name in ('c1', 'c2', 'wave'):
             with open(os.path.join(cache, 'p1', name + '.png'), 'wb') as f:
                 f.write(png(10, 10))
-        sprite_sync._prune(cache, {'p1': {'c1': 'x', 'wave': 'y'}})
+        pruned = sprite_sync._prune(cache, {'p1': {'c1': 'x', 'wave': 'y'}})
         left = sorted(os.listdir(os.path.join(cache, 'p1')))
         check('远程删掉的图被清掉', 'c2.png' not in left, str(left))
         check('远程还留着的图没动', 'c1.png' in left and 'wave.png' in left)
+        check('删掉几张要回传（恢复默认才知道该重读）', pruned == 1, str(pruned))
     finally:
         shutil.rmtree(cache, ignore_errors=True)
 
@@ -393,11 +394,14 @@ def test_app_wiring():
 
     quiet = types.SimpleNamespace(
         net=Net(),
+        _sprite_next=999.0,
         _apply_sprites=lambda m, n: None,
         say_role=lambda r, t: None)
     App._after_sprite_post(quiet, 'p1', {'manifest': {}}, '动作加好了')
     check('传完素材会通知全房',
           any(m.get('t') == 'sprites' for m in sent), str(sent))
+    check('传完素材自己立刻同步，不用等 60 秒',
+          quiet._sprite_next == 0.0, str(quiet._sprite_next))
 
     stub2 = types.SimpleNamespace(_sprite_next=999.0)
     App.on_msg(stub2, {'t': 'sprites'})

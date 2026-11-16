@@ -83,11 +83,14 @@ def _write(path, data):
 
 
 def _prune(cache_dir, poses):
-    """删掉远程已经不存在的图。
+    """删掉远程已经不存在的图。返回删掉的张数。
 
     必须删：某个姿势被「恢复默认」之后，远程清单里就没有它了，
     缓存还留着的话桌面端会一直显示那张自定义图，怎么刷都不回去。
+    删掉的张数要回传：只有「下载」和「删除」都算素材变了，调用方才知道
+    该不该重新读图（恢复默认时一张都不会下载）。
     """
+    removed = 0
     for role in os.listdir(cache_dir):
         d = os.path.join(cache_dir, role)
         if not os.path.isdir(d):
@@ -97,14 +100,16 @@ def _prune(cache_dir, poses):
             if name.endswith('.png') and name[:-4] not in want:
                 try:
                     os.remove(os.path.join(d, name))
+                    removed += 1
                 except OSError:
                     pass
+    return removed
 
 
 def sync(host, http_port, cache_dir, timeout=TIMEOUT):
     """拉清单 → 只下变的图 → 删掉远程已删除的图。
 
-    返回 (manifest, 下载张数)。失败抛异常，调用方决定怎么兜底 ——
+    返回 (manifest, 下载张数, 删除张数)。失败抛异常，调用方决定怎么兜底 ——
     这里不做「静默失败」：上层要能区分「没更新」和「连不上」。
     """
     raw = _get(manifest_url(host, http_port), timeout)
@@ -141,6 +146,6 @@ def sync(host, http_port, cache_dir, timeout=TIMEOUT):
             revs.setdefault(role, {})[pose] = rev
             got += 1
 
-    _prune(cache_dir, poses)
+    pruned = _prune(cache_dir, poses)
     save_revs(cache_dir, revs)
-    return manifest, got
+    return manifest, got, pruned
