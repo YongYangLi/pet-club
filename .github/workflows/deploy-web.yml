@@ -63,7 +63,8 @@ jobs:
           tar -czf /tmp/pet-club-web.tar.gz \
             --exclude __pycache__ \
             --exclude 'assets/_gen' \
-            server.py web_gateway.py petclub web deploy assets
+            server.py web_gateway.py petclub web deploy assets \
+            tools/claim_codes.py
 
           # 素材漏了的话，线上就是「代码是新的、图全 404」，最难查的故障之一。
           # 这里先自证包里有东西，比发布完再发现好。
