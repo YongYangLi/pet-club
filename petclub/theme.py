@@ -495,13 +495,25 @@ def field(placeholder='', width=None):
     return e
 
 
+_AVATAR_CACHE = {}
+
+
 def avatar(role, size):
     """圆形头像：把整只角色（全身）缩进圆里，和网页版保持同一观感。
 
     以前裁的是「头」：只看得到脸，会议栏里分不清谁是谁。现在按 alpha
     包围盒取整身，等比缩进一个正方形画布，再套圆形蒙版。
     返回 QPixmap（已按 size 抗锯齿缩放），拿不到就返回 None。
+
+    结果按 (角色, 尺寸) 缓存：聊天记录每切一次会话都会把整段消息重建一遍，
+    200 条就是两百次全身图解码 + LANCZOS 缩放（实测单次 3ms 左右），
+    不清缓存的话光是「点头像」就能把切换拖到几百毫秒。
+    出厂素材在运行期不会变，缓存是安全的。
     """
+    key = (role, int(size))
+    cached = _AVATAR_CACHE.get(key)
+    if cached is not None:
+        return cached
     path = os.path.join(assets_dir(), 'roles', role, 'idle.png')
     try:
         from PIL import Image, ImageChops, ImageDraw
@@ -537,4 +549,5 @@ def avatar(role, size):
 
     from .windows import to_qimage
     pm = QPixmap.fromImage(to_qimage(canvas))
+    _AVATAR_CACHE[key] = pm
     return pm

@@ -28,9 +28,9 @@ from petclub import actions, media                               # noqa: E402
 from petclub.app import App                                      # noqa: E402
 from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CELL_GAP, CHIP_H,  # noqa: E402
                           CHROME, COLS, EMOJI_FAMILY, LIST_W, MIN_H, MIN_W,
-                          PREVIEW_BOX, SEL_BG, SEL_FG, TALK_BG, BubbleText,
-                          ChatWindow, Composer, CONV_ALL, ImageViewer, MeBar,
-                          StatePill)
+                          MSG_PAGE, PREVIEW_BOX, SEL_BG, SEL_FG, TALK_BG,
+                          BubbleText, ChatWindow, Composer, CONV_ALL,
+                          ImageViewer, MeBar, StatePill)
 from petclub.config import ROLES, assets_dir                     # noqa: E402
 
 PASS = []
@@ -581,13 +581,54 @@ def main():
 
     tall.field.setText('刚发出去的一条')
     tall.send()
+    tall_host = tall.msg_host
     tall.log[CONV_ALL].append({'kind': 'msg', 'mt': 'text', 'who': 'me',
                                'text': '刚发出去的一条', 'ts': time.time()})
     tall.on_new(CONV_ALL)
     QTest.qWait(150)
     chk('发完自己那条仍然贴底（不会只露半截）',
         sb.value() == sb.maximum(), (sb.value(), sb.maximum()))
+    chk('新消息只追加一行，不重建整段',
+        tall.msg_host is tall_host and tall._row_count == 31,
+        (tall.msg_host is tall_host, tall._row_count))
     tall.hide()
+
+    print('\n--- 大量历史：懒加载 / 会话缓存 ---')
+    big_log = {CONV_ALL: [{'kind': 'msg', 'mt': 'text', 'who': 'p2',
+                           'text': '第 %d 条消息' % i,
+                           'ts': 1000000 + i * 10} for i in range(200)]}
+    big = ChatWindow(None, me='p1', log=big_log, is_online=lambda r: True)
+    big.resize(720, 480)
+    big.show()
+    QTest.qWait(100)
+    chk('切进来先只铺最近一页', big._row_count == MSG_PAGE,
+        (big._row_count, big._shown_from))
+    chk('更早的消息有入口',
+        big._earlier_btn is not None
+        and '还有 %d 条' % (200 - MSG_PAGE) in big._earlier_btn.text(),
+        big._earlier_btn.text() if big._earlier_btn else '')
+    big._load_earlier()
+    QTest.qWait(80)
+    chk('点一次再补一页', big._row_count == MSG_PAGE * 2, big._row_count)
+    big._load_earlier()
+    QTest.qWait(80)
+    chk('补到头之后入口收起来',
+        big._shown_from == 0 and big._row_count == 200
+        and big._earlier_btn is None,
+        (big._shown_from, big._row_count, big._earlier_btn))
+
+    host_all = big.msg_host
+    big.switch('p2')
+    big.switch(CONV_ALL)
+    chk('切回来直接复用现成的控件树', big.msg_host is host_all)
+
+    big.switch('p2')
+    big.log[CONV_ALL].append({'kind': 'msg', 'mt': 'text', 'who': 'p2',
+                              'text': '缓存期间来的新消息', 'ts': 1009999})
+    big.on_new(CONV_ALL)          # 在别的会话里收到 → 缓存作废
+    big.switch(CONV_ALL)
+    chk('缓存期间有新消息，切回来会重建', big.msg_host is not host_all)
+    big.hide()
 
     print('\n--- 桌宠大小三档 ---')
     sizes = []

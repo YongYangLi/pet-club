@@ -1656,7 +1656,8 @@ class App:
                                    remote_hint=self.remote_hint,
                                    on_update=self.update_action,
                                    update_label=self.update_label,
-                                   update_enabled=lambda: update.enabled())
+                                   update_enabled=lambda: update.enabled(),
+                                   initial_key=key)
             self.chat.switch(key)
             self.chat.show()
         else:

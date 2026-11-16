@@ -50,6 +50,8 @@ ROW_H = 62
 HEAD_H = 56                 # 右侧会话标题行
 PASTE_MAX = 3               # 一次最多带几个附件：多了就是刷屏
 GAP_TIME = 300.0
+MSG_PAGE = 80              # 切到会话时先铺最近多少条：上面的更早消息按需加载
+MSG_ROWS_MAX = 200         # 铺到这么多行就整段收一次（本地历史的上限就是 200 条）
 BUBBLE_MAX = 460                # 气泡最宽（窗口够宽时才吃得到，窄了按聊天区收）
 CELL = 56                   # 拾取面板一格；表情和贴纸都按这个放大
 CELL_GAP = 2                # 格子之间的缝（算面板尺寸时要跟着一起算）
@@ -980,7 +982,7 @@ class ChatWindow(CardWindow):
                  on_update=None, update_label=None, update_enabled=None,
                  on_game=None, on_toy=None, on_fx=None, on_reminder=None,
                  water_on=False, water_min=45, sit_on=False, sit_min=60,
-                 my_actions_menu=None):
+                 my_actions_menu=None, initial_key=CONV_ALL):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
@@ -1018,6 +1020,15 @@ class ChatWindow(CardWindow):
         self.key = CONV_ALL
         self.query = ''
         self._rows = {}
+        # 每个会话的消息区都留一份已经渲染好的控件树：切回来时直接换上去，
+        # 不用把两三百行拆了重建。只留最近两个，内存不至于失控。
+        self._shown_key = None
+        self._host_cache = {}
+        self._host_order = []
+        self._last_ts = None        # 当前消息区最后一行的时间戳（增量追加用）
+        self._row_count = 0         # 当前消息区里已经铺了多少条记录
+        self._shown_from = 0        # 当前铺出来的第一条在完整历史里的下标
+        self._earlier_btn = None    # 「查看更早的消息」那一行
         self._pop = None
         self._pop_prev = None       # 刚关掉的弹层，别在点击栈里析构
         self._tabs = {}
@@ -1040,7 +1051,7 @@ class ChatWindow(CardWindow):
 
         self._build()
         self.refresh_list()
-        self.switch(CONV_ALL)
+        self.switch(initial_key)
         QTimer.singleShot(0, self._reflow_actions)
 
     # ---------------- 构建 ----------------
@@ -1157,12 +1168,7 @@ class ChatWindow(CardWindow):
         self.scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll.setStyleSheet(
             'QScrollArea { background: %s; border: none; }' % TALK_BG)
-        self.msg_host = QWidget()
-        self.msg_host.setStyleSheet('background: %s;' % TALK_BG)
-        self.msg_box = QVBoxLayout(self.msg_host)
-        self.msg_box.setContentsMargins(22, 16, 22, 18)
-        self.msg_box.setSpacing(10)
-        self.msg_box.addStretch(1)
+        self.msg_host, self.msg_box = self._new_msg_host()
         self.scroll.setWidget(self.msg_host)
         rv.addWidget(self.scroll, 1)
 
@@ -1740,6 +1746,9 @@ class ChatWindow(CardWindow):
 
     def _on_search(self, text):
         self.query = text
+        # 缓存里的行是按切换时的过滤词铺的，换了搜索词就全部作废。
+        self._host_cache.clear()
+        self._host_order = []
         self.refresh_list()
         self.render()
 
@@ -1779,6 +1788,10 @@ class ChatWindow(CardWindow):
     def switch(self, key):
         if key not in [k for k, _ in self.convs()]:
             key = CONV_ALL
+        same = key == self._shown_key
+        restored = False
+        if not same:
+            restored = self._show_host(key)
         self.key = key
         self.unread[key] = 0
         self.clear_quote()
@@ -1790,7 +1803,14 @@ class ChatWindow(CardWindow):
         self.target_lb.setText('发送到  %s' % self.name_of(key))
         self.refresh_list()
         self._pinned = True          # 换会话总是从最新一条看起
-        self.render()
+        if same:
+            # 点的是当前会话：不重建，回到最新一条就行。
+            self._jump_bottom()
+        elif restored:
+            # 缓存里换回来的控件树已经是最新的，排版完贴底即可。
+            self._scroll_soon()
+        else:
+            self.render()
         self.focus_input()
 
     def refresh_state(self):
@@ -1814,10 +1834,70 @@ class ChatWindow(CardWindow):
 
     def on_new(self, key):
         self.refresh_list()
-        if key == self.key:
+        if key != self.key:
+            # 别的会话来了新消息：它缓存着的那份已经过期，切回去时重建。
+            self._host_cache.pop(key, None)
+            self._host_order = [k for k in self._host_order if k != key]
+            return
+        if self.query:
+            # 搜索态的行是按过滤结果铺的，追加会打乱顺序，整段重排一次。
             self.render()
+            return
+        entries = self.entries()
+        if not entries:
+            return
+        self._append_row(entries[-1])
 
     # ---------------- 消息渲染 ----------------
+
+    def _new_msg_host(self):
+        host = QWidget()
+        host.setStyleSheet('background: %s;' % TALK_BG)
+        box = QVBoxLayout(host)
+        box.setContentsMargins(22, 16, 22, 18)
+        box.setSpacing(10)
+        box.addStretch(1)
+        return host, box
+
+    def _show_host(self, key):
+        """把某个会话的消息区换上来。返回 True 表示用的是现成的控件树。"""
+        cur = self.scroll.takeWidget()
+        old = self._shown_key
+        if cur is not None:
+            cur.hide()
+            # 搜索态下铺出来的行只对当时的过滤词有效，别缓存。
+            if old is not None and old != key and not self.query:
+                self._host_cache[old] = (cur, self._bubble_room(),
+                                         self._last_ts, self._row_count,
+                                         self._shown_from)
+                self._host_order = [k for k in self._host_order
+                                    if k != old] + [old]
+                while len(self._host_order) > 2:
+                    self._host_cache.pop(self._host_order.pop(0), None)
+
+        hit = self._host_cache.pop(key, None)
+        if hit is not None:
+            self._host_order = [k for k in self._host_order if k != key]
+            host, room, last_ts, rows, shown_from = hit
+            self.msg_host, self.msg_box = host, host.layout()
+            self._last_ts, self._row_count = last_ts, rows
+            self._shown_from = shown_from
+            self._earlier_btn = host.findChild(QPushButton, 'earlier')
+            self.scroll.setWidget(host)
+            # 缓存期间窗口可能被拉宽/收窄过，气泡按新宽度重排一次。
+            if room != self._bubble_room():
+                self._refit_bubbles()
+            self._shown_key = key
+            return True
+
+        host, box = self._new_msg_host()
+        self.msg_host, self.msg_box = host, box
+        self._last_ts, self._row_count = None, 0
+        self._shown_from = 0
+        self._earlier_btn = None
+        self.scroll.setWidget(host)
+        self._shown_key = key
+        return False
 
     def _clear_msgs(self):
         while self.msg_box.count():
@@ -1828,16 +1908,80 @@ class ChatWindow(CardWindow):
                 w.setParent(None)
         self.msg_box.addStretch(1)
 
+    def _earlier_button(self, start):
+        """「查看更早的消息」那一行。剩下的条数写在字里，点一次多铺一页。"""
+        btn = QPushButton('查看更早的消息（还有 %d 条）' % start)
+        btn.setObjectName('earlier')
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setFlat(True)
+        btn.setFont(font(8))
+        btn.setStyleSheet(
+            'QPushButton { color: %s; background: transparent; border: none;'
+            ' padding: 4px; }' % SUB)
+        btn.clicked.connect(self._load_earlier)
+        return btn
+
+    def _load_earlier(self):
+        """往上补一页历史。保持视口不动，别把人从正在看的地方甩走。"""
+        if self.query or self._shown_from <= 0:
+            return
+        all_entries = self.entries()
+        start = max(0, self._shown_from - MSG_PAGE)
+        chunk = all_entries[start:self._shown_from]
+        prev_ts = (all_entries[start - 1].get('ts') if start > 0 else None)
+        rows = []
+        for e in chunk:
+            ts = e.get('ts')
+            if prev_ts is not None and ts and ts - prev_ts > GAP_TIME:
+                rows.append(self._time_row(ts))
+            prev_ts = ts or prev_ts
+            rows.append(self._entry_row(e))
+
+        sb = self.scroll.verticalScrollBar()
+        before_max = sb.maximum()
+        before_val = sb.value()
+
+        btn = self._earlier_btn
+        pos = self.msg_box.indexOf(btn) + 1 if btn is not None else 0
+        for i, w in enumerate(rows):
+            self.msg_box.insertWidget(pos + i, w)
+        self._row_count += len(chunk)
+        self._shown_from = start
+        if btn is not None:
+            if start <= 0:
+                btn.hide()
+                btn.setParent(None)
+                self._earlier_btn = None
+            else:
+                btn.setText('查看更早的消息（还有 %d 条）' % start)
+
+        def keep_view():
+            sb.setValue(before_val + (sb.maximum() - before_max))
+        QTimer.singleShot(0, keep_view)
+
     def render(self, scroll=True):
         self._clear_msgs()
+        self._earlier_btn = None
         last_ts = None
+        rows = 0
         entries = self.entries()
         q = (self.query or '').strip().lower()
         if q:
             entries = [e for e in entries
                        if q in (e.get('text') or '').lower()]
+            self._shown_from = 0
             self.msg_box.insertWidget(self.msg_box.count() - 1,
                                       self._search_row(q, len(entries)))
+        else:
+            # 先只铺最近一页：两百条全量重建要两百毫秒上下，而刚切过来
+            # 九成情况只看最新几条，更早的等用户点上面那行再补。
+            start = max(0, len(entries) - MSG_PAGE)
+            self._shown_from = start
+            if start > 0:
+                self._earlier_btn = self._earlier_button(start)
+                self.msg_box.insertWidget(self.msg_box.count() - 1,
+                                          self._earlier_btn)
+            entries = entries[start:]
         for e in entries:
             ts = e.get('ts')
             if last_ts is not None and ts and ts - last_ts > GAP_TIME:
@@ -1845,8 +1989,29 @@ class ChatWindow(CardWindow):
                                           self._time_row(ts))
             last_ts = ts or last_ts
             self.msg_box.insertWidget(self.msg_box.count() - 1, self._entry_row(e))
+            rows += 1
+        self._last_ts = last_ts
+        self._row_count = rows
         if scroll:
             self._scroll_soon()
+
+    def _append_row(self, e):
+        """新消息只追加一行，而不是把整段历史拆了重建。
+
+        以前每来一条消息都会重铺两百行，聊天越久、收发越频繁就越卡；
+        追加一行的成本和历史长度无关。铺到上限后整段收一次，顺手把
+        滑出去的旧行清掉，控件数量不会无限长。
+        """
+        ts = e.get('ts')
+        if self._last_ts is not None and ts and ts - self._last_ts > GAP_TIME:
+            self.msg_box.insertWidget(self.msg_box.count() - 1,
+                                      self._time_row(ts))
+        self._last_ts = ts or self._last_ts
+        self.msg_box.insertWidget(self.msg_box.count() - 1, self._entry_row(e))
+        self._row_count += 1
+        self._scroll_soon()
+        if self._row_count > MSG_ROWS_MAX:
+            self.render()
 
     def _scroll_soon(self):
         """排两次：一次让布局先算完，一次兜底图片/换行这种延迟撑高的行。"""
