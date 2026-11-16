@@ -16,10 +16,16 @@
 import os
 import sys
 
-from . import win32
-
 IS_WIN = sys.platform == 'win32'
 IS_MAC = sys.platform == 'darwin'
+
+# 只有 Windows 才 import win32：它顶层 `from ctypes import wintypes`，
+# 在 Linux（服务端 / 网页网关）上没有 'v' 类型，导入即抛 ValueError。
+# 下面所有用到 win32 的分支都被 IS_WIN 挡着，非 Windows 设为 None 是安全的。
+if IS_WIN:
+    from . import win32
+else:
+    win32 = None
 
 if IS_MAC:
     from . import macos as _mac
