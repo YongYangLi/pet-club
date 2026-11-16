@@ -273,3 +273,87 @@ class ClaimDialog(QDialog):
 
     def note_text(self):
         return self.note.text()
+
+
+class SetCodeDialog(QDialog):
+    """改自己的认领口令，和网页端的弹层对齐：两次输入、至少 6 位。
+
+    口令即身份 —— 改完旧口令立刻失效，别的设备要用新口令重新登录。
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint
+                            | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setModal(True)
+        self.code = ''
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        body = QWidget(self)
+        body.setObjectName('code')
+        body.setStyleSheet(
+            '#code { background: %s; border: 1px solid %s; border-radius: 16px; }'
+            % (WINDOW, BORDER))
+        outer.addWidget(body)
+
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(28, 24, 28, 22)
+        lay.setSpacing(0)
+
+        tip = QLabel('修改自己的认领口令 —— 改完旧口令立即失效')
+        tip.setFont(font(9))
+        tip.setStyleSheet('color: %s;' % SUB)
+        lay.addWidget(tip)
+        lay.addSpacing(14)
+
+        self.code_edit = QLineEdit(body)
+        self.code_edit.setEchoMode(QLineEdit.Password)
+        self.code_edit.setPlaceholderText('新口令（至少 6 位）')
+        self.code_edit.setFont(font(10))
+        self.code_edit.setMinimumHeight(36)
+        self.code_edit.setMinimumWidth(260)
+        lay.addWidget(self.code_edit)
+        lay.addSpacing(8)
+
+        self.again_edit = QLineEdit(body)
+        self.again_edit.setEchoMode(QLineEdit.Password)
+        self.again_edit.setPlaceholderText('再输入一次')
+        self.again_edit.setFont(font(10))
+        self.again_edit.setMinimumHeight(36)
+        self.again_edit.returnPressed.connect(self._ok)
+        lay.addWidget(self.again_edit)
+        lay.addSpacing(8)
+
+        self.note = QLabel('')
+        self.note.setFont(font(9))
+        self.note.setStyleSheet('color: %s;' % MUTED)
+        self.note.setMinimumHeight(18)
+        lay.addWidget(self.note)
+        lay.addSpacing(6)
+
+        foot = QHBoxLayout()
+        foot.addStretch(1)
+        foot.addWidget(RoundButton('取消', self.reject,
+                                   primary=False, width=76))
+        foot.addWidget(RoundButton('保存', self._ok,
+                                   primary=True, width=96))
+        lay.addLayout(foot)
+
+    def _ok(self):
+        code = self.code_edit.text().strip()
+        if len(code) < 6:
+            self.note.setText('口令至少 6 位')
+            return
+        if code != self.again_edit.text().strip():
+            self.note.setText('两次输入不一致')
+            return
+        self.code = code
+        self.accept()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        screen = self.screen().availableGeometry()
+        self.move(int(screen.center().x() - self.width() / 2),
+                  int(screen.center().y() - self.height() / 2))

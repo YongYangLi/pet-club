@@ -22,8 +22,8 @@ import re
 import time
 
 from PIL import Image
-from PySide6.QtCore import (QBuffer, QIODevice, QPoint, QPointF, QRectF, Qt,
-                            QTimer, Signal)
+from PySide6.QtCore import (QBuffer, QIODevice, QPoint, QPointF, QRectF, QSize,
+                            Qt, QTimer, Signal)
 from PySide6.QtGui import (QColor, QCursor, QFont, QFontMetrics,
                            QGuiApplication, QIcon, QPainter, QPen, QPixmap,
                            QTextCharFormat, QTextCursor, QTextOption)
@@ -96,6 +96,28 @@ def emoji_font(size):
     f = QFont(EMOJI_FAMILY)
     f.setPointSizeF(float(size))
     return f
+
+
+def key_icon():
+    """左下角头像右侧的「改口令」图标。
+
+    直接写文字会被字体/语言拉长，画成 16px 线性钥匙，和网页端的 SVG 一致。
+    """
+    pm = QPixmap(32, 32)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    pen = QPen(QColor(MUTED), 2.6)
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    p.drawEllipse(QRectF(5, 11, 11, 11))
+    p.drawLine(14, 16, 27, 16)
+    p.drawLine(22, 16, 22, 21)
+    p.drawLine(26, 16, 26, 20)
+    p.end()
+    pm.setDevicePixelRatio(2.0)
+    return QIcon(pm)
 
 
 def conv_pix(key, size):
@@ -983,7 +1005,7 @@ class ChatWindow(CardWindow):
                  on_game=None, on_toy=None, on_fx=None, on_reminder=None,
                  water_on=False, water_min=45, sit_on=False, sit_min=60,
                  my_actions_menu=None, initial_key=CONV_ALL,
-                 on_set_code=None, on_download=None):
+                 on_set_code=None):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
@@ -1007,7 +1029,6 @@ class ChatWindow(CardWindow):
         # 数据（谁有哪些动作）只在 App 那边有。给 None 就整块不出现。
         self.my_actions_menu = my_actions_menu
         self.on_set_code = on_set_code
-        self.on_download = on_download
         self.on_remote = on_remote
         self.remote_hint = remote_hint or (lambda: '')
         self.remote_on = remote_on
@@ -1132,21 +1153,19 @@ class ChatWindow(CardWindow):
         me_lb.setStyleSheet('color: %s; background: transparent;' % SUB)
         mb.addWidget(me_lb)
         mb.addStretch(1)
-        # 头像右侧的小入口：认领口令（可选设置）和下载桌面客户端。
-        for text, tip, cb in (
-                ('口令', '修改自己的认领口令', self.on_set_code),
-                ('下载', '下载和当前版本对应的桌面客户端', self.on_download)):
-            if cb is None:
-                continue
+        # 头像右侧的小入口：改自己的认领口令（启用口令后才出现）。
+        # 桌面端不缺客户端，下载入口只在网页版有。
+        if self.on_set_code is not None:
             b = QToolButton(me_bar)
-            b.setText(text)
-            b.setToolTip(tip)
+            b.setIcon(key_icon())
+            b.setIconSize(QSize(15, 15))
+            b.setFixedSize(20, 20)
+            b.setToolTip('修改自己的认领口令')
             b.setCursor(Qt.PointingHandCursor)
-            b.setFont(font(8))
             b.setStyleSheet(
                 'QToolButton { border: none; background: transparent;'
-                ' color: %s; padding: 0 2px; }' % MUTED)
-            b.clicked.connect(cb)
+                ' padding: 0; }')
+            b.clicked.connect(self.on_set_code)
             mb.addWidget(b)
         me_bar.setToolTip('点一下：我的动作 / 桌宠大小 / 同步远程互动 / 换身份 / 退出')
         me_bar.clicked.connect(self._show_me_menu)

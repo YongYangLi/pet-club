@@ -525,12 +525,19 @@ button, input, textarea {
   font-family: var(--font);
   font-size: 11px;
   line-height: 16px;
-  padding: 2px 4px;
+  padding: 0;
+  width: 22px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 6px;
   cursor: pointer;
   text-decoration: none;
   white-space: nowrap;
 }
+
+.side-link svg { display: block; }
 
 .side-link:hover { background: var(--chrome-hover); color: var(--fg); }
 

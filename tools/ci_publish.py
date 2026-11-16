@@ -139,13 +139,20 @@ def main(argv=None):
         print('\n先安装依赖：pip install cos-python-sdk-v5')
         return 1
 
-    # 海外 runner 直连上海桶可能很慢。给每个请求加超时，并允许打开 COS
-    # 全球加速（控制台开启后设 COS_RAPID=1，会走 cosrapid.<region> 域名）。
+    # 上传可以单独走加速域名（下载仍用 UPDATE_URL 里的国内地址）。
+    # COS_UPLOAD_DOMAIN 形如 picgo-1255439748.cos.accelerate.myqcloud.com。
+    upload_domain = (os.environ.get('COS_UPLOAD_DOMAIN') or '').strip()
     rapid = (os.environ.get('COS_RAPID') or '').strip() in ('1', 'true', 'yes')
-    client = CosS3Client(CosConfig(
-        Region=region, SecretId=sid, SecretKey=skey, Scheme='https',
-        Timeout=60, EnableRapidDomain=rapid))
-    if rapid:
+    cfg = dict(Region=region, SecretId=sid, SecretKey=skey, Scheme='https',
+               Timeout=60)
+    if upload_domain:
+        cfg['Domain'] = upload_domain
+    elif rapid:
+        cfg['EnableRapidDomain'] = True
+    client = CosS3Client(CosConfig(**cfg))
+    if upload_domain:
+        print('上传走加速域名：%s' % upload_domain)
+    elif rapid:
         print('已启用 COS 全球加速域名')
 
     def key(name):

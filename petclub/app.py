@@ -13,10 +13,9 @@ import threading
 import time
 
 from PIL import Image
-from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
-from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QIcon
-from PySide6.QtWidgets import (QApplication, QDialog, QInputDialog, QLineEdit,
-                               QMenu, QMessageBox)
+from PySide6.QtCore import QPoint, Qt, QTimer
+from PySide6.QtGui import QCursor, QGuiApplication, QIcon
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
 
 from . import (config, custom, media, sprite_sync, store, update, upload,
                windows)
@@ -28,7 +27,7 @@ from .config import ROLES, ROLE_NAME, assets_dir, files_dir
 from .host import cursor_pos, foreground, hwnd_at, owner_at, tray_icons, work_area
 from .net import Net
 from .chat import CONV_ALL, ChatWindow
-from .claim import ClaimDialog
+from .claim import ClaimDialog, SetCodeDialog
 from .upload_dlg import UploadDialog
 from .theme import QSS as UI_QSS
 from .tray import Tray
@@ -1811,7 +1810,6 @@ class App:
                                    update_enabled=lambda: update.enabled(),
                                    on_set_code=(self.set_claim_code
                                                 if self._auth_on else None),
-                                   on_download=self.download_client,
                                    initial_key=key)
             self.chat.switch(key)
             self.chat.show()
@@ -2389,22 +2387,10 @@ class App:
         """改自己的认领口令（不强制）。改完后其他设备需要重新登录。"""
         if not self.me:
             return
-        code, ok = QInputDialog.getText(
-            None, '修改认领口令',
-            '新口令（至少 6 位，改完请自己记住）：',
-            QLineEdit.Password)
-        if not ok:
+        dlg = SetCodeDialog()
+        if dlg.exec() != QDialog.Accepted:
             return
-        code = (code or '').strip()
-        if len(code) < 6:
-            if self.chat is not None and self.chat.alive():
-                self.chat.set_note('口令至少 6 位')
-            return
-        self.net.send(t='setcode', code=code)
-
-    def download_client(self):
-        """下载和当前版本对应的桌面客户端。"""
-        QDesktopServices.openUrl(QUrl(config.RELEASE_DOWNLOAD_URL))
+        self.net.send(t='setcode', code=dlg.code)
 
     def do_leave(self):
         if self.me:

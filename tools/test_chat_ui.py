@@ -32,7 +32,7 @@ from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CELL_GAP, CHIP_H,  # noqa: 
                           BubbleText, ChatWindow, Composer, CONV_ALL,
                           ImageViewer, MeBar, StatePill)
 from petclub.config import ROLES, assets_dir                     # noqa: E402
-from petclub.claim import ClaimDialog                            # noqa: E402
+from petclub.claim import ClaimDialog, SetCodeDialog             # noqa: E402
 
 PASS = []
 FAIL = []
@@ -746,15 +746,41 @@ def main():
     chk('勾选后带着 force 走', adlg.force is True)
     adlg.close()
 
-    acct = ChatWindow(None, me='p1', on_set_code=lambda: None,
-                      on_download=lambda: None)
+    acct = ChatWindow(None, me='p1', on_set_code=lambda: None)
     acct.show()
     qapp.processEvents()
-    chk('头像右侧有口令和下载入口',
-        any(b.text() == '口令' for b in acct.me_bar.findChildren(QToolButton))
-        and any(b.text() == '下载'
-                for b in acct.me_bar.findChildren(QToolButton)))
+    icons = [b for b in acct.me_bar.findChildren(QToolButton)
+             if not b.icon().isNull()]
+    chk('头像右侧是口令图标，桌面端没有下载入口',
+        len(icons) == 1 and '口令' in icons[0].toolTip()
+        and not icons[0].text())
     acct.hide()
+
+    nocode = ChatWindow(None, me='p1')
+    nocode.show()
+    qapp.processEvents()
+    chk('没启用口令时不出现口令入口',
+        not [b for b in nocode.me_bar.findChildren(QToolButton)
+             if not b.icon().isNull()])
+    nocode.hide()
+
+    scd = SetCodeDialog()
+    scd.code_edit.setText('12345')
+    scd.again_edit.setText('12345')
+    scd._ok()
+    chk('口令不足 6 位留在窗里',
+        scd.result() == 0 and '6 位' in scd.note.text())
+    scd.code_edit.setText('ABCDEF')
+    scd.again_edit.setText('ABCDEG')
+    scd._ok()
+    chk('两次输入不一致留在窗里',
+        scd.result() == 0 and '不一致' in scd.note.text())
+    scd.code_edit.setText('ABCDEF')
+    scd.again_edit.setText('ABCDEF')
+    scd._ok()
+    chk('一致后拿到新口令',
+        scd.result() == 1 and scd.code == 'ABCDEF')
+    scd.close()
 
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))
     for name in FAIL:
