@@ -762,6 +762,36 @@ def main():
     plain_taken._pick('p1')
     chk('没启用口令时被占的身份点不动', plain_taken.role is None)
     plain_taken.close()
+
+    preset = ClaimDialog(None, {'p5': {'role': 'p5'}}, '', auth=True,
+                         locked=['p5'], preset_role='p5',
+                         preset_code='OLD-CODE-123')
+    chk('被顶下线后回来：预选身份、预填口令、直接可提交',
+        preset.role == 'p5' and preset.code == 'OLD-CODE-123'
+        and preset.ok_btn.isEnabled())
+    preset.close()
+
+    saved = {'p1': 'CODE-ONE-111', 'p6': 'CODE-SIX-666'}
+    af = ClaimDialog(None, {}, '', auth=True, locked=['p1', 'p6'],
+                     code_for=lambda r: saved.get(r, ''))
+    af._pick('p1')
+    chk('切到 p1 自动填 p1 记住的口令', af.code == 'CODE-ONE-111')
+    af._pick('p6')
+    chk('切到 p6 自动填 p6 记住的口令', af.code == 'CODE-SIX-666')
+    af._pick('p2')
+    chk('没记过的身份不会被上一个人的口令污染', af.code == '')
+    af.close()
+
+    ff = ClaimDialog(None, {'p5': {'role': 'p5', 'client': 'web'}}, '',
+                     auth=True, locked=['p5'], preset_role='p5',
+                     preset_code='OLD-CODE-123')
+    chk('选中已在线身份时按钮直接是「强制进入」',
+        ff.force and ff.ok_btn.text() == '强制进入'
+        and ff.ok_btn.isEnabled() and '网页版' in ff.note.text())
+    ff._pick('p1')
+    chk('切换身份后退回普通「进入」',
+        ff.ok_btn.text() == '进入' and not ff.force)
+    ff.close()
     adlg.close()
 
     acct = ChatWindow(None, me='p1', on_set_code=lambda: None)

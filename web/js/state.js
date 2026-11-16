@@ -65,6 +65,17 @@ export function clearToken() {
   try { localStorage.removeItem('petclub.token:' + (location.host || '')); } catch (_) {}
 }
 
+// 每个身份各自记住上一次成功登录的口令：切到哪个人，输入框就自动填哪条。
+// 只存在本机；换服务器地址互不影响。
+export function saveCode(role, code) {
+  if (!role || !code) return;
+  savePref(`petclub.code:${location.host || ''}:${role}`, code);
+}
+
+export function loadCode(role) {
+  return readText(`petclub.code:${location.host || ''}:${role || ''}`, '');
+}
+
 export function roleName(role) {
   return state.roleNames[role] || role || '';
 }

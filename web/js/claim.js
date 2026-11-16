@@ -5,8 +5,10 @@ import { loadImage, cropAlpha } from './sprites.js';
 import { spriteUrl } from './asset.js';
 
 export class ClaimUI {
-  constructor({ onJoin }) {
+  constructor({ onJoin, codeFor }) {
     this.onJoin = onJoin;
+    // 本机记住的「每个身份上次用的口令」：选中谁就填谁那条。
+    this.codeFor = codeFor || (() => '');
     this.selected = null;
     this.auth = false;
     this.locked = new Set();
@@ -16,6 +18,7 @@ export class ClaimUI {
     this.note = document.getElementById('claim-note');
     this.ok = document.getElementById('claim-ok');
     this.status = document.getElementById('claim-status');
+    this.forceHint = document.getElementById('claim-force-hint');
     this.title = document.getElementById('claim-title');
     this.sub = document.getElementById('claim-sub');
     this.authBox = document.getElementById('claim-auth');
@@ -24,15 +27,16 @@ export class ClaimUI {
 
     this.ok.addEventListener('click', () => {
       if (!state.connected || !this.selected) return;
+      const force = this.isForce();
       if (this.needCode()) {
         const code = this.codeInput.value.trim();
         if (!code) return;
         this.setStatus('正在进入…');
-        this.onJoin({ role: this.selected, code });
+        this.onJoin({ role: this.selected, code, force });
         return;
       }
       this.setStatus('正在进入…');
-      this.onJoin(this.selected);
+      this.onJoin({ role: this.selected, force });
     });
     this.codeInput.addEventListener('input', () => this.render());
     this.codeInput.addEventListener('keydown', (e) => {
@@ -46,6 +50,11 @@ export class ClaimUI {
   /** 选中的身份设了口令吗？只有这种才需要输入框。 */
   needCode() {
     return !!(this.auth && this.selected && this.locked.has(this.selected));
+  }
+
+  /** 选中的身份已经被别人认领：按钮直接变成「强制进入」。 */
+  isForce() {
+    return !!(this.auth && this.selected && this.isTaken(this.selected));
   }
 
   /** 启用了口令：卡片照常显示，选中后再决定要不要弹口令框。 */
@@ -64,6 +73,9 @@ export class ClaimUI {
   /** 服务端告诉我们的：哪些身份设了口令。 */
   setLocked(roles) {
     this.locked = new Set(Array.isArray(roles) ? roles : []);
+    if (this.selected && !this.codeInput.value) {
+      this.codeInput.value = this.codeFor(this.selected) || '';
+    }
     this.render();
   }
 
@@ -108,9 +120,15 @@ export class ClaimUI {
   pick(role) {
     if (!state.connected) return;
     // 没启用口令时，被占的身份点了也没用；启用了口令则允许选中 ——
-    // 进入后服务端会回 role_online，再弹「要不要让对方下线」。
+    // 选中后按钮会直接变成「强制进入」。
     if (this.isTaken(role) && !this.auth) return;
-    this.selected = role;
+    if (role !== this.selected) {
+      // 切身份就换成本机记着的那条口令；没记过就清空，避免拿上一个人的
+      // 口令去撞下一个人。
+      this.selected = role;
+      this.codeInput.value = this.codeFor(role) || '';
+      this.setStatus('');
+    }
     this.render();
   }
 
@@ -144,10 +162,24 @@ export class ClaimUI {
     if (need && this.authLabel) {
       this.authLabel.textContent = `「${roleName(this.selected)}」的认领口令`;
     }
+
+    // 选中的人已经被别人认领：按钮直接就是「强制进入」，旁边红字说明。
+    const force = this.isForce();
+    this.ok.textContent = force ? '强制进入' : '进入';
+    if (force) {
+      const who = state.players[this.selected] || {};
+      const where = who.client === 'web' ? '网页版' : '桌面版';
+      this.forceHint.textContent =
+        `当前用户「${roleName(this.selected)}」正在${where}登录，`
+        + '强制进入可以让旧设备下线';
+      this.forceHint.classList.remove('hidden');
+    } else {
+      this.forceHint.classList.add('hidden');
+    }
+
     this.ok.disabled = need
       ? (!this.codeInput.value.trim() || !state.connected)
-      : (!this.selected || (!this.auth && this.isTaken(this.selected))
-         || !state.connected);
+      : (!this.selected || !state.connected);
   }
 
   show(note = '') {
@@ -174,6 +206,14 @@ export class ClaimUI {
   resetSelection() {
     this.selected = null;
     this.codeInput.value = '';
+    this.render();
+  }
+
+  /** 被顶下线后回到这里：选中原来那个人，并把上次的口令填好。 */
+  preselect(role, code = '') {
+    if (!role || !state.roles.includes(role)) return;
+    this.selected = role;
+    if (code) this.codeInput.value = code;
     this.render();
   }
 }

@@ -10,11 +10,16 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+# 测试不读本机 data/claim.json：否则本地启用过口令，整套测试都会被
+# need_auth 挡下来。和 test_auth 一样指到临时文件。
+os.environ['PETCLUB_CLAIM_FILE'] = os.path.join(
+    tempfile.mkdtemp(prefix='petclub-server-'), 'claim.json')
 import server as S      # noqa: E402
 
 PASS = []

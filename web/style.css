@@ -286,6 +286,22 @@ button, input, textarea {
 
 .claim-status.error { color: var(--err); }
 
+.claim-foot-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 选中的人已被认领：按钮变「强制进入」，这一行红字说明后果。 */
+.claim-force-hint {
+  font-size: 12px;
+  color: var(--err);
+  line-height: 18px;
+}
+
+.claim-force-hint.hidden { display: none; }
+
 .btn {
   border: 0;
   border-radius: 10px;
@@ -512,9 +528,9 @@ button, input, textarea {
 .side-extra {
   flex: none;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 1px;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
 }
 
 .side-link {

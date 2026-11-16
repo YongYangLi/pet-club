@@ -2,7 +2,7 @@
 // 业务判断和 petclub/app.py 的 App 对应；Qt 窗口换成了 DOM。
 import {
   state, CONV_ALL, roleName, nowSec, savePref,
-  loadToken, saveToken, clearToken,
+  loadToken, saveToken, clearToken, loadCode, saveCode,
 } from './state.js';
 import {
   loadMeta, getAction, what, sayLine, replyLine, mediaLine, actionTip,
@@ -44,6 +44,7 @@ class App {
     this.autoTried = false;
     this.auth = false;
     this.lastJoin = null;
+    this.kickedAt = 0;          // 刚被服务端断开（顶号）时不要闪「连不上」
     this.taps = new Map();
     // 上一次见到的「每个角色有哪些覆盖图」。清单是整份下发的，
     // 但别人换的是他自己的图 —— 靠这份快照只重建真的变了的角色。
@@ -57,7 +58,8 @@ class App {
     this.sitDue = false;
 
     this.claim = new ClaimUI({
-      onJoin: (role) => this.join(role),
+      onJoin: (what) => this.join(what),
+      codeFor: (role) => loadCode(role),
     });
     this.chat = new ChatUI({
       onSend: (text, re) => this.sendChat(text, re),
@@ -228,6 +230,13 @@ class App {
     state.connected = false;
     state.offline = true;
     this.chat.setOffline(true);
+    this.claim.render();
+    // 被顶号时服务端会主动断开这条连接，紧接着就重连 ——
+    // 那一瞬间不该闪一条「连不上服务器」的红字。
+    if (this.kickedAt && Date.now() - this.kickedAt < 8000) {
+      this.claim.setStatus('正在重新连接…', false);
+      return;
+    }
     this.claim.setStatus('连不上服务器，正在重试…', true);
     this.claim.render();
   }
@@ -306,7 +315,11 @@ class App {
     state.lastRole = m.role;
     savePref('petclub.role', m.role);
     if (typeof m.token === 'string' && m.token) saveToken(m.token);
+    if (this.lastJoin && this.lastJoin.code) {
+      saveCode(m.role, this.lastJoin.code);
+    }
     this.joinedAt = Date.now();
+    this.kickedAt = 0;
     this.syncAccountLinks();
 
     if (fresh) {
@@ -340,8 +353,8 @@ class App {
     if (m.players && typeof m.players === 'object') state.players = m.players;
 
     if (reason === 'role_online') {
-      // 凭据（口令/令牌）已经校验过了，只是身份在别处在线：
-      // 直接问一句要不要顶号，不用再输一次口令。
+      // 本地状态慢了一拍（点进入前对方刚好上线）：退回认领页。
+      // 此时 players 里这个身份已在线，界面自动变成「强制进入」。
       state.lastRole = '';
       savePref('petclub.role', '');
       if (state.me) {
@@ -350,17 +363,10 @@ class App {
         this.chat.resetForClaim();
       }
       this.chat.hideMain();
-      const msg = m.msg || '这个身份正在别处在线';
-      this.claim.show(msg);
+      this.claim.show('');
       this.claim.setStatus('');
-      const last = this.lastJoin || {};
-      if ((last.role || last.code || last.token)
-          && window.confirm(`${msg}。\n继续登录会让那台设备下线，是否继续？`)) {
-        this.join({ ...last, force: true });
-        return;
-      }
-      this.claim.setStatus(msg, true);
-      this.claim.render();
+      const role = m.role || (this.lastJoin && this.lastJoin.role);
+      this.claim.preselect(role, loadCode(role));
       return;
     }
 
@@ -395,21 +401,15 @@ class App {
     this.claim.render();
   }
 
-  /** 被新设备顶下线：令牌还有效，问一句就能直接抢回来。 */
+  /** 被新设备顶下线：回到选择身份，选好那个人、填好上次的口令。 */
   onKicked(m) {
     this.autoTried = true;
+    this.kickedAt = Date.now();
     const role = state.me && state.me.role;
-    const token = loadToken();
-    const msg = m.msg || '你的身份已在另一台设备登录';
+    const code = loadCode(role);
     this.chat.setNote('');
-    this.releaseLocal(msg);
-    if (!role || !token) return;
-    if (window.confirm(
-      `「${roleName(role)}」正在另一台设备上登录。\n`
-      + '要在这台设备继续登录吗？对方会被踢下线。',
-    )) {
-      this.join({ token, force: true });
-    }
+    this.releaseLocal('');
+    if (role) this.claim.preselect(role, code);
   }
 
   onCodeOk(m) {
@@ -470,6 +470,7 @@ class App {
     savePref('petclub.role', '');
     this.pets.clear();
     this.chat.resetForClaim();
+    this.claim.resetSelection();
     this.showClaim(note);
     this.chat.updateOnline();
   }
@@ -493,6 +494,7 @@ class App {
     closeMenu();
     this.pets.clear();
     this.chat.hideMain();
+    this.claim.resetSelection();
     this.claim.show('已退出，刷新页面可重新进入');
     this.claim.setStatus('已退出', false);
     this.claim.render();

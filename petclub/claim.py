@@ -17,8 +17,8 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QLineEdit,
                                QVBoxLayout, QWidget)
 
 from .config import ROLE_NAME, ROLES, assets_dir
-from .theme import (ACCENT, ACCENT_SOFT, BORDER, FG, MUTED, OK_BG, OK_FG, SUB,
-                   TAKEN_BG, TAKEN_FG, WINDOW, RoundButton, font)
+from .theme import (ACCENT, ACCENT_SOFT, BORDER, ERR, FG, MUTED, OK_BG, OK_FG,
+                   SUB, TAKEN_BG, TAKEN_FG, WINDOW, RoundButton, font)
 from .windows import to_qimage
 
 CARD_W, CARD_H = 134, 208
@@ -98,11 +98,13 @@ class ClaimDialog(QDialog):
     · 没启用口令：点一张选中，再点「进入」；
     · 启用了口令：选中的身份设了口令，卡片下方才出现一个口令框。
       口令只和选中的身份比，不会全局反查，别人撞了同一条口令也不串身份。
-    口令错了 / 身份在别处在线，都会留在这一页重试（在线时另弹确认框）。
+    口令错了 / 身份在别处在线，都会留在这一页重试；在线时按钮直接变成
+    「强制进入」，点一下就能让对方下线，不再弹二次确认。
     """
 
     def __init__(self, parent, players=None, note='', on_poll=None,
-                 auth=False, locked=None):
+                 auth=False, locked=None, preset_role=None, preset_code='',
+                 code_for=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -111,12 +113,25 @@ class ClaimDialog(QDialog):
         self.on_poll = on_poll
         self.auth_mode = bool(auth)
         self.locked = set(locked or ())
+        # 本机记住的「每个身份上次用的口令」：切到谁就填谁那条。
+        self.code_for = code_for or (lambda _role: '')
         self.role = None
         self.cards = {}
         self.code_edit = None
         self.code_box = None
+        # 选中的身份已经被别人认领：按钮自动变成「强制进入」，
+        # 底部用红字说明后果。不再需要服务端来回一轮才弹确认框。
+        self._force = False
+        self._note_force = False
 
         self._build(note)
+        # 被顶下线后回来：选中原来那个人，并把本机记得的口令填好，
+        # 直接点「强制进入」就能再次提交。
+        if preset_role in self.cards:
+            self.role = preset_role
+            if preset_code and preset_role in self.locked:
+                self.code_edit.setText(preset_code)
+            self._sync()
         self._timer = QTimer(self)
         self._timer.setInterval(150)
         self._timer.timeout.connect(self._poll)
@@ -232,34 +247,70 @@ class ClaimDialog(QDialog):
                            selected=(role == self.role))
         need = bool(self.role) and self.auth_mode and self.role in self.locked
         self.code_box.setVisible(need)
+        # 选中的人已经被别人认领：按钮直接变「强制进入」，红字说明后果。
+        self._force = bool(self.auth_mode and self.role
+                           and self.players.get(self.role))
+        if self._force:
+            who = self.players.get(self.role) or {}
+            where = '网页版' if who.get('client') == 'web' else '桌面版'
+            self.ok_btn.setText('强制进入')
+            self.note.setText(
+                '当前用户「%s」正在%s登录，强制进入可以让旧设备下线'
+                % (ROLE_NAME.get(self.role, self.role), where))
+            self.note.setStyleSheet('color: %s;' % ERR)
+            self._note_force = True
+            self.ok_btn.set_enabled(bool(self.code) if need else True)
+            return
+        self.ok_btn.setText('进入')
+        if self._note_force:
+            # 刚才那条红字是我们写的，别人不在线了就收掉；
+            # 服务端返回的错误提示不受影响。
+            self.note.setText('')
+            self.note.setStyleSheet('color: %s;' % MUTED)
+            self._note_force = False
         if need:
             self.code_who.setText('「%s」的认领口令'
                                   % ROLE_NAME.get(self.role, self.role))
-            ok = bool(self.code)
+            self.ok_btn.set_enabled(bool(self.code))
         else:
-            ok = bool(self.role) and not self.players.get(self.role)
-        self.ok_btn.set_enabled(ok)
+            self.ok_btn.set_enabled(
+                bool(self.role) and not self.players.get(self.role))
 
     def set_players(self, players):
         self.players = players or {}
         self._sync()
 
     def _pick(self, role):
-        # 启用了口令时，被占的身份也允许选中 —— 进入后由服务端回
-        # role_online，客户端再弹「要不要让对方下线」的确认框。
+        # 启用了口令时，被占的身份也允许选中：选中后按钮直接变
+        # 「强制进入」，点一下就让对方下线。
         if not self.auth_mode and self.players.get(role):
             return
+        changed = role != self.role
         self.role = role
+        if changed:
+            # 切身份就换成本机记着的那条口令；没记过就清空，避免拿
+            # 上一个人的口令去撞下一个人。
+            self.code_edit.setText(self.code_for(role) or '')
         self._sync()
 
     @property
     def code(self):
         return self.code_edit.text().strip() if self.code_edit else ''
 
+    @property
+    def force(self):
+        """当前是不是「强制进入」状态（切过身份就不再是）。"""
+        return self._force
+
     def _ok(self):
         if not self.role:
             return
         need = self.auth_mode and self.role in self.locked
+        if self._force:
+            if need and not self.code:
+                return
+            self.accept()
+            return
         if need and not self.code:
             return
         if not need and self.players.get(self.role):
