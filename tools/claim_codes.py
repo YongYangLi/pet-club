@@ -3,13 +3,18 @@
 
     python tools/claim_codes.py --init
     python tools/claim_codes.py --status
-    python tools/claim_codes.py --reset p3
-    python tools/claim_codes.py --reset all
+    python tools/claim_codes.py --reset p3      # 忘口令：生成一条新的
+    python tools/claim_codes.py --disable p3    # 取消该身份的口令保护
+    python tools/claim_codes.py --disable all
     python tools/claim_codes.py --file /path/claim.json --init
 
---init 一次生成六个身份的口令，只在控制台打印这一次；文件里只写 PBKDF2
-盐 + 哈希，事后来看也拿不回明文。口令请私下发给对应的人，用户登录后可以
-在客户端里改成自己的；忘了就 --reset 重发一条新的。
+--init 只需要在第一次启用时跑一次：一次生成六个身份的口令，只在控制台
+打印这一次；文件里只写 PBKDF2 盐 + 哈希，事后来看也拿不回明文。口令请
+私下发给对应的人，用户登录后可以在客户端里改成自己的。
+
+日常发版、重启服务端都不需要再跑。只有「口令忘了 / 想换一条」才需要
+--reset（生成新口令并让旧设备令牌全部失效）。--disable 是应急回退：
+删掉口令后该身份回到先占先得，慎用。
 """
 import argparse
 import os
@@ -37,7 +42,9 @@ def main(argv=None):
     ap.add_argument('--init', action='store_true', help='生成六个身份的口令')
     ap.add_argument('--status', action='store_true', help='看哪些身份已设口令')
     ap.add_argument('--reset', default='', metavar='ROLE',
-                    help='重置某个身份（p1~p6）或 all')
+                    help='忘口令：为某个身份（p1~p6）或 all 生成新口令')
+    ap.add_argument('--disable', default='', metavar='ROLE',
+                    help='取消口令保护（p1~p6 或 all），恢复到先占先得')
     ap.add_argument('--force', action='store_true',
                     help='--init 时覆盖已有口令文件')
     args = ap.parse_args(argv)
@@ -61,14 +68,33 @@ def main(argv=None):
         print('用户登录后可以在客户端里改成自己的口令；忘了就 --reset 重发。')
         return 0
 
+    if args.disable:
+        if args.disable == 'all':
+            server.auth_reset(None)
+            print('已取消全部口令，所有身份回到先占先得（应急模式）。')
+        elif args.disable in server.ROLES:
+            server.auth_reset(args.disable)
+            print('已取消 %s %s 的口令保护。'
+                  % (args.disable, server.ROLE_NAMES.get(args.disable, '')))
+        else:
+            print('不认识的身份证：%s' % args.disable)
+            return 1
+        return 0
+
     if args.reset:
         if args.reset == 'all':
-            server.auth_reset(None)
-            print('已清空全部口令，所有身份回到先占先得。')
+            codes = {role: new_code() for role in server.ROLES}
+            server.auth_init(codes)
+            print('已为六个身份生成新口令（旧口令和所有设备令牌全部失效）：\n')
+            for role in server.ROLES:
+                print('  %s  %-6s  %s' % (role, server.ROLE_NAMES[role],
+                                          codes[role]))
+            print('\n请私下发给对应的人；用户登录后可以自己再改。')
         elif args.reset in server.ROLES:
-            server.auth_reset(args.reset)
-            print('已重置 %s %s，旧口令和设备令牌都已失效。'
-                  % (args.reset, server.ROLE_NAMES.get(args.reset, '')))
+            code = new_code()
+            server.auth_set_code(args.reset, code)
+            print('已为 %s %s 生成新口令（旧口令和设备令牌已失效）：\n\n  %s\n'
+                  % (args.reset, server.ROLE_NAMES.get(args.reset, ''), code))
         else:
             print('不认识的身份证：%s' % args.reset)
             return 1
