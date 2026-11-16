@@ -118,6 +118,7 @@ class App:
         self._pending_role = None
         # 口令登录：code 只在首次/换设备时用；token 是本机登录过之后的凭据。
         self._auth_on = False
+        self._locked = set()          # 设了口令的身份：认领页据此显示口令框
         self._pending_code = ''
         self._pending_token = ''
         self._pending_force = False
@@ -241,14 +242,14 @@ class App:
         if ((self._pending_role or self._pending_code or self._pending_token)
                 and not self._pending_sent and self.net.connected):
             msg = {'t': 'join', 'client': 'desktop'}
+            if self._pending_role:
+                msg['role'] = self._pending_role
             if self._pending_code:
                 msg['code'] = self._pending_code
                 msg['force'] = self._pending_force
             elif self._pending_token:
                 msg['token'] = self._pending_token
                 msg['force'] = self._pending_force
-            else:
-                msg['role'] = self._pending_role
             if self.net.send(**msg):
                 self._pending_sent = True
                 # 记住这次用的凭据：身份在线时「强制登录」直接重发这一条。
@@ -508,6 +509,7 @@ class App:
     def on_state(self, m):
         self.players = m.get('players') or {}
         self._auth_on = bool(m.get('auth', self._auth_on))
+        self._locked = set(m.get('locked') or ())
         self._state_seen = True
         if self.chat is not None and self.chat.alive():
             self.chat.refresh_state()
@@ -632,16 +634,21 @@ class App:
         parent = self.chat if (self.chat is not None and self.chat.alive()) else None
         box = QMessageBox(
             QMessageBox.Warning, '身份已在别处在线',
-            '「%s」正在%s在线。\n强制登录会让那台设备下线，确定吗？'
+            '「%s」正在%s在线。\n继续登录会让那台设备下线，是否继续？'
             % (ROLE_NAME.get(role, role), where), QMessageBox.NoButton, parent)
-        yes = box.addButton('强制登录', QMessageBox.AcceptRole)
-        box.addButton('算了', QMessageBox.RejectRole)
+        yes = box.addButton('继续登录', QMessageBox.AcceptRole)
+        box.addButton('取消', QMessageBox.RejectRole)
         box.exec()
         return box.clickedButton() is yes
 
     def _on_kicked(self, m):
-        """被新设备顶下线：回到登录页，并且不要用令牌自动顶回去。"""
+        """被新设备顶下线：问一句要不要抢回来。
+
+        令牌没失效，所以不用重新输口令 —— 一键就能顶回去。
+        """
         msg = m.get('msg') or '你的身份已在另一台设备登录'
+        role = self.me['role'] if self.me else ''
+        token = self._auth_token()
         self._pending_role = None
         self._pending_code = ''
         self._pending_token = ''
@@ -653,7 +660,33 @@ class App:
         if self.chat is not None:
             QTimer.singleShot(0, self._close_chat)
         self._clear_pets()
-        self._claim_soon(msg)
+        if role and token:
+            QTimer.singleShot(
+                1, lambda: self._ask_take_back(role, token, msg))
+        else:
+            self._claim_soon(msg)
+
+    def _ask_take_back(self, role, token, msg):
+        """被顶下线后的一键重登：令牌还有效，确认一下就顶回去。"""
+        if self.me or self._closing:
+            return
+        box = QMessageBox(
+            QMessageBox.Warning, '身份已在别处登录',
+            '「%s」正在另一台设备上登录。\n'
+            '要在这台设备继续登录吗？对方会被踢下线。'
+            % ROLE_NAME.get(role, role), QMessageBox.NoButton)
+        yes = box.addButton('继续登录', QMessageBox.AcceptRole)
+        box.addButton('取消', QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is not yes:
+            self._claim_soon(msg)
+            return
+        self._pending_role = None
+        self._pending_code = ''
+        self._pending_token = token
+        self._pending_force = True
+        self._pending_sent = False
+        self._auto_tried = False
 
     def _on_code_ok(self, m):
         tok = m.get('token') if isinstance(m.get('token'), str) else ''
@@ -866,42 +899,31 @@ class App:
             self._claim_open = False
             return
         dlg = ClaimDialog(None, self.players, self._note,
-                          on_poll=self._poll_for_dialog, auth=self._auth_on)
+                          on_poll=self._poll_for_dialog, auth=self._auth_on,
+                          locked=self._locked)
         self._claim_dlg = dlg
         self._note = ''
         role = None
         code = ''
-        force = False
         try:
             if dlg.exec():
-                if dlg.auth_mode:
-                    code = dlg.code
-                    force = dlg.force
-                else:
-                    role = dlg.role
+                role = dlg.role
+                code = dlg.code if role in dlg.locked else ''
         finally:
             self._claim_dlg = None
             self._claim_open = False
             # exec() 刚返回时 Qt 还在这个对话框的调用栈上，别在这儿析构它。
             # 留到下一次认领覆盖，进程结束前不再碰。
             self._claim_prev = dlg
-        if dlg.auth_mode:
-            if not code:
-                return self.quit()
-            self._pending_role = None
-            self._pending_code = code
-            self._pending_token = ''
-            self._pending_force = force
-            self._last_join = {'t': 'join', 'client': 'desktop',
-                               'code': code, 'force': force}
-        else:
-            if not role:
-                return self.quit()
-            self._pending_role = role
-            self._pending_code = ''
-            self._pending_token = ''
-            self._pending_force = False
-            self._last_join = {'t': 'join', 'client': 'desktop', 'role': role}
+        if not role:
+            return self.quit()
+        self._pending_role = role
+        self._pending_code = code
+        self._pending_token = ''
+        self._pending_force = False
+        self._last_join = {'t': 'join', 'client': 'desktop', 'role': role}
+        if code:
+            self._last_join['code'] = code
         self._pending_sent = False
 
     def _poll_for_dialog(self):

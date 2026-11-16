@@ -214,7 +214,7 @@ class App {
     state.offline = false;
     this.chat.setOffline(false);
     this.claim.render();
-    this.claim.setStatus(this.auth ? '已连接 · 输入认领口令' : '已连接 · 选一个身份');
+    this.claim.setStatus('已连接 · 选一个身份');
     if (state.me) {
       // 重连：有令牌就静默坐回去；没有令牌（老模式）才按身份重认。
       const token = loadToken();
@@ -252,6 +252,7 @@ class App {
     state.players = m.players || {};
     this.auth = !!m.auth;
     this.claim.setAuth(this.auth);
+    this.claim.setLocked(m.locked || []);
     this.syncAccountLinks();
     this.chat.updateOnline();
 
@@ -339,8 +340,8 @@ class App {
     if (m.players && typeof m.players === 'object') state.players = m.players;
 
     if (reason === 'role_online') {
-      // 口令/令牌已经校验过了，只是身份在别处在线。保留输入，让用户
-      // 勾上「强制登录」再点一次，而不是把口令冲掉重输。
+      // 凭据（口令/令牌）已经校验过了，只是身份在别处在线：
+      // 直接问一句要不要顶号，不用再输一次口令。
       state.lastRole = '';
       savePref('petclub.role', '');
       if (state.me) {
@@ -349,8 +350,16 @@ class App {
         this.chat.resetForClaim();
       }
       this.chat.hideMain();
-      this.claim.show(`${m.msg || '这个身份正在别处在线'}。勾选「强制登录」后再点进入，可让旧设备下线。`);
-      this.claim.setStatus(m.msg || '', true);
+      const msg = m.msg || '这个身份正在别处在线';
+      this.claim.show(msg);
+      this.claim.setStatus('');
+      const last = this.lastJoin || {};
+      if ((last.role || last.code || last.token)
+          && window.confirm(`${msg}。\n继续登录会让那台设备下线，是否继续？`)) {
+        this.join({ ...last, force: true });
+        return;
+      }
+      this.claim.setStatus(msg, true);
       this.claim.render();
       return;
     }
@@ -386,11 +395,21 @@ class App {
     this.claim.render();
   }
 
-  /** 被新设备顶下线：回到登录页，并且不要用令牌自动顶回去。 */
+  /** 被新设备顶下线：令牌还有效，问一句就能直接抢回来。 */
   onKicked(m) {
     this.autoTried = true;
+    const role = state.me && state.me.role;
+    const token = loadToken();
+    const msg = m.msg || '你的身份已在另一台设备登录';
     this.chat.setNote('');
-    this.releaseLocal(m.msg || '你的身份已在另一台设备登录');
+    this.releaseLocal(msg);
+    if (!role || !token) return;
+    if (window.confirm(
+      `「${roleName(role)}」正在另一台设备上登录。\n`
+      + '要在这台设备继续登录吗？对方会被踢下线。',
+    )) {
+      this.join({ token, force: true });
+    }
   }
 
   onCodeOk(m) {
@@ -415,11 +434,12 @@ class App {
     const payload = { t: 'join', client: 'web' };
     if (typeof what === 'string') {
       payload.role = what;
-    } else if (what && what.code) {
-      payload.code = what.code;
-      if (what.force) payload.force = true;
-    } else if (what && what.token) {
-      payload.token = what.token;
+    } else if (what && typeof what === 'object') {
+      // 新流程：role + code 一起发，服务端只拿口令和选中的身份比。
+      if (what.token) payload.token = what.token;
+      if (what.role) payload.role = what.role;
+      if (what.code) payload.code = what.code;
+      if (!payload.token && !payload.role && !payload.code) return;
       if (what.force) payload.force = true;
     } else {
       return;
@@ -438,9 +458,7 @@ class App {
     this.claim.show(note);
     this.claim.render();
     this.claim.setStatus(
-      state.connected
-        ? (this.auth ? '已连接 · 输入认领口令' : '已连接 · 选一个身份')
-        : '连不上服务器，正在重试…',
+      state.connected ? '已连接 · 选一个身份' : '连不上服务器，正在重试…',
       !state.connected,
     );
   }

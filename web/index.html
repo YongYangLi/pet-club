@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <!-- 认领页：没启用口令时选人物；启用了口令就是口令登录 -->
+  <!-- 认领页：先选人物；启用了口令的身份，选中后下方才出现口令框 -->
   <div id="claim-screen" class="screen">
     <div class="claim-card">
       <div class="claim-kicker">pet-club <span class="ver">v__VERSION__</span></div>
@@ -20,13 +20,9 @@
       <p class="claim-sub" id="claim-sub">同一时间每个身份只能有一个人</p>
       <div id="role-grid" class="role-grid"></div>
       <div id="claim-auth" class="claim-auth hidden">
-        <label class="claim-auth-label" for="claim-code">认领口令</label>
+        <label class="claim-auth-label" id="claim-auth-label" for="claim-code">认领口令</label>
         <input id="claim-code" class="claim-code" type="password"
                autocomplete="off" placeholder="管理员发给你的认领口令">
-        <label class="claim-force">
-          <input id="claim-force" type="checkbox">
-          身份已在别处在线时强制登录（会让旧设备下线）
-        </label>
       </div>
       <div id="claim-note" class="claim-note"></div>
       <div class="claim-foot">

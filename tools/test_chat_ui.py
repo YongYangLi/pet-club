@@ -731,19 +731,37 @@ def main():
 
     print('\n--- 口令登录 / 账号入口 ---')
     old_dlg = ClaimDialog(None, {}, '')
-    chk('没启用口令时还是角色卡片',
-        len(old_dlg.cards) == len(ROLES) and old_dlg.code_edit is None)
+    chk('没启用口令时是角色卡片、没有口令框',
+        len(old_dlg.cards) == len(ROLES) and old_dlg.code_box.isHidden())
     old_dlg.close()
 
-    adlg = ClaimDialog(None, {}, '口令错了', auth=True)
-    chk('口令模式不再显示角色卡片',
-        not adlg.cards and adlg.code_edit is not None)
+    adlg = ClaimDialog(None, {}, '口令错了', auth=True, locked=['p1'])
+    chk('口令模式也显示六张角色卡片', len(adlg.cards) == len(ROLES))
+    chk('没选人时不显示口令框', adlg.code_box.isHidden())
+    adlg._pick('p1')
+    chk('选中设了口令的身份才出现口令框', not adlg.code_box.isHidden())
     chk('空口令不能提交', not adlg.ok_btn.isEnabled())
     adlg.code_edit.setText('ABCD-EFGH-JKLM')
     chk('输入口令后可以提交', adlg.ok_btn.isEnabled())
-    chk('强制登录默认不勾', adlg.force is False)
-    adlg.force_box.setChecked(True)
-    chk('勾选后带着 force 走', adlg.force is True)
+
+    nlocked = ClaimDialog(None, {}, '', auth=True, locked=['p1'])
+    nlocked._pick('p2')
+    chk('没设口令的身份不需要输入框',
+        nlocked.code_box.isHidden() and nlocked.ok_btn.isEnabled())
+
+    taken = ClaimDialog(None, {'p1': {'role': 'p1'}}, '',
+                        auth=True, locked=['p1'])
+    taken._pick('p1')
+    chk('已在线身份仍可选，选中后照样要输口令',
+        taken.role == 'p1' and not taken.code_box.isHidden())
+    taken.code_edit.setText('ABCD-EFGH-JKLM')
+    chk('输完口令可提交（之后才确认顶号）', taken.ok_btn.isEnabled())
+    taken.close()
+
+    plain_taken = ClaimDialog(None, {'p1': {'role': 'p1'}}, '')
+    plain_taken._pick('p1')
+    chk('没启用口令时被占的身份点不动', plain_taken.role is None)
+    plain_taken.close()
     adlg.close()
 
     acct = ChatWindow(None, me='p1', on_set_code=lambda: None)

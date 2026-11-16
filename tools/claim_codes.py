@@ -35,6 +35,17 @@ def new_code():
                          ''.join(chars[8:]))
 
 
+def new_codes(roles):
+    """一次生成一组互不相同的口令 —— 两条一样就分不清是谁了。"""
+    codes = {}
+    for role in roles:
+        code = new_code()
+        while code in codes.values():
+            code = new_code()
+        codes[role] = code
+    return codes
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description='认领口令管理')
     ap.add_argument('--file', default=DEFAULT_FILE,
@@ -58,7 +69,7 @@ def main(argv=None):
             print('已经有口令文件了：%s' % args.file)
             print('要重新生成请加 --force（旧口令和已登录设备都会失效）。')
             return 1
-        codes = {role: new_code() for role in server.ROLES}
+        codes = new_codes(server.ROLES)
         server.auth_init(codes)
         print('已生成认领口令（只显示这一次，请私下发给对应的人）：\n')
         for role in server.ROLES:
@@ -83,7 +94,7 @@ def main(argv=None):
 
     if args.reset:
         if args.reset == 'all':
-            codes = {role: new_code() for role in server.ROLES}
+            codes = new_codes(server.ROLES)
             server.auth_init(codes)
             print('已为六个身份生成新口令（旧口令和所有设备令牌全部失效）：\n')
             for role in server.ROLES:
@@ -92,7 +103,8 @@ def main(argv=None):
             print('\n请私下发给对应的人；用户登录后可以自己再改。')
         elif args.reset in server.ROLES:
             code = new_code()
-            server.auth_set_code(args.reset, code)
+            while not server.auth_set_code(args.reset, code):
+                code = new_code()
             print('已为 %s %s 生成新口令（旧口令和设备令牌已失效）：\n\n  %s\n'
                   % (args.reset, server.ROLE_NAMES.get(args.reset, ''), code))
         else:

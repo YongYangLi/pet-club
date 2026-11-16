@@ -203,11 +203,12 @@ button, input, textarea {
   line-height: 20px;
 }
 
-/* 口令登录：口令即身份，没有角色卡片可点 */
+/* 口令登录：选中设了口令的身份后才出现 */
 .claim-auth {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  margin-top: 16px;
 }
 
 .claim-auth.hidden { display: none; }
@@ -228,13 +229,11 @@ button, input, textarea {
 
 .claim-code:focus { outline: none; border-color: var(--accent); }
 
-.claim-force {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--muted);
+/* 启用了口令时，被占的身份也能点：进去后弹「要不要让对方下线」。 */
+.role-grid.auth .role-card.taken {
   cursor: pointer;
+  filter: grayscale(.45);
+  opacity: .9;
 }
 
 .role-grid.hidden { display: none; }

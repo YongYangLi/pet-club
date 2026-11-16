@@ -60,11 +60,11 @@ B64_RE = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
 # 起因很实在 —— 客户端发了新版、服务端没重启，客户端那边表现是「图片发了对方收不到」，
 # 而两边看起来都「是最新的」（客户端版本号是对的，服务端根本不会说自己是谁）。
 # 现在握手消息里带一个 v，连上去看一眼就知道。
-SERVER_VERSION = '1.8.5'
+SERVER_VERSION = '1.8.6'
 
 # ---------------- 认领口令 ----------------
 #
-# 口令即身份：每条口令对应一个角色，服务端反查，客户端不需要先选人。
+# 口令认领：客户端先选身份，服务端只拿口令和**选中的那个人**比。
 # 口令只存 PBKDF2 盐 + 哈希；认领成功后签发设备令牌，之后重连只带令牌。
 # 一把全切上线时由 tools/claim_codes.py --init 一次生成六条。
 #
@@ -128,24 +128,50 @@ def auth_protected(role):
     return role in (_auth_load().get('roles') or {})
 
 
+def auth_locked_roles():
+    """哪些身份设了口令：认领页据此决定选中后要不要显示口令框。"""
+    roles = _auth_load().get('roles') or {}
+    return [role for role in ROLES
+            if isinstance(roles.get(role), dict) and roles[role].get('hash')]
+
+
+def _code_matches(item, code):
+    """这条口令和某个身份存着的盐 + 哈希对不对得上。"""
+    if not isinstance(item, dict) or not code:
+        return False
+    salt = item.get('salt')
+    want = item.get('hash')
+    if not salt or not want:
+        return False
+    try:
+        got = _hash_code(code, salt)
+    except (TypeError, ValueError):
+        return False
+    return hmac.compare_digest(got, want)
+
+
+def auth_code_for_role(role, code):
+    """这条口令是不是这个身份的。
+
+    认领页先选人、再校验口令，走的就是这里：口令只和选中的那个身份比，
+    不会因为别人碰巧用了同一条口令而被串到别的身份去。
+    """
+    roles = _auth_load().get('roles') or {}
+    return _code_matches(roles.get(role), code)
+
+
 def auth_role_for_code(code):
-    """口令 → 角色。所有身份都算一遍，不因为「第几个命中」泄露时序。"""
+    """口令 → 角色（只给不支持「先选人」的老客户端兜底）。
+
+    新客户端带 role，按身份校验；老客户端只发口令，只能全局反查。
+    两条口令相同时这里按文件顺序取最后一个命中的 —— 所以新流程不要用它。
+    """
     if not code:
         return None
     roles = _auth_load().get('roles') or {}
     hit = None
     for role, item in roles.items():
-        if not isinstance(item, dict):
-            continue
-        salt = item.get('salt')
-        want = item.get('hash')
-        if not salt or not want:
-            continue
-        try:
-            got = _hash_code(code, salt)
-        except (TypeError, ValueError):
-            continue
-        if hmac.compare_digest(got, want):
+        if _code_matches(item, code):
             hit = role
     return hit
 
@@ -181,13 +207,18 @@ def auth_issue_token(role):
 
 
 def auth_set_code(role, code):
-    """设置/重设口令。旧令牌全部作废 —— 换口令等于换锁。"""
+    """设置/重设口令。旧令牌全部作废 —— 换口令等于换锁。
+
+    允许两个身份用同一条口令：认领时先选人、再按身份校验，
+    不存在「反查不到是谁」的问题。
+    """
     salt = secrets.token_hex(16)
     with _auth_lock:
         data = _auth_load()
         data.setdefault('roles', {})[role] = {
             'salt': salt, 'hash': _hash_code(code, salt), 'tokens': []}
         _auth_save(data)
+    return True
 
 
 def auth_reset(role=None):
@@ -429,7 +460,8 @@ class Registry:
             online = len(room.members)
         return {'t': 'state', 'players': players, 'online': online,
                 'total': len(ROLES), 'v': SERVER_VERSION,
-                'auth': auth_enabled()}
+                'auth': auth_enabled(),
+                'locked': auth_locked_roles()}
 
     def broadcast(self):
         """把最新状态推给**所有**连接 —— 没认领的人也要看得到，认领界面靠它。"""
@@ -549,6 +581,26 @@ class Handler(socketserver.BaseRequestHandler):
                         'auth': True,
                         'players': REG.state_msg()['players']})
                 authed = True
+            elif code and role:
+                # 新客户端：认领页先选人，口令只和**选中的这个人**比。
+                # 两个人碰巧用同一条口令也不会串身份，错口令也不会全局试探。
+                if role not in ROLES:
+                    return c.send({'t': 'reject', 'reason': 'bad_role',
+                                   'msg': '身份不合法',
+                                   'auth': auth_enabled()})
+                if auth_protected(role):
+                    if auth_locked(ip):
+                        return c.send({
+                            't': 'reject', 'reason': 'too_many',
+                            'msg': '口令错太多次了，等一分钟再试',
+                            'auth': True})
+                    if not auth_code_for_role(role, code):
+                        auth_fail(ip)
+                        return c.send({
+                            't': 'reject', 'reason': 'bad_code',
+                            'role': role, 'msg': '口令不对', 'auth': True})
+                    auth_ok(ip)
+                    authed = True
             elif code:
                 if auth_locked(ip):
                     return c.send({

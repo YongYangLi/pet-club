@@ -13,8 +13,8 @@ import os
 from PIL import Image
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
-                               QLineEdit, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel, QLineEdit,
+                               QVBoxLayout, QWidget)
 
 from .config import ROLE_NAME, ROLES, assets_dir
 from .theme import (ACCENT, ACCENT_SOFT, BORDER, FG, MUTED, OK_BG, OK_FG, SUB,
@@ -35,6 +35,7 @@ class RoleCard(QWidget):
         self._on_pick = on_pick
         self.taken = False
         self.selected = False
+        self.allow_taken = False     # 启用了口令：被占的身份也能点，进去再问顶不顶号
         self.setFixedSize(CARD_W, CARD_H)
         self.setCursor(Qt.PointingHandCursor)
         self.setFont(font(10))
@@ -86,21 +87,22 @@ class RoleCard(QWidget):
         p.end()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and not self.taken:
+        if e.button() == Qt.LeftButton and (self.allow_taken or not self.taken):
             self._on_pick(self.role)
             e.accept()
 
 
 class ClaimDialog(QDialog):
-    """认领。两种形态：
+    """认领。六张立绘卡片始终都在，先选人：
 
-    · 没启用口令：五张立绘卡片，点一张选中、再点「进入」；
-    · 启用了口令：口令即身份，只留一个输入框，服务端反查是谁。
-    口令错了 / 身份在别处在线，都会留在这一页重试。
+    · 没启用口令：点一张选中，再点「进入」；
+    · 启用了口令：选中的身份设了口令，卡片下方才出现一个口令框。
+      口令只和选中的身份比，不会全局反查，别人撞了同一条口令也不串身份。
+    口令错了 / 身份在别处在线，都会留在这一页重试（在线时另弹确认框）。
     """
 
     def __init__(self, parent, players=None, note='', on_poll=None,
-                 auth=False):
+                 auth=False, locked=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -108,10 +110,11 @@ class ClaimDialog(QDialog):
         self.players = players or {}
         self.on_poll = on_poll
         self.auth_mode = bool(auth)
+        self.locked = set(locked or ())
         self.role = None
         self.cards = {}
         self.code_edit = None
-        self.force_box = None
+        self.code_box = None
 
         self._build(note)
         self._timer = QTimer(self)
@@ -134,40 +137,46 @@ class ClaimDialog(QDialog):
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(0)
 
-        tip = QLabel('输入认领口令 —— 口令就代表你是哪个身份' if self.auth_mode
+        tip = QLabel('先选一个身份，再输入属于他的认领口令' if self.auth_mode
                      else '挑一个身份坐下 —— 同一时间每个身份只能有一个人')
         tip.setFont(font(10))
         tip.setStyleSheet('color: %s;' % SUB)
         lay.addWidget(tip)
         lay.addSpacing(18)
 
-        if self.auth_mode:
-            self.code_edit = QLineEdit(body)
-            self.code_edit.setEchoMode(QLineEdit.Password)
-            self.code_edit.setPlaceholderText('管理员发给你的认领口令')
-            self.code_edit.setFont(font(10))
-            self.code_edit.setMinimumHeight(38)
-            self.code_edit.textChanged.connect(self._sync)
-            self.code_edit.returnPressed.connect(self._ok)
-            lay.addWidget(self.code_edit)
-            lay.addSpacing(10)
-            self.force_box = QCheckBox(
-                '身份已在别处在线时强制登录（会让旧设备下线）', body)
-            self.force_box.setFont(font(9))
-            self.force_box.setStyleSheet('color: %s;' % MUTED)
-            lay.addWidget(self.force_box)
-            lay.addSpacing(14)
-        else:
-            row = QHBoxLayout()
-            row.setSpacing(CARD_GAP)
-            for i, role in enumerate(ROLES):
-                pix = self._preview(role)
-                card = RoleCard(role, pix, self._pick)
-                card.set_state(taken=bool(self.players.get(role)))
-                self.cards[role] = card
-                row.addWidget(card)
-            lay.addLayout(row)
-            lay.addSpacing(16)
+        row = QHBoxLayout()
+        row.setSpacing(CARD_GAP)
+        for role in ROLES:
+            pix = self._preview(role)
+            card = RoleCard(role, pix, self._pick)
+            # 启用了口令：被占的身份也能点，进去再确认要不要顶号。
+            card.allow_taken = self.auth_mode
+            card.set_state(taken=bool(self.players.get(role)))
+            self.cards[role] = card
+            row.addWidget(card)
+        lay.addLayout(row)
+        lay.addSpacing(14)
+
+        # 口令框：只有选中了「设了口令的身份」才出现，平时藏起来省地方。
+        self.code_box = QWidget(body)
+        cb = QVBoxLayout(self.code_box)
+        cb.setContentsMargins(0, 0, 0, 0)
+        cb.setSpacing(7)
+        self.code_who = QLabel('')
+        self.code_who.setFont(font(9))
+        self.code_who.setStyleSheet('color: %s;' % SUB)
+        cb.addWidget(self.code_who)
+        self.code_edit = QLineEdit(self.code_box)
+        self.code_edit.setEchoMode(QLineEdit.Password)
+        self.code_edit.setPlaceholderText('管理员发给你的认领口令')
+        self.code_edit.setFont(font(10))
+        self.code_edit.setMinimumHeight(38)
+        self.code_edit.textChanged.connect(self._sync)
+        self.code_edit.returnPressed.connect(self._ok)
+        cb.addWidget(self.code_edit)
+        self.code_box.setVisible(False)
+        lay.addWidget(self.code_box)
+        lay.addSpacing(10)
 
         self.note = QLabel(note or '')
         self.note.setFont(font(9))
@@ -184,11 +193,9 @@ class ClaimDialog(QDialog):
         foot.addWidget(RoundButton('退出', lambda: self.reject(),
                                    primary=False, width=76))
         self.ok_btn = RoundButton('进入', self._ok, primary=True, width=104)
-        self.ok_btn.set_enabled(bool(self.auth_mode))
         foot.addWidget(self.ok_btn)
         lay.addLayout(foot)
-        if self.auth_mode:
-            self.ok_btn.set_enabled(False)
+        self._sync()
 
     @staticmethod
     def _preview(role):
@@ -220,13 +227,17 @@ class ClaimDialog(QDialog):
         self._sync()
 
     def _sync(self):
-        if self.auth_mode:
-            self.ok_btn.set_enabled(bool(self.code.strip()))
-            return
         for role, card in self.cards.items():
             card.set_state(taken=bool(self.players.get(role)),
                            selected=(role == self.role))
-        ok = bool(self.role) and not self.players.get(self.role)
+        need = bool(self.role) and self.auth_mode and self.role in self.locked
+        self.code_box.setVisible(need)
+        if need:
+            self.code_who.setText('「%s」的认领口令'
+                                  % ROLE_NAME.get(self.role, self.role))
+            ok = bool(self.code)
+        else:
+            ok = bool(self.role) and not self.players.get(self.role)
         self.ok_btn.set_enabled(ok)
 
     def set_players(self, players):
@@ -234,7 +245,9 @@ class ClaimDialog(QDialog):
         self._sync()
 
     def _pick(self, role):
-        if self.players.get(role):
+        # 启用了口令时，被占的身份也允许选中 —— 进入后由服务端回
+        # role_online，客户端再弹「要不要让对方下线」的确认框。
+        if not self.auth_mode and self.players.get(role):
             return
         self.role = role
         self._sync()
@@ -243,17 +256,13 @@ class ClaimDialog(QDialog):
     def code(self):
         return self.code_edit.text().strip() if self.code_edit else ''
 
-    @property
-    def force(self):
-        return bool(self.force_box is not None and self.force_box.isChecked())
-
     def _ok(self):
-        if self.auth_mode:
-            if not self.code:
-                return
-            self.accept()
+        if not self.role:
             return
-        if not self.role or self.players.get(self.role):
+        need = self.auth_mode and self.role in self.locked
+        if need and not self.code:
+            return
+        if not need and self.players.get(self.role):
             return
         self.accept()
 

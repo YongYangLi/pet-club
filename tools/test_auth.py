@@ -118,6 +118,34 @@ def main():
     join(h4, token=token, client='web')
     check('拿旧令牌登不进来', last(c4).get('reason') == 'need_auth', last(c4))
 
+    print('--- 先选人，再按身份校验口令 ---')
+    check('按身份校验：p1 的口令对 p1 成立',
+          S.auth_code_for_role('p1', 'my-new-code'))
+    check('按身份校验：p1 的口令对 p2 不成立',
+          not S.auth_code_for_role('p2', 'my-new-code'))
+    c6, h6 = client()
+    join(h6, role='p2', code='my-new-code', client='web')
+    check('选错人时口令对不上', last(c6).get('reason') == 'bad_code',
+          last(c6))
+    join(h6, role='p2', code='DDDD-EEEE-FFFF', client='web')
+    check('选对人 + 口令正确就能进',
+          last(c6).get('t') == 'joined' and last(c6).get('role') == 'p2',
+          last(c6))
+
+    S.auth_set_code('p3', 'DDDD-EEEE-FFFF')
+    check('同一条口令可以属于两个身份',
+          S.auth_code_for_role('p2', 'DDDD-EEEE-FFFF')
+          and S.auth_code_for_role('p3', 'DDDD-EEEE-FFFF'))
+
+    c7, h7 = client()
+    join(h7, role='p4', code='whatever', client='web')
+    check('没设口令的身份不校验口令', last(c7).get('t') == 'joined',
+          last(c7))
+
+    locked = S.REG.state_msg().get('locked') or []
+    check('state 告诉客户端哪些身份设了口令',
+          'p1' in locked and 'p2' in locked and 'p4' not in locked, locked)
+
     print('--- 错口令 ---')
     c5, h5 = client()
     join(h5, code='nope-nope-nope', client='web')
