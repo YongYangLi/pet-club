@@ -13,9 +13,10 @@ import threading
 import time
 
 from PIL import Image
-from PySide6.QtCore import QPoint, Qt, QTimer
-from PySide6.QtGui import QCursor, QGuiApplication, QIcon
-from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox
+from PySide6.QtCore import QPoint, Qt, QTimer, QUrl
+from PySide6.QtGui import QCursor, QDesktopServices, QGuiApplication, QIcon
+from PySide6.QtWidgets import (QApplication, QDialog, QInputDialog, QLineEdit,
+                               QMenu, QMessageBox)
 
 from . import (config, custom, media, sprite_sync, store, update, upload,
                windows)
@@ -116,6 +117,13 @@ class App:
         self._heal_at = 0.0
 
         self._pending_role = None
+        # 口令登录：code 只在首次/换设备时用；token 是本机登录过之后的凭据。
+        self._auth_on = False
+        self._pending_code = ''
+        self._pending_token = ''
+        self._pending_force = False
+        self._last_join = {}
+        self._auto_tried = False     # 本机自动用令牌登录只试一次
         self._pending_sent = False
         self._claim_open = False
         self._claim_dlg = None
@@ -231,10 +239,21 @@ class App:
             self._sprite_next = now + config.SPRITE_SYNC_SEC
             self._sprite_start()
 
-        if self._pending_role and not self._pending_sent and self.net.connected:
-            if self.net.send(t='join', role=self._pending_role,
-                             client='desktop'):
+        if ((self._pending_role or self._pending_code or self._pending_token)
+                and not self._pending_sent and self.net.connected):
+            msg = {'t': 'join', 'client': 'desktop'}
+            if self._pending_code:
+                msg['code'] = self._pending_code
+                msg['force'] = self._pending_force
+            elif self._pending_token:
+                msg['token'] = self._pending_token
+                msg['force'] = self._pending_force
+            else:
+                msg['role'] = self._pending_role
+            if self.net.send(**msg):
                 self._pending_sent = True
+                # 记住这次用的凭据：身份在线时「强制登录」直接重发这一条。
+                self._last_join = dict(msg)
 
         if self.net.connected and now - self._last_hb >= config.HEARTBEAT_SEC:
             self._last_hb = now
@@ -460,6 +479,10 @@ class App:
             # 别人传了图 / 换了图 / 删了动作。不用等下一轮轮询 ——
             # 把下一轮提前到现在，tick 里会立刻起一个同步线程。
             self._sprite_next = 0.0
+        elif t == 'kicked':
+            self._on_kicked(m)
+        elif t == 'code_ok':
+            self._on_code_ok(m)
         elif t == '_up':
             self._set_offline(False)
             self._pending_sent = False
@@ -468,7 +491,14 @@ class App:
             self._me_since = time.monotonic()
             self._orphan_probe = False
             if self.me:
-                self.net.send(t='join', role=self.me['role'], client='desktop')
+                tok = self._auth_token()
+                if tok:
+                    self._last_join = {'t': 'join', 'client': 'desktop',
+                                       'token': tok}
+                else:
+                    self._last_join = {'t': 'join', 'client': 'desktop',
+                                       'role': self.me['role']}
+                self.net.send(**self._last_join)
             else:
                 self.net.send(t='query')
         elif t == '_down':
@@ -478,6 +508,7 @@ class App:
 
     def on_state(self, m):
         self.players = m.get('players') or {}
+        self._auth_on = bool(m.get('auth', self._auth_on))
         self._state_seen = True
         if self.chat is not None and self.chat.alive():
             self.chat.refresh_state()
@@ -507,8 +538,16 @@ class App:
                     return
         if self._claim_dlg is not None:
             self._claim_dlg.set_players(self.players)
-        elif not self.me and not self._pending_role and not self._claim_open:
-            self._claim_soon()
+        elif (not self.me and not self._pending_role and not self._pending_code
+              and not self._pending_token and not self._claim_open):
+            # 本机登录过：先用令牌静默坐回去，别每次启动都让人输口令。
+            tok = self._auth_token()
+            if tok and not self._auto_tried:
+                self._auto_tried = True
+                self._pending_token = tok
+                self._pending_sent = False
+            else:
+                self._claim_soon()
 
     def on_joined(self, m):
         role = m.get('role')
@@ -517,7 +556,12 @@ class App:
         self._me_since = time.monotonic()
         self._orphan_probe = False
         self._pending_role = None
+        self._pending_code = ''
+        self._pending_token = ''
+        self._pending_force = False
         self._pending_sent = False
+        if isinstance(m.get('token'), str) and m['token']:
+            self._save_auth_token(m['token'])
         # joined 一定先于下一次 state 到：那一刻 players 里还没有自己，
         # 光靠 sync_pets 会让角色晚一帧才出现，出场那句「到位啦」也就跟着丢了。
         # 服务端都说我认领成功了，先把角色放出来（sync_pets 会把它当成
@@ -529,11 +573,97 @@ class App:
             self._say_on_land = (role, '我是%s，到位啦～' % ROLE_NAME.get(role, ''))
 
     def on_reject(self, m):
-        self._pending_role = None
+        reason = m.get('reason') or ''
         self._pending_sent = False
         if isinstance(m.get('players'), dict):
             self.players = m['players']
+        if m.get('auth') is not None:
+            self._auth_on = bool(m.get('auth'))
+
+        if reason == 'role_online':
+            self._pending_role = None
+            self._pending_code = ''
+            self._pending_token = ''
+            self._pending_force = False
+            msg = m.get('msg') or '身份正在别处在线'
+            role = m.get('role') or ''
+            kind = m.get('client')
+            # 不在 tick 的调用栈里开模态框：延后一拍再问。
+            QTimer.singleShot(1, lambda: self._ask_force(role, kind, msg))
+            return
+
+        if reason in ('bad_code', 'need_auth', 'too_many'):
+            if reason == 'need_auth':
+                self._clear_auth_token()
+            self._pending_role = None
+            self._pending_code = ''
+            self._pending_token = ''
+            self._pending_force = False
+            self._claim_soon(m.get('msg') or '认领失败，重新输一次口令吧')
+            return
+
+        self._pending_role = None
+        self._pending_code = ''
+        self._pending_token = ''
+        self._pending_force = False
         self._claim_soon(m.get('msg', '认领失败，换一个身份吧'))
+
+    def _ask_force(self, role, kind, msg):
+        """身份在别处在线：问一句要不要顶号，带凭据才允许。"""
+        if self.me or self._closing:
+            return
+        if not (self._last_join.get('code') or self._last_join.get('token')):
+            self._claim_soon(msg)       # 老模式没有凭据，顶不了
+            return
+        if not self._confirm_force(role, kind):
+            self._claim_soon(msg)
+            return
+        # 用刚才那条凭据重发一次，加 force。口令/令牌已经校验过了。
+        self._pending_code = self._last_join.get('code', '')
+        self._pending_token = self._last_join.get('token', '')
+        self._pending_role = self._last_join.get('role')
+        self._pending_force = True
+        self._pending_sent = False
+
+    def _confirm_force(self, role, kind):
+        """身份在别处在线：问一句要不要顶号。"""
+        if not role:
+            return False
+        where = '网页版' if kind == 'web' else '桌面版'
+        parent = self.chat if (self.chat is not None and self.chat.alive()) else None
+        box = QMessageBox(
+            QMessageBox.Warning, '身份已在别处在线',
+            '「%s」正在%s在线。\n强制登录会让那台设备下线，确定吗？'
+            % (ROLE_NAME.get(role, role), where), QMessageBox.NoButton, parent)
+        yes = box.addButton('强制登录', QMessageBox.AcceptRole)
+        box.addButton('算了', QMessageBox.RejectRole)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def _on_kicked(self, m):
+        """被新设备顶下线：回到登录页，并且不要用令牌自动顶回去。"""
+        msg = m.get('msg') or '你的身份已在另一台设备登录'
+        self._pending_role = None
+        self._pending_code = ''
+        self._pending_token = ''
+        self._pending_force = False
+        self._pending_sent = False
+        self._auto_tried = True          # 防止自动重连后又被令牌顶回来
+        self.me = None
+        self.players = {}
+        if self.chat is not None:
+            QTimer.singleShot(0, self._close_chat)
+        self._clear_pets()
+        self._claim_soon(msg)
+
+    def _on_code_ok(self, m):
+        tok = m.get('token') if isinstance(m.get('token'), str) else ''
+        if tok:
+            self._save_auth_token(tok)
+        if self.chat is not None and self.chat.alive():
+            self.chat.set_note('口令已更新；其他设备需要重新登录')
+        elif self.me:
+            self.say_role(self.me['role'], '口令改好了')
 
     def on_error(self, m):
         msg = m.get('msg') or '这条没发出去'
@@ -717,7 +847,8 @@ class App:
 
     def _claim_soon(self, note=''):
         """延迟一拍再弹认领窗 —— 不要在 tick 的调用栈里开模态窗口。"""
-        if self._claim_open or self._closing or self.me or self._pending_role:
+        if (self._claim_open or self._closing or self.me or self._pending_role
+                or self._pending_code or self._pending_token):
             return
         if self.offline:
             # 连不上的时候，「为什么点了没反应」比「先认个身份」更该被看到：
@@ -731,26 +862,47 @@ class App:
         if self._closing:
             self._claim_open = False
             return
-        if self.me or self._pending_role:
+        if self.me or self._pending_role or self._pending_code \
+                or self._pending_token:
             self._claim_open = False
             return
         dlg = ClaimDialog(None, self.players, self._note,
-                          on_poll=self._poll_for_dialog)
+                          on_poll=self._poll_for_dialog, auth=self._auth_on)
         self._claim_dlg = dlg
         self._note = ''
         role = None
+        code = ''
+        force = False
         try:
             if dlg.exec():
-                role = dlg.role
+                if dlg.auth_mode:
+                    code = dlg.code
+                    force = dlg.force
+                else:
+                    role = dlg.role
         finally:
             self._claim_dlg = None
             self._claim_open = False
             # exec() 刚返回时 Qt 还在这个对话框的调用栈上，别在这儿析构它。
             # 留到下一次认领覆盖，进程结束前不再碰。
             self._claim_prev = dlg
-        if not role:
-            return self.quit()
-        self._pending_role = role
+        if dlg.auth_mode:
+            if not code:
+                return self.quit()
+            self._pending_role = None
+            self._pending_code = code
+            self._pending_token = ''
+            self._pending_force = force
+            self._last_join = {'t': 'join', 'client': 'desktop',
+                               'code': code, 'force': force}
+        else:
+            if not role:
+                return self.quit()
+            self._pending_role = role
+            self._pending_code = ''
+            self._pending_token = ''
+            self._pending_force = False
+            self._last_join = {'t': 'join', 'client': 'desktop', 'role': role}
         self._pending_sent = False
 
     def _poll_for_dialog(self):
@@ -1657,6 +1809,9 @@ class App:
                                    on_update=self.update_action,
                                    update_label=self.update_label,
                                    update_enabled=lambda: update.enabled(),
+                                   on_set_code=(self.set_claim_code
+                                                if self._auth_on else None),
+                                   on_download=self.download_client,
                                    initial_key=key)
             self.chat.switch(key)
             self.chat.show()
@@ -2209,6 +2364,48 @@ class App:
             self.chat.remote_on = self.remote_on
         return self.remote_on
 
+    # ---------------- 认领口令 / 下载 ----------------
+
+    def _auth_key(self):
+        """令牌按服务器端点分开存：本地房间和线上房间各登各的。"""
+        return '%s:%s' % (self.host, self.port)
+
+    def _auth_token(self):
+        data = self._prefs.get('auth') or {}
+        item = data.get(self._auth_key())
+        return item.get('token') if isinstance(item, dict) else ''
+
+    def _save_auth_token(self, token):
+        data = self._prefs.setdefault('auth', {})
+        data[self._auth_key()] = {'token': token}
+        config.save_prefs(self._prefs)
+
+    def _clear_auth_token(self):
+        data = self._prefs.get('auth') or {}
+        if data.pop(self._auth_key(), None) is not None:
+            config.save_prefs(self._prefs)
+
+    def set_claim_code(self):
+        """改自己的认领口令（不强制）。改完后其他设备需要重新登录。"""
+        if not self.me:
+            return
+        code, ok = QInputDialog.getText(
+            None, '修改认领口令',
+            '新口令（至少 6 位，改完请自己记住）：',
+            QLineEdit.Password)
+        if not ok:
+            return
+        code = (code or '').strip()
+        if len(code) < 6:
+            if self.chat is not None and self.chat.alive():
+                self.chat.set_note('口令至少 6 位')
+            return
+        self.net.send(t='setcode', code=code)
+
+    def download_client(self):
+        """下载和当前版本对应的桌面客户端。"""
+        QDesktopServices.openUrl(QUrl(config.RELEASE_DOWNLOAD_URL))
+
     def do_leave(self):
         if self.me:
             self.net.send(t='leave')
@@ -2219,7 +2416,13 @@ class App:
             QTimer.singleShot(0, self._close_chat)
         self.me = None
         self._pending_role = None
+        self._pending_code = ''
+        self._pending_token = ''
+        self._pending_force = False
         self._pending_sent = False
+        # 主动换身份：本机令牌不再自动顶上，否则会立刻又坐回原来的位置。
+        self._clear_auth_token()
+        self._auto_tried = True
         self._clear_pets()
         QTimer.singleShot(
             1200, lambda: self._claim_soon('已释放身份，重新认领一个吧'))
@@ -2253,7 +2456,11 @@ class App:
         self.me = None
         self.players = {}
         self._pending_role = None
+        self._pending_code = ''
+        self._pending_token = ''
+        self._pending_force = False
         self._pending_sent = False
+        self._auto_tried = False
         self._state_seen = False
         self._claim_open = False
         self._stash = []

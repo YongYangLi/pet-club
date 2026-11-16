@@ -141,7 +141,12 @@ def meta_path():
 # ---------------- 清单 ----------------
 
 def _get(url, timeout):
-    req = urllib.request.Request(url, headers={'User-Agent': 'pet-club-updater'})
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'pet-club-updater',
+        # 清单是按固定文件名覆盖的，不能让中间层拿旧缓存当新版。
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+    })
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.read()
 

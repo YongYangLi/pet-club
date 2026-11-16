@@ -2,6 +2,7 @@
 // 业务判断和 petclub/app.py 的 App 对应；Qt 窗口换成了 DOM。
 import {
   state, CONV_ALL, roleName, nowSec, savePref,
+  loadToken, saveToken, clearToken,
 } from './state.js';
 import {
   loadMeta, getAction, what, sayLine, replyLine, mediaLine, actionTip,
@@ -22,12 +23,27 @@ import { spriteManifest } from './asset.js';
 import { clearRole } from './sprites.js';
 import { openUpload, resetPose } from './upload.js';
 
+// 下载桌面客户端：优先用对象存储里的 exe（和自动更新同一目录）。
+const GITHUB_REPO = 'https://github.com/YongYangLi/pet-club';
+
+function downloadUrl() {
+  // 网关下发的是桶里的地址（和自动更新同一个目录）；拿不到再退回 GitHub。
+  const url = state.meta && state.meta.download_url;
+  if (url) return url;
+  const v = (state.meta && (state.meta.web_version
+    || state.meta.server_version)) || '';
+  return v ? `${GITHUB_REPO}/releases/download/v${v}/pet-club.exe`
+    : `${GITHUB_REPO}/releases/latest`;
+}
+
 class App {
   constructor() {
     this.quitting = false;
     this.joinedAt = 0;
     // 刷新回来后自动坐回上次身份的尝试只有一次，失败就老老实实回认领页
     this.autoTried = false;
+    this.auth = false;
+    this.lastJoin = null;
     this.taps = new Map();
     // 上一次见到的「每个角色有哪些覆盖图」。清单是整份下发的，
     // 但别人换的是他自己的图 —— 靠这份快照只重建真的变了的角色。
@@ -100,6 +116,7 @@ class App {
 
     this.claim.init();
     this.chat.init();
+    this.initAccountLinks();
     document.body.dataset.petSize = state.petSize;
     this.chat.setOffline(true);
     this.claim.show('');
@@ -147,6 +164,49 @@ class App {
     bar.classList.remove('hidden');
   }
 
+  // ---------------- 口令 / 下载 ----------------
+
+  initAccountLinks() {
+    const dl = document.getElementById('download-client');
+    if (dl) dl.href = downloadUrl();
+
+    const modal = document.getElementById('code-modal');
+    const news = document.getElementById('code-new');
+    const again = document.getElementById('code-new2');
+    const msg = document.getElementById('code-msg');
+    if (!modal || !news || !again || !msg) return;
+
+    const close = () => modal.classList.add('hidden');
+    const open = () => {
+      if (!state.me || !this.auth) return;
+      news.value = '';
+      again.value = '';
+      msg.textContent = '';
+      modal.classList.remove('hidden');
+      news.focus();
+    };
+    const save = () => {
+      const a = news.value.trim();
+      const b = again.value.trim();
+      if (a.length < 6) { msg.textContent = '口令至少 6 位'; return; }
+      if (a !== b) { msg.textContent = '两次输入不一致'; return; }
+      this.net.send({ t: 'setcode', code: a });
+      close();
+      this.chat.setNote('正在保存口令…');
+    };
+    document.getElementById('set-code').addEventListener('click', open);
+    document.getElementById('code-cancel').addEventListener('click', close);
+    document.getElementById('code-save').addEventListener('click', save);
+    again.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); save(); }
+    });
+  }
+
+  syncAccountLinks() {
+    const btn = document.getElementById('set-code');
+    if (btn) btn.classList.toggle('hidden', !(this.auth && state.me));
+  }
+
   // ---------------- 连接 ----------------
 
   onOpen() {
@@ -154,9 +214,11 @@ class App {
     state.offline = false;
     this.chat.setOffline(false);
     this.claim.render();
-    this.claim.setStatus('已连接 · 选一个身份');
+    this.claim.setStatus(this.auth ? '已连接 · 输入认领口令' : '已连接 · 选一个身份');
     if (state.me) {
-      this.net.send({ t: 'join', role: state.me.role, client: 'web' });
+      // 重连：有令牌就静默坐回去；没有令牌（老模式）才按身份重认。
+      const token = loadToken();
+      this.join(token ? { token } : state.me.role);
     } else {
       this.net.send({ t: 'query' });
     }
@@ -178,6 +240,8 @@ class App {
       case 'event': this.onEvent(m); break;
       case 'error': this.onError(m); break;
       case 'left': this.onLeft(); break;
+      case 'kicked': this.onKicked(m); break;
+      case 'code_ok': this.onCodeOk(m); break;
       // 别人换了素材。不用等下一轮轮询，也不用刷新页面。
       case 'sprites': this.onSpritesPush(); break;
       default: break; // pong 等
@@ -186,23 +250,34 @@ class App {
 
   onState(m) {
     state.players = m.players || {};
+    this.auth = !!m.auth;
+    this.claim.setAuth(this.auth);
+    this.syncAccountLinks();
     this.chat.updateOnline();
 
-    // 刷新后自动坐回上次的身份。版本更新会让人被动刷新一次，
-    // 不接回来的话每次更新都把人踢回认领页重选 —— 那没人愿意点「刷新」。
+    // 刷新后自动坐回上次身份。
+    // 启用口令：有令牌就用令牌静默登录（口令决定身份，不需要记住 role）；
+    // 没启用口令：沿用原来的「上次坐哪儿」。
     if (!state.me && !state.pendingRole && !this.autoTried) {
       this.autoTried = true;
-      const last = state.lastRole;
-      if (last) {
-        if (!m.players[last]) {
-          this.claim.setStatus(`正在回到「${roleName(last)}」…`);
-          this.join(last);
-          return;
+      const token = loadToken();
+      if (token) {
+        this.join({ token });
+        return;
+      }
+      if (!this.auth) {
+        const last = state.lastRole;
+        if (last) {
+          if (!m.players[last]) {
+            this.claim.setStatus(`正在回到「${roleName(last)}」…`);
+            this.join(last);
+            return;
+          }
+          savePref('petclub.role', '');
+          state.lastRole = '';
+          this.claim.show('上次的身份已经被别人认领了，重新选一个吧');
+          this.claim.setStatus('已连接 · 选一个身份');
         }
-        savePref('petclub.role', '');
-        state.lastRole = '';
-        this.claim.show('上次的身份已经被别人认领了，重新选一个吧');
-        this.claim.setStatus('已连接 · 选一个身份');
       }
     }
 
@@ -229,7 +304,9 @@ class App {
     state.pendingRole = null;
     state.lastRole = m.role;
     savePref('petclub.role', m.role);
+    if (typeof m.token === 'string' && m.token) saveToken(m.token);
     this.joinedAt = Date.now();
+    this.syncAccountLinks();
 
     if (fresh) {
       this.chat.resetForClaim();
@@ -253,11 +330,50 @@ class App {
   }
 
   onReject(m) {
+    const reason = m.reason || '';
     state.pendingRole = null;
-    // 这次没坐上去（被占 / 不合法），别再让下次刷新重复撞一次
+    if (m.auth !== undefined) {
+      this.auth = !!m.auth;
+      this.claim.setAuth(this.auth);
+    }
+    if (m.players && typeof m.players === 'object') state.players = m.players;
+
+    if (reason === 'role_online') {
+      // 口令/令牌已经校验过了，只是身份在别处在线。保留输入，让用户
+      // 勾上「强制登录」再点一次，而不是把口令冲掉重输。
+      state.lastRole = '';
+      savePref('petclub.role', '');
+      if (state.me) {
+        state.me = null;
+        this.pets.clear();
+        this.chat.resetForClaim();
+      }
+      this.chat.hideMain();
+      this.claim.show(`${m.msg || '这个身份正在别处在线'}。勾选「强制登录」后再点进入，可让旧设备下线。`);
+      this.claim.setStatus(m.msg || '', true);
+      this.claim.render();
+      return;
+    }
+
+    if (reason === 'need_auth' || reason === 'bad_code' || reason === 'too_many') {
+      if (reason === 'need_auth') clearToken();
+      state.lastRole = '';
+      savePref('petclub.role', '');
+      if (state.me) {
+        state.me = null;
+        this.pets.clear();
+        this.chat.resetForClaim();
+      }
+      this.chat.hideMain();
+      this.claim.show(m.msg || '认领失败，重新输一次口令吧');
+      this.claim.setStatus(m.msg || '', true);
+      this.claim.render();
+      return;
+    }
+
+    // 老模式（没启用口令）的占用 / 不合法：和原来一样
     state.lastRole = '';
     savePref('petclub.role', '');
-    if (m.players && typeof m.players === 'object') state.players = m.players;
     if (state.me) {
       state.me = null;
       this.pets.clear();
@@ -268,6 +384,18 @@ class App {
     this.claim.show(m.msg || '认领失败，换一个身份吧');
     this.claim.setStatus(m.msg || '', true);
     this.claim.render();
+  }
+
+  /** 被新设备顶下线：回到登录页，并且不要用令牌自动顶回去。 */
+  onKicked(m) {
+    this.autoTried = true;
+    this.chat.setNote('');
+    this.releaseLocal(m.msg || '你的身份已在另一台设备登录');
+  }
+
+  onCodeOk(m) {
+    if (typeof m.token === 'string' && m.token) saveToken(m.token);
+    this.chat.setNote('口令已更新；其他设备需要重新登录');
   }
 
   onLeft() {
@@ -283,10 +411,23 @@ class App {
 
   // ---------------- 认领 / 释放 ----------------
 
-  join(role) {
-    state.pendingRole = role;
+  join(what) {
+    const payload = { t: 'join', client: 'web' };
+    if (typeof what === 'string') {
+      payload.role = what;
+    } else if (what && what.code) {
+      payload.code = what.code;
+      if (what.force) payload.force = true;
+    } else if (what && what.token) {
+      payload.token = what.token;
+      if (what.force) payload.force = true;
+    } else {
+      return;
+    }
+    state.pendingRole = payload;
+    this.lastJoin = payload;
     this.claim.setStatus('正在进入…');
-    if (!this.net.send({ t: 'join', role, client: 'web' })) {
+    if (!this.net.send(payload)) {
       state.pendingRole = null;
       this.claim.setStatus('还没连上服务器，稍等一下', true);
     }
@@ -297,7 +438,9 @@ class App {
     this.claim.show(note);
     this.claim.render();
     this.claim.setStatus(
-      state.connected ? '已连接 · 选一个身份' : '连不上服务器，正在重试…',
+      state.connected
+        ? (this.auth ? '已连接 · 输入认领口令' : '已连接 · 选一个身份')
+        : '连不上服务器，正在重试…',
       !state.connected,
     );
   }
@@ -316,6 +459,7 @@ class App {
   leave() {
     if (this.quitting) return;
     this.net.send({ t: 'leave' });
+    clearToken();                 // 主动换身份：别让本机令牌自动坐回去
     closeMenu();
     this.releaseLocal('已释放身份，重新选一个吧');
   }
@@ -325,6 +469,7 @@ class App {
     this.quitting = true;
     state.lastRole = '';
     savePref('petclub.role', '');
+    clearToken();
     this.net.send({ t: 'leave' });
     this.net.stop();
     closeMenu();

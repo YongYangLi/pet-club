@@ -24,8 +24,12 @@ pet-club 服务端 —— 一台服务器就是一个房间
 """
 
 import argparse
+import hashlib
+import hmac
 import json
+import os
 import re
+import secrets
 import socketserver
 import sys
 import threading
@@ -56,7 +60,192 @@ B64_RE = re.compile(r'^[A-Za-z0-9+/]+={0,2}$')
 # 起因很实在 —— 客户端发了新版、服务端没重启，客户端那边表现是「图片发了对方收不到」，
 # 而两边看起来都「是最新的」（客户端版本号是对的，服务端根本不会说自己是谁）。
 # 现在握手消息里带一个 v，连上去看一眼就知道。
-SERVER_VERSION = '1.8.3'
+SERVER_VERSION = '1.8.4'
+
+# ---------------- 认领口令 ----------------
+#
+# 口令即身份：每条口令对应一个角色，服务端反查，客户端不需要先选人。
+# 口令只存 PBKDF2 盐 + 哈希；认领成功后签发设备令牌，之后重连只带令牌。
+# 一把全切上线时由 tools/claim_codes.py --init 一次生成六条。
+#
+# 文件放在 data/claim.json，和用户上传的素材一样属于运行期数据。
+# 测试可以用 PETCLUB_CLAIM_FILE 指到临时文件。
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+AUTH_FILE = (os.environ.get('PETCLUB_CLAIM_FILE')
+             or os.path.join(ROOT, 'data', 'claim.json'))
+AUTH_ITER = 80000            # PBKDF2 迭代次数：登录一次几十毫秒，爆破不划算
+AUTH_MIN_LEN = 6            # 用户自定义口令的最短长度
+AUTH_TOKEN_KEEP = 8         # 每个身份最多保留几台设备的令牌
+FAIL_WINDOW = 600.0         # 失败计数窗口（秒）
+FAIL_LIMIT = 5              # 窗口内失败几次开始锁
+FAIL_COOL = 60.0            # 锁多久
+
+_auth_lock = threading.Lock()
+_fail_lock = threading.Lock()
+_fails = {}                 # ip -> [失败时刻, ...]
+
+
+def _auth_load():
+    try:
+        with open(AUTH_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {'version': 1, 'roles': {}}
+    if not isinstance(data, dict):
+        return {'version': 1, 'roles': {}}
+    if not isinstance(data.get('roles'), dict):
+        data['roles'] = {}
+    return data
+
+
+def _auth_save(data):
+    path = AUTH_FILE
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write('\n')
+    os.replace(tmp, path)
+
+
+def _hash_code(code, salt):
+    return hashlib.pbkdf2_hmac('sha256', code.encode('utf-8'),
+                               bytes.fromhex(salt), AUTH_ITER).hex()
+
+
+def _hash_token(token):
+    return hashlib.sha256(token.encode('utf-8')).hexdigest()
+
+
+def auth_enabled():
+    return bool(_auth_load().get('roles'))
+
+
+def auth_protected(role):
+    return role in (_auth_load().get('roles') or {})
+
+
+def auth_role_for_code(code):
+    """口令 → 角色。所有身份都算一遍，不因为「第几个命中」泄露时序。"""
+    if not code:
+        return None
+    roles = _auth_load().get('roles') or {}
+    hit = None
+    for role, item in roles.items():
+        if not isinstance(item, dict):
+            continue
+        salt = item.get('salt')
+        want = item.get('hash')
+        if not salt or not want:
+            continue
+        try:
+            got = _hash_code(code, salt)
+        except (TypeError, ValueError):
+            continue
+        if hmac.compare_digest(got, want):
+            hit = role
+    return hit
+
+
+def auth_role_for_token(token):
+    if not token:
+        return None
+    want = _hash_token(token)
+    roles = _auth_load().get('roles') or {}
+    hit = None
+    for role, item in roles.items():
+        if not isinstance(item, dict):
+            continue
+        for h in item.get('tokens') or []:
+            if isinstance(h, str) and hmac.compare_digest(want, h):
+                hit = role
+    return hit
+
+
+def auth_issue_token(role):
+    """登录成功后发一张设备令牌。调用方负责只把明文发给客户端一次。"""
+    token = secrets.token_hex(16)
+    with _auth_lock:
+        data = _auth_load()
+        item = (data.get('roles') or {}).get(role)
+        if not isinstance(item, dict):
+            return ''
+        tokens = item.get('tokens') or []
+        tokens.append(_hash_token(token))
+        item['tokens'] = tokens[-AUTH_TOKEN_KEEP:]
+        _auth_save(data)
+    return token
+
+
+def auth_set_code(role, code):
+    """设置/重设口令。旧令牌全部作废 —— 换口令等于换锁。"""
+    salt = secrets.token_hex(16)
+    with _auth_lock:
+        data = _auth_load()
+        data.setdefault('roles', {})[role] = {
+            'salt': salt, 'hash': _hash_code(code, salt), 'tokens': []}
+        _auth_save(data)
+
+
+def auth_reset(role=None):
+    """删掉某身份（或全部）的口令。删掉后该身份回到先占先得。"""
+    with _auth_lock:
+        data = _auth_load()
+        roles = data.get('roles') or {}
+        if role is None:
+            roles.clear()
+        else:
+            roles.pop(role, None)
+        data['roles'] = roles
+        _auth_save(data)
+
+
+def auth_init(codes):
+    """一次性写入六个身份的口令（只存哈希）。"""
+    roles = {}
+    for role, code in codes.items():
+        salt = secrets.token_hex(16)
+        roles[role] = {'salt': salt, 'hash': _hash_code(code, salt),
+                       'tokens': []}
+    with _auth_lock:
+        _auth_save({'version': 1, 'roles': roles})
+
+
+def _loopback(ip):
+    """本机来的连接（桌面端、网页网关）不走 IP 限速。
+
+    网页网关会把所有浏览器连接代理成 127.0.0.1，按 IP 计数会变成
+    「一个人输错五次，全体网页用户一起被锁」；本机是可信边界。
+    """
+    return ip in ('127.0.0.1', '::1', 'localhost')
+
+
+def auth_locked(ip):
+    if _loopback(ip):
+        return False
+    now = time.monotonic()
+    with _fail_lock:
+        times = [t for t in _fails.get(ip, []) if now - t < FAIL_WINDOW]
+        _fails[ip] = times
+        return len(times) >= FAIL_LIMIT and now - times[-1] < FAIL_COOL
+
+
+def auth_fail(ip):
+    if _loopback(ip):
+        return
+    now = time.monotonic()
+    with _fail_lock:
+        times = [t for t in _fails.get(ip, []) if now - t < FAIL_WINDOW]
+        times.append(now)
+        _fails[ip] = times
+
+
+def auth_ok(ip):
+    with _fail_lock:
+        _fails.pop(ip, None)
 
 
 def log(msg):
@@ -200,6 +389,37 @@ class Registry:
         log('释放「%s」' % ROLE_NAMES.get(member.role, member.role))
         return True
 
+    def member_of(self, role):
+        """这个身份现在谁在线；没人在线返回 None。"""
+        room = self.room
+        with room.lock:
+            mid = room.roles.get(role)
+            return room.members.get(mid) if mid else None
+
+    def kick(self, role, msg):
+        """把某个身份在线的那一位强制下线，并释放身份。
+
+        只在「口令/令牌校验通过、且客户端明确选择强制登录」时调用。
+        先发 kicked 再断开：旧设备据此回到登录页，而不是傻傻地自动重连
+        再把人踢回来（那样两边会来回抢）。
+        """
+        room = self.room
+        with room.lock:
+            mid = room.roles.get(role)
+            m = room.members.pop(mid, None) if mid else None
+            if m is not None:
+                room.roles[role] = None
+        if m is None:
+            return None
+        if m.client is not None:
+            m.client.send({'t': 'kicked', 'msg': msg})
+            if m.client.member is m:
+                m.client.member = None
+            m.client.close()
+        log('强制下线「%s」' % ROLE_NAMES.get(role, role))
+        self.broadcast()
+        return m
+
     # ---- 广播 ----
 
     def state_msg(self):
@@ -208,7 +428,8 @@ class Registry:
             players = room.snapshot_locked()
             online = len(room.members)
         return {'t': 'state', 'players': players, 'online': online,
-                'total': len(ROLES), 'v': SERVER_VERSION}
+                'total': len(ROLES), 'v': SERVER_VERSION,
+                'auth': auth_enabled()}
 
     def broadcast(self):
         """把最新状态推给**所有**连接 —— 没认领的人也要看得到，认领界面靠它。"""
@@ -310,19 +531,102 @@ class Handler(socketserver.BaseRequestHandler):
             role = msg.get('role')
             # 老客户端不带 client，默认桌面版；新网页版带 'web'。
             client_kind = 'web' if msg.get('client') == 'web' else 'desktop'
-            m, err = REG.join(c, role, client_kind)
-            if err == 'role_taken':
-                self.client.send({
-                    't': 'reject', 'reason': 'role_taken', 'role': role,
-                    'msg': '「%s」已经被认领了' % ROLE_NAMES.get(role, role),
+            code = msg.get('code')
+            code = code.strip() if isinstance(code, str) else ''
+            token = msg.get('token')
+            token = token.strip() if isinstance(token, str) else ''
+            force = msg.get('force') is True
+            ip = self.client_address[0]
+
+            # 认证：口令即身份；令牌是「这台设备已经登录过」的凭据。
+            authed = False
+            if token:
+                role = auth_role_for_token(token)
+                if role is None:
+                    return c.send({
+                        't': 'reject', 'reason': 'need_auth',
+                        'msg': '登录已失效，请重新输入认领口令',
+                        'auth': True,
+                        'players': REG.state_msg()['players']})
+                authed = True
+            elif code:
+                if auth_locked(ip):
+                    return c.send({
+                        't': 'reject', 'reason': 'too_many',
+                        'msg': '口令错太多次了，等一分钟再试',
+                        'auth': True})
+                role = auth_role_for_code(code)
+                if role is None:
+                    auth_fail(ip)
+                    return c.send({
+                        't': 'reject', 'reason': 'bad_code',
+                        'msg': '口令不对', 'auth': True})
+                auth_ok(ip)
+                authed = True
+            elif role and not auth_protected(role):
+                pass                    # 还没配口令的身份：保持先占先得
+            else:
+                if role not in ROLES:
+                    return c.send({'t': 'reject', 'reason': 'bad_role',
+                                   'msg': '身份不合法',
+                                   'auth': auth_enabled()})
+                return c.send({
+                    't': 'reject', 'reason': 'need_auth',
+                    'role': role,
+                    'msg': '该身份已启用认领口令，请更新客户端后输入口令',
+                    'auth': auth_enabled(),
                     'players': REG.state_msg()['players']})
-                return
+
+            if role not in ROLES:
+                return c.send({'t': 'reject', 'reason': 'bad_role',
+                               'msg': '身份不合法', 'auth': auth_enabled()})
+
+            # 身份在线：带正确凭据 + 明确强制，才允许顶号。
+            old = REG.member_of(role)
+            if old is not None:
+                if authed and force:
+                    REG.kick(role, '你的身份已在另一台设备登录，这台已下线')
+                else:
+                    # 没启用口令时沿用老的 reason，老客户端靠它回认领页。
+                    return c.send({
+                        't': 'reject',
+                        'reason': ('role_online' if auth_enabled()
+                                   else 'role_taken'),
+                        'role': role,
+                        'client': old.kind,
+                        'msg': '「%s」正在%s在线' % (
+                            ROLE_NAMES.get(role, role),
+                            '网页版' if old.kind == 'web' else '桌面版'),
+                        'auth': auth_enabled(),
+                        'players': REG.state_msg()['players']})
+
+            m, err = REG.join(c, role, client_kind)
             if err:
                 return c.send({'t': 'reject', 'reason': err, 'role': role,
-                               'msg': '身份不合法'})
-            c.send({'t': 'joined', 'role': role,
-                    'name': ROLE_NAMES.get(role, role)})
+                               'msg': '身份不合法', 'auth': auth_enabled()})
+            out = {'t': 'joined', 'role': role,
+                   'name': ROLE_NAMES.get(role, role)}
+            if code:
+                # 口令登录成功 → 发一张设备令牌，之后重连不再输口令。
+                tok = auth_issue_token(role)
+                if tok:
+                    out['token'] = tok
+            c.send(out)
             REG.broadcast()
+
+        elif t == 'setcode':
+            m = c.member
+            if not m:
+                return c.send({'t': 'error', 'msg': '还没认领身份'})
+            code = msg.get('code')
+            code = code.strip() if isinstance(code, str) else ''
+            if len(code) < AUTH_MIN_LEN:
+                return c.send({'t': 'error',
+                               'msg': '口令至少 %d 位' % AUTH_MIN_LEN})
+            auth_set_code(m.role, code)
+            tok = auth_issue_token(m.role)
+            c.send({'t': 'code_ok', 'role': m.role, 'token': tok})
+            log('「%s」修改了认领口令' % ROLE_NAMES.get(m.role, m.role))
 
         elif t == 'ping':
             if c.member:

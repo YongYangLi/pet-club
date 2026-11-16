@@ -12,13 +12,22 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <!-- 认领页：进入网页先选人物 -->
+  <!-- 认领页：没启用口令时选人物；启用了口令就是口令登录 -->
   <div id="claim-screen" class="screen">
     <div class="claim-card">
       <div class="claim-kicker">pet-club <span class="ver">v__VERSION__</span></div>
-      <h1>挑一个身份坐下</h1>
-      <p class="claim-sub">同一时间每个身份只能有一个人</p>
+      <h1 id="claim-title">挑一个身份坐下</h1>
+      <p class="claim-sub" id="claim-sub">同一时间每个身份只能有一个人</p>
       <div id="role-grid" class="role-grid"></div>
+      <div id="claim-auth" class="claim-auth hidden">
+        <label class="claim-auth-label" for="claim-code">认领口令</label>
+        <input id="claim-code" class="claim-code" type="password"
+               autocomplete="off" placeholder="管理员发给你的认领口令">
+        <label class="claim-force">
+          <input id="claim-force" type="checkbox">
+          身份已在别处在线时强制登录（会让旧设备下线）
+        </label>
+      </div>
       <div id="claim-note" class="claim-note"></div>
       <div class="claim-foot">
         <div id="claim-status" class="claim-status">正在连接服务器…</div>
@@ -45,6 +54,13 @@
             <span class="me-text"><b id="me-name"></b><small id="me-state">在线</small></span>
             <span class="me-caret">⋯</span>
           </button>
+          <!-- 头像右侧：认领口令（可选）和下载桌面客户端 -->
+          <div class="side-extra">
+            <button id="set-code" class="side-link hidden" type="button"
+                    title="修改自己的认领口令">设置口令</button>
+            <a id="download-client" class="side-link" href="#" target="_blank"
+               rel="noopener" title="下载和当前版本对应的桌面客户端">下载客户端</a>
+          </div>
         </div>
       </aside>
 
@@ -97,6 +113,23 @@
   <div id="update-banner" class="update-banner hidden">
     <span id="update-text" class="update-text">有新版本</span>
     <button id="update-go" class="update-go" type="button">立即刷新</button>
+  </div>
+
+  <!-- 修改认领口令（可选，不强制设置） -->
+  <div id="code-modal" class="modal hidden">
+    <div class="modal-card">
+      <h3>修改认领口令</h3>
+      <p class="modal-sub">改完后其他设备需要重新登录；口令至少 6 位。</p>
+      <input id="code-new" class="claim-code" type="password" autocomplete="off"
+             placeholder="新口令">
+      <input id="code-new2" class="claim-code" type="password" autocomplete="off"
+             placeholder="再输一次">
+      <div id="code-msg" class="modal-msg"></div>
+      <div class="modal-foot">
+        <button id="code-cancel" class="btn" type="button">取消</button>
+        <button id="code-save" class="btn btn-primary" type="button">保存</button>
+      </div>
+    </div>
   </div>
 
   <script type="module" src="/static/js/main.js"></script>

@@ -35,6 +35,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import unquote, urlparse
 
 from petclub import actions
+from petclub import config as server_config
 from petclub import custom
 from petclub import tokens
 from petclub import __version__ as WEB_VERSION
@@ -190,6 +191,8 @@ def build_meta():
         'server_version': getattr(game_server, 'SERVER_VERSION', ''),
         'web_version': b['version'],
         'build': b['build'],
+        # 桌面客户端下载地址：跟自动更新同一个桶，不再跳 GitHub。
+        'download_url': getattr(server_config, 'RELEASE_DOWNLOAD_URL', ''),
     }
 
 

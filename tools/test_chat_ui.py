@@ -32,6 +32,7 @@ from petclub.chat import (BUBBLE_MAX, CARD_BG, CELL, CELL_GAP, CHIP_H,  # noqa: 
                           BubbleText, ChatWindow, Composer, CONV_ALL,
                           ImageViewer, MeBar, StatePill)
 from petclub.config import ROLES, assets_dir                     # noqa: E402
+from petclub.claim import ClaimDialog                            # noqa: E402
 
 PASS = []
 FAIL = []
@@ -727,6 +728,33 @@ def main():
     gwin.hide()
 
     qwin.hide()
+
+    print('\n--- 口令登录 / 账号入口 ---')
+    old_dlg = ClaimDialog(None, {}, '')
+    chk('没启用口令时还是角色卡片',
+        len(old_dlg.cards) == len(ROLES) and old_dlg.code_edit is None)
+    old_dlg.close()
+
+    adlg = ClaimDialog(None, {}, '口令错了', auth=True)
+    chk('口令模式不再显示角色卡片',
+        not adlg.cards and adlg.code_edit is not None)
+    chk('空口令不能提交', not adlg.ok_btn.isEnabled())
+    adlg.code_edit.setText('ABCD-EFGH-JKLM')
+    chk('输入口令后可以提交', adlg.ok_btn.isEnabled())
+    chk('强制登录默认不勾', adlg.force is False)
+    adlg.force_box.setChecked(True)
+    chk('勾选后带着 force 走', adlg.force is True)
+    adlg.close()
+
+    acct = ChatWindow(None, me='p1', on_set_code=lambda: None,
+                      on_download=lambda: None)
+    acct.show()
+    qapp.processEvents()
+    chk('头像右侧有口令和下载入口',
+        any(b.text() == '口令' for b in acct.me_bar.findChildren(QToolButton))
+        and any(b.text() == '下载'
+                for b in acct.me_bar.findChildren(QToolButton)))
+    acct.hide()
 
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))
     for name in FAIL:

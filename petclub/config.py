@@ -77,15 +77,26 @@ def pet_scale(dpr):
 # （tools/build_app.py 读这里），发版时 tools/make_release.py 再把同一个号写进
 # COS 上的清单。三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
-VERSION = '1.8.3'
+VERSION = '1.8.4'
+
+# 发版地址：网页端的「下载桌面客户端」优先用对象存储里的 exe（GitHub 访问慢），
+# 清单和产物在同一个目录里，所以地址直接从 UPDATE_URL 推导。
+GITHUB_REPO = 'https://github.com/YongYangLi/pet-club'
+RELEASE_PAGE_URL = '%s/releases/tag/v%s' % (GITHUB_REPO, VERSION)
 
 # latest.json 的公网地址。**留空 = 关掉自动更新**（源码模式、内网都是这个状态）。
 # 形状：https://<桶名>.cos.<地域>.myqcloud.com/<目录>/latest.json
 # 桶开「公有读」就行：客户端只是普通 HTTP GET，不涉及签名。
 # 注意：COS 的域名里已经有桶名了，路径**不再重复一次桶名**。
 # 早期这里多写了一段 /dev-cos-1259275319/，结果客户端一路 404（拉不到清单）。
-UPDATE_URL = ('https://dev-cos-1259275319.cos.ap-shanghai.myqcloud.com'
+#
+# CI 的「覆盖发布到对象存储」也以这一行为唯一来源：从里面拆出桶名 / 地域 /
+# 目录，把 exe 和清单按固定文件名覆盖上去。换桶或换目录只改这一行即可。
+UPDATE_URL = ('https://picgo-1255439748.cos.ap-shanghai.myqcloud.com'
               '/pet-club/latest.json')
+UPDATE_BASE = UPDATE_URL.rsplit('/', 1)[0] if UPDATE_URL else ''
+# 桌面客户端的下载入口也走同一个桶：exe 和清单在同一层目录。
+RELEASE_DOWNLOAD_URL = (UPDATE_BASE + '/pet-club.exe') if UPDATE_BASE else ''
 
 UPDATE_TIMEOUT = 8          # 拉清单的超时（秒）
 UPDATE_EVERY = 3 * 3600     # 后台多久看一次有没有新版

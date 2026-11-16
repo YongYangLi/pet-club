@@ -13,7 +13,8 @@ import os
 from PIL import Image
 from PySide6.QtCore import QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel,
+                               QLineEdit, QVBoxLayout, QWidget)
 
 from .config import ROLE_NAME, ROLES, assets_dir
 from .theme import (ACCENT, ACCENT_SOFT, BORDER, FG, MUTED, OK_BG, OK_FG, SUB,
@@ -91,17 +92,26 @@ class RoleCard(QWidget):
 
 
 class ClaimDialog(QDialog):
-    """选身份。accept 时 `role` 就是选中的那个。"""
+    """认领。两种形态：
 
-    def __init__(self, parent, players=None, note='', on_poll=None):
+    · 没启用口令：五张立绘卡片，点一张选中、再点「进入」；
+    · 启用了口令：口令即身份，只留一个输入框，服务端反查是谁。
+    口令错了 / 身份在别处在线，都会留在这一页重试。
+    """
+
+    def __init__(self, parent, players=None, note='', on_poll=None,
+                 auth=False):
         super().__init__(parent)
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setModal(True)
         self.players = players or {}
         self.on_poll = on_poll
+        self.auth_mode = bool(auth)
         self.role = None
         self.cards = {}
+        self.code_edit = None
+        self.force_box = None
 
         self._build(note)
         self._timer = QTimer(self)
@@ -124,22 +134,40 @@ class ClaimDialog(QDialog):
         lay.setContentsMargins(28, 24, 28, 24)
         lay.setSpacing(0)
 
-        tip = QLabel('挑一个身份坐下 —— 同一时间每个身份只能有一个人')
+        tip = QLabel('输入认领口令 —— 口令就代表你是哪个身份' if self.auth_mode
+                     else '挑一个身份坐下 —— 同一时间每个身份只能有一个人')
         tip.setFont(font(10))
         tip.setStyleSheet('color: %s;' % SUB)
         lay.addWidget(tip)
         lay.addSpacing(18)
 
-        row = QHBoxLayout()
-        row.setSpacing(CARD_GAP)
-        for i, role in enumerate(ROLES):
-            pix = self._preview(role)
-            card = RoleCard(role, pix, self._pick)
-            card.set_state(taken=bool(self.players.get(role)))
-            self.cards[role] = card
-            row.addWidget(card)
-        lay.addLayout(row)
-        lay.addSpacing(16)
+        if self.auth_mode:
+            self.code_edit = QLineEdit(body)
+            self.code_edit.setEchoMode(QLineEdit.Password)
+            self.code_edit.setPlaceholderText('管理员发给你的认领口令')
+            self.code_edit.setFont(font(10))
+            self.code_edit.setMinimumHeight(38)
+            self.code_edit.textChanged.connect(self._sync)
+            self.code_edit.returnPressed.connect(self._ok)
+            lay.addWidget(self.code_edit)
+            lay.addSpacing(10)
+            self.force_box = QCheckBox(
+                '身份已在别处在线时强制登录（会让旧设备下线）', body)
+            self.force_box.setFont(font(9))
+            self.force_box.setStyleSheet('color: %s;' % MUTED)
+            lay.addWidget(self.force_box)
+            lay.addSpacing(14)
+        else:
+            row = QHBoxLayout()
+            row.setSpacing(CARD_GAP)
+            for i, role in enumerate(ROLES):
+                pix = self._preview(role)
+                card = RoleCard(role, pix, self._pick)
+                card.set_state(taken=bool(self.players.get(role)))
+                self.cards[role] = card
+                row.addWidget(card)
+            lay.addLayout(row)
+            lay.addSpacing(16)
 
         self.note = QLabel(note or '')
         self.note.setFont(font(9))
@@ -156,9 +184,11 @@ class ClaimDialog(QDialog):
         foot.addWidget(RoundButton('退出', lambda: self.reject(),
                                    primary=False, width=76))
         self.ok_btn = RoundButton('进入', self._ok, primary=True, width=104)
-        self.ok_btn.set_enabled(False)
+        self.ok_btn.set_enabled(bool(self.auth_mode))
         foot.addWidget(self.ok_btn)
         lay.addLayout(foot)
+        if self.auth_mode:
+            self.ok_btn.set_enabled(False)
 
     @staticmethod
     def _preview(role):
@@ -190,6 +220,9 @@ class ClaimDialog(QDialog):
         self._sync()
 
     def _sync(self):
+        if self.auth_mode:
+            self.ok_btn.set_enabled(bool(self.code.strip()))
+            return
         for role, card in self.cards.items():
             card.set_state(taken=bool(self.players.get(role)),
                            selected=(role == self.role))
@@ -206,7 +239,20 @@ class ClaimDialog(QDialog):
         self.role = role
         self._sync()
 
+    @property
+    def code(self):
+        return self.code_edit.text().strip() if self.code_edit else ''
+
+    @property
+    def force(self):
+        return bool(self.force_box is not None and self.force_box.isChecked())
+
     def _ok(self):
+        if self.auth_mode:
+            if not self.code:
+                return
+            self.accept()
+            return
         if not self.role or self.players.get(self.role):
             return
         self.accept()

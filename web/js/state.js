@@ -52,6 +52,19 @@ export function savePref(key, value) {
   try { localStorage.setItem(key, String(value)); } catch (_) {}
 }
 
+// 认领令牌：按服务器地址分开存，本地房间和线上房间各登各的。
+export function loadToken() {
+  return readText('petclub.token:' + (location.host || ''), '');
+}
+
+export function saveToken(token) {
+  savePref('petclub.token:' + (location.host || ''), token || '');
+}
+
+export function clearToken() {
+  try { localStorage.removeItem('petclub.token:' + (location.host || '')); } catch (_) {}
+}
+
 export function roleName(role) {
   return state.roleNames[role] || role || '';
 }

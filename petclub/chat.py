@@ -982,7 +982,8 @@ class ChatWindow(CardWindow):
                  on_update=None, update_label=None, update_enabled=None,
                  on_game=None, on_toy=None, on_fx=None, on_reminder=None,
                  water_on=False, water_min=45, sit_on=False, sit_min=60,
-                 my_actions_menu=None, initial_key=CONV_ALL):
+                 my_actions_menu=None, initial_key=CONV_ALL,
+                 on_set_code=None, on_download=None):
         super().__init__(parent, WIDTH, 'pet-club', stretch=False,
                          win_buttons=True, resizable=True, height=HEIGHT,
                          flat=True)
@@ -1005,6 +1006,8 @@ class ChatWindow(CardWindow):
         # 「我的动作」子菜单由 App 提供：里面是上传入口和每个改过的项，
         # 数据（谁有哪些动作）只在 App 那边有。给 None 就整块不出现。
         self.my_actions_menu = my_actions_menu
+        self.on_set_code = on_set_code
+        self.on_download = on_download
         self.on_remote = on_remote
         self.remote_hint = remote_hint or (lambda: '')
         self.remote_on = remote_on
@@ -1129,6 +1132,22 @@ class ChatWindow(CardWindow):
         me_lb.setStyleSheet('color: %s; background: transparent;' % SUB)
         mb.addWidget(me_lb)
         mb.addStretch(1)
+        # 头像右侧的小入口：认领口令（可选设置）和下载桌面客户端。
+        for text, tip, cb in (
+                ('口令', '修改自己的认领口令', self.on_set_code),
+                ('下载', '下载和当前版本对应的桌面客户端', self.on_download)):
+            if cb is None:
+                continue
+            b = QToolButton(me_bar)
+            b.setText(text)
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setFont(font(8))
+            b.setStyleSheet(
+                'QToolButton { border: none; background: transparent;'
+                ' color: %s; padding: 0 2px; }' % MUTED)
+            b.clicked.connect(cb)
+            mb.addWidget(b)
         me_bar.setToolTip('点一下：我的动作 / 桌宠大小 / 同步远程互动 / 换身份 / 退出')
         me_bar.clicked.connect(self._show_me_menu)
         lv.addWidget(me_bar)

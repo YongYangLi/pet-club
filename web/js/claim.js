@@ -7,18 +7,55 @@ export class ClaimUI {
   constructor({ onJoin }) {
     this.onJoin = onJoin;
     this.selected = null;
+    this.auth = false;
     this.cards = new Map();
     this.root = document.getElementById('claim-screen');
     this.grid = document.getElementById('role-grid');
     this.note = document.getElementById('claim-note');
     this.ok = document.getElementById('claim-ok');
     this.status = document.getElementById('claim-status');
+    this.title = document.getElementById('claim-title');
+    this.sub = document.getElementById('claim-sub');
+    this.authBox = document.getElementById('claim-auth');
+    this.codeInput = document.getElementById('claim-code');
+    this.forceBox = document.getElementById('claim-force');
 
     this.ok.addEventListener('click', () => {
-      if (!this.selected || this.isTaken(this.selected) || !state.connected) return;
+      if (!state.connected) return;
+      if (this.auth) {
+        const code = this.codeInput.value.trim();
+        if (!code) return;
+        this.setStatus('正在进入…');
+        this.onJoin({ code, force: this.forceBox.checked });
+        return;
+      }
+      if (!this.selected || this.isTaken(this.selected)) return;
       this.setStatus('正在进入…');
       this.onJoin(this.selected);
     });
+    this.codeInput.addEventListener('input', () => this.render());
+    this.codeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this.ok.click();
+      }
+    });
+  }
+
+  /** 口令模式：只留一个输入框；口令决定身份，不再选卡片。 */
+  setAuth(on) {
+    const next = !!on;
+    if (next === this.auth) return;
+    this.auth = next;
+    this.grid.classList.toggle('hidden', next);
+    this.authBox.classList.toggle('hidden', !next);
+    if (this.title) this.title.textContent = next ? '输入认领口令' : '挑一个身份坐下';
+    if (this.sub) {
+      this.sub.textContent = next
+        ? '口令就代表你是哪个身份；已登录过的设备会自动进入'
+        : '同一时间每个身份只能有一个人';
+    }
+    this.render();
   }
 
   init() {
@@ -66,6 +103,10 @@ export class ClaimUI {
   }
 
   render() {
+    if (this.auth) {
+      this.ok.disabled = !this.codeInput.value.trim() || !state.connected;
+      return;
+    }
     if (this.selected && this.isTaken(this.selected)) this.selected = null;
     for (const role of state.roles) {
       const card = this.cards.get(role);

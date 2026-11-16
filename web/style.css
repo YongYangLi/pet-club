@@ -203,6 +203,74 @@ button, input, textarea {
   line-height: 20px;
 }
 
+/* 口令登录：口令即身份，没有角色卡片可点 */
+.claim-auth {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.claim-auth.hidden { display: none; }
+
+.claim-auth-label { font-size: 13px; color: var(--sub); }
+
+.claim-code {
+  height: 42px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 12px;
+  font-family: var(--font);
+  font-size: 15px;
+  letter-spacing: 1px;
+  color: var(--fg);
+  background: #ffffff;
+}
+
+.claim-code:focus { outline: none; border-color: var(--accent); }
+
+.claim-force {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.role-grid.hidden { display: none; }
+
+/* 通用小弹层：改口令 */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(17, 24, 39, .35);
+}
+
+.modal.hidden { display: none; }
+
+.modal-card {
+  width: 360px;
+  max-width: calc(100vw - 40px);
+  background: var(--chrome);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-card h3 { margin: 0; font-size: 16px; }
+.modal-sub { margin: 0; font-size: 12px; color: var(--muted); line-height: 18px; }
+.modal-msg { min-height: 16px; font-size: 12px; color: var(--err); }
+.modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.modal-foot .btn { padding: 8px 16px; font-size: 13px; }
+.modal-foot .btn:not(.btn-primary) { background: #e9ebf3; color: var(--fg); }
+
 .claim-foot {
   display: flex;
   align-items: center;
@@ -437,10 +505,38 @@ button, input, textarea {
   z-index: 80;
   flex: none;
   padding: 8px 14px 14px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
+.side-extra {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+}
+
+.side-link {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 16px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.side-link:hover { background: var(--chrome-hover); color: var(--fg); }
+
 .me-bar {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
