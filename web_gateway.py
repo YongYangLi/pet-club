@@ -678,10 +678,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 pose = key
             if not pose:
                 return self._json({'ok': False, 'error': '没有这个动作'}, 400)
-            # 只有显式带了 move / dur 字段才改对应配置；不带就是保持原样。
-            out, err = custom.replace_pose(role, pose, frames, body.get('fps'),
-                                           move, 'move' in body,
-                                           body.get('dur'), 'dur' in body)
+            # 只有显式带了 move / dur / label 字段才改对应配置；不带就是保持原样。
+            out, err = custom.replace_pose(
+                role, pose, frames, fps=body.get('fps'),
+                move=move, set_move='move' in body,
+                dur=body.get('dur'), set_dur='dur' in body,
+                label=body.get('label'), set_label='label' in body)
         else:
             out, err = custom.add_action(role, frames, body.get('label'),
                                          body.get('dur'), body.get('fps'), move)

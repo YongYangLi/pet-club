@@ -284,10 +284,13 @@ function syncMode() {
   if (!root || !box) return;
   const key = box.mode;
   const isNew = !key;
-  root.querySelector('#up-new-row').classList.toggle('hidden', !isNew);
-
   const spec = isNew ? null : specOf(key);
   const custom = isNew || !!(spec && spec.custom);
+  // 名字：新建要填；自定义动作也能改名（跟着「换这张」一起提交）。
+  root.querySelector('#up-new-row').classList.toggle('hidden', !(isNew || custom));
+  const labelEl = root.querySelector('#up-label');
+  if (isNew) labelEl.value = '';
+  else if (custom) labelEl.value = spec.label || '';
   // 自定义动作可以改时长；内置姿势的时长是语义的一部分，不给改。
   root.querySelector('#up-dur-row').classList.toggle('hidden', !custom);
   if (isNew) {
@@ -858,6 +861,22 @@ async function prepare(files) {
     : `已裁成 ${ow}×${oh}，和其他姿势一样贴地。`);
 }
 
+// 动作名是「跟着做」的配对键：自己重名就不知道该演哪个，占内置名会有两个
+// 意思。exclude 是正在改名的那个动作 —— 保留自己原来的名字不算重名。
+function labelProblem(label, acts, exclude = '') {
+  const mine = state.me ? state.me.role : (box && box.role);
+  const want = normName(label);
+  const keys = Object.keys(acts);
+  if (keys.some((k) => k !== exclude && acts[k].custom
+    && acts[k].role === mine && normName(acts[k].label) === want)) {
+    return `你已经有「${label}」了，换个名字`;
+  }
+  if (keys.some((k) => !acts[k].custom && normName(acts[k].label) === want)) {
+    return `「${label}」是内置动作的名字，换一个吧`;
+  }
+  return '';
+}
+
 async function submit() {
   if (!box || !box.frames || !box.frames.length) {
     msg('先选一张图', true);
@@ -888,24 +907,33 @@ async function submit() {
   }
   if (mode) {
     payload.action = mode;
+    const spec = acts[mode];
+    if (spec && spec.custom) {
+      // 自定义动作可以改名：名字和换图一起提交，key 不变。
+      const label = root.querySelector('#up-label').value.trim();
+      if (!label) {
+        msg('给这个动作起个名字', true);
+        return;
+      }
+      if (normName(label) !== normName(spec.label || '')) {
+        const bad = labelProblem(label, acts, mode);
+        if (bad) {
+          msg(bad, true);
+          return;
+        }
+      }
+      payload.label = label;
+    }
   } else {
     const label = root.querySelector('#up-label').value.trim();
     if (!label) {
       msg('给这个动作起个名字', true);
       return;
     }
-    // 名字是「跟着做」的配对键：自己重名就不知道该演哪个，占内置名会有
-    // 两个意思。服务端也会拒（唯一真源），这里先拦一道，省得等一个来回。
-    const mine = state.me ? state.me.role : box.role;
-    const want = normName(label);
-    const keys = Object.keys(acts);
-    if (keys.some((k) => acts[k].custom && acts[k].role === mine
-      && normName(acts[k].label) === want)) {
-      msg(`你已经有「${label}」了，换个名字`, true);
-      return;
-    }
-    if (keys.some((k) => !acts[k].custom && normName(acts[k].label) === want)) {
-      msg(`「${label}」是内置动作的名字，换一个吧`, true);
+    // 服务端也会拒（唯一真源），这里先拦一道，省得等一个来回。
+    const bad = labelProblem(label, acts);
+    if (bad) {
+      msg(bad, true);
       return;
     }
     payload.label = label;

@@ -40,6 +40,8 @@ THUMB_H = 48        # 格子里缩略图的高度，和网页 .pose-thumb 一致
 TILE_W = 72
 TILE_H = 78
 COLS = 5
+FRAME_COLS = 9      # 帧条一行几格（38px + 8 间距正好塞进 432 内容宽，和网页一致）
+FRAME_GAP = 8
 STAGE_H = 148
 
 
@@ -292,7 +294,7 @@ class FrameCell(QWidget):
     和网页帧条同一套交互：单击选中（紫色描边），拖动换顺序。
     """
 
-    SIZE = 46
+    SIZE = 38          # 和网页 .upload-frame 一样大：一行正好放 9 格，不出现横向滚动条
 
     def __init__(self, index, pix, on_remove, on_select=None, on_move=None,
                  selected=False, parent=None):
@@ -304,7 +306,7 @@ class FrameCell(QWidget):
         self._on_move = on_move
         self._selected = selected
         self._press = None
-        self.setFixedSize(self.SIZE + 8, self.SIZE + 8)
+        self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(Qt.PointingHandCursor)
         self.setAcceptDrops(True)
         self.setToolTip('单击预览，拖动排序')
@@ -318,7 +320,7 @@ class FrameCell(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
-        r = QRectF(2, 2, self.SIZE + 4, self.SIZE + 4)
+        r = QRectF(0.5, 0.5, self.SIZE - 1, self.SIZE - 1)
         if self._selected:
             p.setPen(QPen(QColor(ACCENT), 2))
             p.setBrush(QColor(ACCENT_SOFT))
@@ -333,23 +335,23 @@ class FrameCell(QWidget):
                          int((self.height() - pm.height()) / 2), pm)
         p.setPen(QColor(MUTED))
         p.setFont(font(7))
-        p.drawText(QRectF(4, self.height() - 14, 20, 12),
+        p.drawText(QRectF(3, self.height() - 12, 18, 10),
                    Qt.AlignLeft | Qt.AlignVCenter, str(self.index + 1))
         # 右上角红叉
-        c = QPointF(self.width() - 7, 7)
+        c = QPointF(self.width() - 6.5, 6.5)
         p.setPen(Qt.NoPen)
         p.setBrush(QColor('#d6455d'))
-        p.drawEllipse(c, 7, 7)
-        p.setPen(QPen(QColor('#ffffff'), 1.4))
-        p.drawLine(QPointF(c.x() - 2.6, c.y() - 2.6),
-                   QPointF(c.x() + 2.6, c.y() + 2.6))
-        p.drawLine(QPointF(c.x() + 2.6, c.y() - 2.6),
-                   QPointF(c.x() - 2.6, c.y() + 2.6))
+        p.drawEllipse(c, 6, 6)
+        p.setPen(QPen(QColor('#ffffff'), 1.3))
+        p.drawLine(QPointF(c.x() - 2.2, c.y() - 2.2),
+                   QPointF(c.x() + 2.2, c.y() + 2.2))
+        p.drawLine(QPointF(c.x() + 2.2, c.y() - 2.2),
+                   QPointF(c.x() - 2.2, c.y() + 2.2))
         p.end()
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and e.position().x() >= self.width() - 16 \
-                and e.position().y() <= 16:
+        if e.button() == Qt.LeftButton and e.position().x() >= self.width() - 14 \
+                and e.position().y() <= 14:
             self._on_remove(self.index)
             e.accept()
             return
@@ -408,7 +410,7 @@ class AddCell(QAbstractButton):
 
     def __init__(self, on_click, parent=None):
         super().__init__(parent)
-        self.setFixedSize(self.SIZE + 8, self.SIZE + 8)
+        self.setFixedSize(self.SIZE, self.SIZE)
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip('再加几张图')
         self.clicked.connect(on_click)
@@ -420,11 +422,11 @@ class AddCell(QAbstractButton):
         pen.setStyle(Qt.DashLine)
         p.setPen(pen)
         p.setBrush(QColor(ACCENT_SOFT))
-        p.drawRoundedRect(QRectF(2, 2, self.SIZE + 4, self.SIZE + 4), 6, 6)
+        p.drawRoundedRect(QRectF(0.5, 0.5, self.SIZE - 1, self.SIZE - 1), 6, 6)
         cx, cy = self.width() / 2.0, self.height() / 2.0
         p.setPen(QPen(QColor(ACCENT), 1.6, Qt.SolidLine, Qt.RoundCap))
-        p.drawLine(QPointF(cx - 7, cy), QPointF(cx + 7, cy))
-        p.drawLine(QPointF(cx, cy - 7), QPointF(cx, cy + 7))
+        p.drawLine(QPointF(cx - 6, cy), QPointF(cx + 6, cy))
+        p.drawLine(QPointF(cx, cy - 6), QPointF(cx, cy + 6))
         p.end()
 
 
@@ -514,20 +516,23 @@ class UploadDialog(QDialog):
         bl.addWidget(self.stage)
 
         # 多帧预览条：每帧一个缩略图，右上角的叉可以删掉这一帧。
+        # 和网页一样按行换行（9 格一行），不再横向滚动 —— 横条在窄卡片里
+        # 会顶出一条滚动条，看着比网页脏。
         self.frame_scroll = QScrollArea()
         self.frame_scroll.setObjectName('frames')
         self.frame_scroll.setWidgetResizable(True)
-        self.frame_scroll.setFixedHeight(62)
+        self.frame_scroll.setFixedHeight(FrameCell.SIZE + 2)
         self.frame_scroll.setFrameShape(QFrame.NoFrame)
-        self.frame_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.frame_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.frame_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.frame_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.frame_host = QWidget()
         self.frame_host.setAutoFillBackground(False)
         self.frame_host.setStyleSheet('background: #ffffff;')
-        self.frame_row = QHBoxLayout(self.frame_host)
-        self.frame_row.setContentsMargins(0, 0, 0, 0)
-        self.frame_row.setSpacing(6)
-        self.frame_row.addStretch(1)
+        self.frame_grid = QGridLayout(self.frame_host)
+        self.frame_grid.setContentsMargins(0, 0, 0, 0)
+        self.frame_grid.setHorizontalSpacing(FRAME_GAP)
+        self.frame_grid.setVerticalSpacing(FRAME_GAP)
+        self.frame_grid.setColumnStretch(FRAME_COLS, 1)
         self.frame_scroll.setWidget(self.frame_host)
         self.frame_scroll.viewport().setAutoFillBackground(False)
         self.frame_scroll.viewport().setStyleSheet('background: #ffffff;')
@@ -655,7 +660,6 @@ class UploadDialog(QDialog):
         al.addWidget(self.restore_btn, 0, Qt.AlignRight)
 
         bl.addWidget(self.fields)
-        bl.addWidget(self.alt)
 
         # 移动轨迹：御剑飞行那种。只对自定义动作开放 —— 内置姿势的语义
         # 和时长是写死的，飞起来反而怪。数值全是比例，播放时按屏幕算。
@@ -713,11 +717,8 @@ class UploadDialog(QDialog):
         bl.addWidget(self.move_box)
         self._move_changed()
 
-        self.note = QLabel('图会自动裁边、缩放到和这个角色一样大，别人也能看到。')
-        self.note.setWordWrap(True)
-        self.note.setFont(font(9))
-        self.note.setStyleSheet('color: %s;' % MUTED)
-        bl.addWidget(self.note)
+        # 说明 +「删掉 / 恢复默认图」：和网页一样排在移动设置下面。
+        bl.addWidget(self.alt)
         bl.addStretch(1)
 
         foot = QFrame(self.panel)
@@ -779,7 +780,10 @@ class UploadDialog(QDialog):
         QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
         QScrollBar::handle:vertical { background: #d6d9e3; border-radius: 4px;
                                       min-height: 24px; }
-        QScrollBar::add-line, QScrollBar::sub-line { height: 0; }
+        QScrollBar:horizontal { height: 8px; background: transparent; margin: 2px; }
+        QScrollBar::handle:horizontal { background: #d6d9e3; border-radius: 4px;
+                                        min-width: 24px; }
+        QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
         QPushButton#pick { border: 1px dashed %(accent_edge)s; border-radius: 10px;
                            background: %(accent_soft)s; color: %(accent)s;
                            font-size: 13px; font-weight: bold; padding: 8px 14px; }
@@ -931,7 +935,9 @@ class UploadDialog(QDialog):
         self._render_frames()
         self._start_preview()
         self.ok.setEnabled(bool(self._pixmaps))
-        self._say('当前动作：%d 帧 · %.1ffps' % (len(self._frames), self._fps))
+        self.alt_text.setText(
+            '当前动作：%d 帧 · %.1ffps。可以删帧或重新选图。'
+            % (len(self._frames), self._fps))
 
     def _start_preview(self):
         self._preview_timer.stop()
@@ -987,29 +993,36 @@ class UploadDialog(QDialog):
             self._start_preview()
 
     def _render_frames(self):
-        while self.frame_row.count():
-            item = self.frame_row.takeAt(0)
+        while self.frame_grid.count():
+            item = self.frame_grid.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        cells = []
         for i, pix in enumerate(self._pixmaps):
-            self.frame_row.addWidget(FrameCell(
+            cells.append(FrameCell(
                 i, pix, self._remove_frame,
                 on_select=self._select_frame, on_move=self._move_frame,
                 selected=(i == self._preview_i)))
         # 和网页一样：最右侧留一个「＋」继续加图。
-        self.frame_row.addWidget(AddCell(self._pick_add))
-        self.frame_row.addStretch(1)
+        cells.append(AddCell(self._pick_add))
+        for i, w in enumerate(cells):
+            self.frame_grid.addWidget(w, i // FRAME_COLS, i % FRAME_COLS)
+        rows = max(1, (len(cells) + FRAME_COLS - 1) // FRAME_COLS)
+        self.frame_scroll.setFixedHeight(
+            rows * FrameCell.SIZE + (rows - 1) * FRAME_GAP + 2)
         # 只剩一张也留着：用户要能确认删完留下的是哪张。
         self.frame_scroll.setVisible(bool(self._pixmaps))
+        if self.isVisible():
+            self.resize(496, self.panel.sizeHint().height() + 36)
 
     def _select_frame(self, index):
         """点缩略图：选中它；自动播放关掉时舞台就停在这一张。"""
         if not (0 <= index < len(self._pixmaps)):
             return
         self._preview_i = index
-        for i in range(self.frame_row.count()):
-            w = self.frame_row.itemAt(i).widget()
+        for i in range(self.frame_grid.count()):
+            w = self.frame_grid.itemAt(i).widget()
             if isinstance(w, FrameCell):
                 w.set_selected(w.index == index)
         if not self.auto_box.isChecked() or len(self._pixmaps) < 2:
@@ -1197,22 +1210,31 @@ class UploadDialog(QDialog):
         tile = self.tiles.get(key) if key else None
         custom = is_new or bool(tile is not None and tile.badge == '新增')
         self.ok.setText('上传' if is_new else '换这张')
-        self.note.setText('图会自动裁边、缩放到和这个角色一样大，别人也能看到。'
-                          if is_new else '换完所有人都能看到新的样子。')
-        self.name_row.setVisible(is_new)
+        self.name_row.setVisible(is_new or custom)
         # 时长只对自定义动作开放：内置姿势的时长是语义的一部分。
         self.dur_row.setVisible(custom)
-        self.alt.setVisible(not is_new)
+        # 说明文字和网页同一句，并且固定在「移动」下面、按钮左边。
+        self.alt.setVisible(True)
         if is_new:
             self.dur.setText('2.0')
-        if not is_new:
+            self.name.setText('')
+            self.alt_text.setText(
+                '可以多选；多张会按设定帧率循环。图会自动裁边、缩放到和这个角色一样大。')
+            self.restore_btn.setVisible(False)
+        else:
             t = self.tiles[key]
+            if custom:
+                # 自定义动作可以改名：和换图一起提交，key / 图都不变。
+                self.name.setText(t.label)
+                self.alt_text.setText(
+                    '当前动作：%d 帧 · %.1ffps。可以删帧或重新选图。'
+                    % (len(self._frames), self._fps))
             if t.badge == '新增':
-                self.alt_text.setText('这是你自己加的动作，换一张图就是改它的样子。')
                 self.restore_btn.setVisible(bool(self._on_restore))
                 self.restore_btn.setText('删掉这个动作')
             else:
-                self.alt_text.setText('换掉「%s」现在的图，随时能换回。' % t.label)
+                if not custom:
+                    self.alt_text.setText('换掉「%s」现在的图，随时能换回。' % t.label)
                 self.restore_btn.setText('恢复默认图')
                 self.restore_btn.setVisible(bool(t.badge) and bool(self._on_restore))
         self.move_box.setVisible(custom)
@@ -1250,6 +1272,8 @@ class UploadDialog(QDialog):
             out['dur'] = min(8.0, max(0.6, d))
         if key:
             out['action'] = key
+            if self.tiles[key].badge == '新增':
+                out['label'] = self.name.text().strip()
         else:
             out['label'] = self.name.text().strip()
         return out
@@ -1264,7 +1288,7 @@ class UploadDialog(QDialog):
             if key and self.tiles[key].badge != '新增':
                 self._say('内置姿势只能放一张图', bad=True)
                 return
-        if not key:
+        if not key or self.tiles[key].badge == '新增':
             label = self.name.text().strip()
             if not label:
                 self._say('给这个动作起个名字', bad=True)
@@ -1272,7 +1296,10 @@ class UploadDialog(QDialog):
                 return
             # 服务端也会拒（唯一真源），这里先拦一道：省一个来回，
             # 也不至于弹层关掉之后才发现名字不能用、还得重新选图。
-            if norm_label(label) in self._taken:
+            # 改名的动作保留自己原来的名字不算重名。
+            current = self.tiles[key].label if key else ''
+            if (norm_label(label) != norm_label(current)
+                    and norm_label(label) in self._taken):
                 self._say('「%s」已经有一个了，换个名字' % label, bad=True)
                 self.name.setFocus()
                 self.name.selectAll()

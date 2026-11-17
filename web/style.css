@@ -1550,6 +1550,8 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 .upload-body {
   padding: 12px 14px;
   overflow-y: auto;
+  /* 卡片里永远不出现横向滚动条：窄屏下让行内控件自己缩 */
+  overflow-x: hidden;
 }
 
 .upload-pickrow {
@@ -1804,8 +1806,8 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 .upload-move-row select:focus { outline: none; border-color: var(--accent-edge); }
 
 .upload-move-row input[type="range"] {
-  flex: 1 1 60px;
-  min-width: 60px;
+  flex: 1 1 40px;
+  min-width: 40px;
   margin: 0;
   accent-color: var(--accent);
   cursor: pointer;

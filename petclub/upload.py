@@ -201,7 +201,8 @@ def send(host, http_port, role, frames, action='', label='', dur=2.0, fps=None,
     老服务端会忽略 frames，至少能存成静态图。
 
     `set_move=True` 才把 move 一起发过去（None 表示改回静止）；
-    `set_dur=True` 才把时长一起发过去（编辑已有动作时改时长用）。
+    `set_dur=True` 才把时长一起发过去（编辑已有动作时改时长用）；
+    `action` 非空时 `label` 也一起发，表示给这个自定义动作改名（内置姿势忽略）。
     """
     if isinstance(frames, (bytes, bytearray)):
         frames = [bytes(frames)]
@@ -221,6 +222,9 @@ def send(host, http_port, role, frames, action='', label='', dur=2.0, fps=None,
         payload['dur'] = dur
     if action:
         payload['action'] = action
+        if label:
+            # 编辑自定义动作时带名字 = 改名；内置姿势服务端会忽略。
+            payload['label'] = label
     else:
         payload['label'] = label
     return _post(host, http_port, '/api/sprites', payload)

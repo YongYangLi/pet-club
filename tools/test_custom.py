@@ -194,6 +194,44 @@ def main():
     check('单帧后 anims 里不再出现',
           key not in ((m.get('anims') or {}).get('p1') or {}), m.get('anims'))
 
+    print('--- 改名 ---')
+    item = custom.actions().get(key) or {}
+    src_pose = item.get('pose') or key
+    out, err = custom.replace_pose('p1', src_pose, [one], label='新名字',
+                                   set_label=True)
+    check('编辑动作能改名', bool(out) and not err
+          and (custom.actions().get(key) or {}).get('label') == '新名字', err)
+    check('改名不动 key / pose',
+          (custom.actions().get(key) or {}).get('pose') == src_pose,
+          custom.actions().get(key))
+    check('改名同步更新 hint',
+          '新名字' in ((custom.actions().get(key) or {}).get('hint') or ''),
+          (custom.actions().get(key) or {}).get('hint'))
+    check('清单里也是新名字',
+          (((custom.manifest().get('actions') or {}).get(key) or {})
+           .get('label')) == '新名字')
+    # 弹层每次都会把名字一起提交，没改也要能过
+    out, err = custom.replace_pose('p1', src_pose, [one], label='新名字',
+                                   set_label=True)
+    check('名字没变也能提交', bool(out) and not err, err)
+    other, err = custom.add_action('p1', [one], '第二个', 2.0)
+    other_key = (other or {}).get('key')
+    out2, err = custom.replace_pose('p1', src_pose, [one], label='第二个',
+                                    set_label=True)
+    check('不能和自己已有的动作重名', out2 is None and '已经有' in err, err)
+    out3, err = custom.replace_pose('p1', src_pose, [one], label='打招呼',
+                                    set_label=True)
+    check('不能改成内置动作的名字', out3 is None and '内置' in err, err)
+    out4, err = custom.replace_pose('p1', src_pose, [one], label='   ',
+                                    set_label=True)
+    check('名字不能是空白', out4 is None and '不能为空' in err, err)
+    cross, err = custom.add_action('p2', [one], '第二个', 2.0)
+    check('跨身份可以重名', bool(cross) and not err, err)
+    if other_key:
+        custom.remove_action(other_key)
+    if (cross or {}).get('key'):
+        custom.remove_action(cross['key'])
+
     print('--- 删除 ---')
     check('删动作成功', custom.remove_action(key))
     check('所有帧都清掉了', not custom.frame_files('p1', key))

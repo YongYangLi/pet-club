@@ -429,7 +429,7 @@ def add_action(role, frames, label, dur=2.0, fps=FPS, move=None):
 
 
 def replace_pose(role, pose, frames, fps=None, move=None, set_move=False,
-                 dur=None, set_dur=False):
+                 dur=None, set_dur=False, label=None, set_label=False):
     """换掉某个已有姿势的图，动作表不动。
 
     自定义动作允许多帧；内置姿势只允许一张 —— 内置的时长和语义都是写死的，
@@ -437,6 +437,9 @@ def replace_pose(role, pose, frames, fps=None, move=None, set_move=False,
 
     `set_move=True` 才动移动配置：传 None 是「改回静止」，不传是「保持原样」。
     `set_dur=True` 才改时长（内置姿势忽略，它们的时长是语义的一部分）。
+    `set_label=True` 才改名字（只对自定义动作有效）。名字同时是「跟着做」的
+    配对键，所以校验规则和新建完全一样：不能和自己已有的重名，也不能占
+    内置动作的名字；跨身份重名仍然允许。
     """
     frames = _norm_frames(frames)
     _, err = check_frames(frames)
@@ -444,15 +447,34 @@ def replace_pose(role, pose, frames, fps=None, move=None, set_move=False,
         return None, err
     if not valid_name(role) or not valid_name(pose):
         return None, '参数不合法'
+    new_label = None
     with _lock:
         reg = load_registry()
         item = None
+        item_key = None
         for key, spec in (reg.get('actions') or {}).items():
             if spec.get('pose') == pose or key == pose:
-                item = spec
+                item, item_key = spec, key
                 break
         if item is None and len(frames) > 1:
             return None, '内置姿势只能放一张图'
+        if set_label and item is not None and label is not None:
+            new_label = str(label).strip()[:20]
+            if not new_label:
+                return None, '动作名不能为空'
+            if norm_label(new_label) == norm_label(item.get('label')):
+                new_label = None        # 没改，别白写一次注册表
+            else:
+                want = norm_label(new_label)
+                for k, other in (reg.get('actions') or {}).items():
+                    if k == item_key or other.get('role') != item.get('role'):
+                        continue
+                    if norm_label(other.get('label')) == want:
+                        return None, '你已经有「%s」了，换个名字' % (
+                            other.get('label') or new_label)
+                for builtin in ACTIONS.values():
+                    if norm_label(builtin.get('label')) == want:
+                        return None, '「%s」是内置动作的名字，换一个吧' % new_label
         _write_frames(role, pose, frames)
         if item is not None:
             item['frames'] = len(frames)
@@ -475,10 +497,14 @@ def replace_pose(role, pose, frames, fps=None, move=None, set_move=False,
                 if item.get('move'):
                     d = max(d, MOVE_MIN_DUR)
                 item['dur'] = round(d, 2)
+            if new_label:
+                item['label'] = new_label
+                item['hint'] = '自定义动作（%s）' % new_label
             save_registry(reg)
     return {'role': role, 'pose': pose, 'frames': len(frames),
             'fps': clamp_fps(fps) if fps is not None else None,
             'move': clamp_move(move) if set_move else None,
+            'label': new_label,
             'rev': rev(role, pose)}, ''
 
 
