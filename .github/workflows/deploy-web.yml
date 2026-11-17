@@ -11,6 +11,9 @@ name: deploy-web
 #   DEPLOY_KEY    私钥全文（ed25519，专门给部署用，别复用你天天登的那把）
 #   DEPLOY_PORT   可选，默认 22
 #   DEPLOY_PATH   可选，默认 /opt/pet-club
+#   DEPLOY_DOMAIN 可选，绑了证书的域名（比如 homie.hujiulong.com）。
+#                 不配就直接用 DEPLOY_HOST 核对；IP 上证书多半对不上，
+#                 核对步骤会自动跳过证书校验（见下面注释）。
 #
 # 密钥怎么来（本机 Git Bash 里跑一次）：
 #   ssh-keygen -t ed25519 -C "github-deploy" -f ~/.ssh/petclub_deploy -N ""
@@ -112,11 +115,17 @@ jobs:
       - name: 核对线上版本
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_DOMAIN: ${{ secrets.DEPLOY_DOMAIN || secrets.DEPLOY_HOST }}
         run: |
           rm -f /tmp/online.json
+          # -L：80 端口会 308 跳到 443，不跟随的话只拿到一个空的重定向响应。
+          # -k：DEPLOY_HOST 通常是 IP，而证书只签了域名，严格校验会报
+          #     「no alternative certificate subject name matches target ipv4」。
+          #     这一步只是核对线上 build 号，不是安全边界，跳过校验没关系。
           for i in 1 2 3 4 5 6 7 8; do
-            for base in "https://$DEPLOY_HOST" "http://$DEPLOY_HOST"; do
-              if curl -fsS --max-time 5 "$base/api/version" -o /tmp/online.json; then
+            for base in "https://$DEPLOY_DOMAIN" "http://$DEPLOY_DOMAIN" \
+                        "https://$DEPLOY_HOST" "http://$DEPLOY_HOST"; do
+              if curl -kfsSL --max-time 5 "$base/api/version" -o /tmp/online.json; then
                 echo "通过 $base 核对"
                 break 2
               fi
@@ -124,7 +133,12 @@ jobs:
             echo "第 $i 次没问到，等 2 秒重试"
             sleep 2
           done
-          cat /tmp/online.json
+          cat /tmp/online.json 2>/dev/null || true
+          # 一个字节都没拿到时直接说人话，别让 json.load 抛一串栈。
+          if [ ! -s /tmp/online.json ]; then
+            echo "没能从线上拿到 /api/version：检查域名解析、证书、安全组，或服务是否起来"
+            exit 1
+          fi
           python - <<'PY'
           import json
           online = json.load(open('/tmp/online.json'))
