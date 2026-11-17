@@ -123,6 +123,9 @@ class Pet:
         self._crawl_to_y = None         # 逗猫棒是二维的：光标在哪儿就爬到哪儿
         self._land_y = None             # 起飞后落回哪一层（空中松手 / 摆放过的位置）
         self._crawl_t = 0.0             # 爬行循环帧的计时
+        self._anim_keys = None          # 多帧动作的帧 key，按 fps 循环
+        self._anim_t = 0.0
+        self._anim_fps = 8.0
         # 「这次下来停在哪儿」：可以比地面高（上次被摆在半空）。ground 仍旧
         # 是地面，只用来定拖动上限和默认落点，不再兼任「记住的位置」。
         if land_y is not None:
@@ -199,6 +202,13 @@ class Pet:
             return
         self.pose = pose
         self.timer = dur
+        keys = getattr(self.sp, 'frame_keys', {}).get(pose)
+        info = getattr(self.sp, 'anims', {}).get(pose) or {}
+        self._anim_keys = keys if keys and len(keys) > 1 else None
+        self._anim_t = 0.0
+        self._anim_fps = float(info.get('fps') or 8.0)
+        if self._anim_keys:
+            self.pose = self._anim_keys[0]
 
     # ---- 拖动（纯本地效果，一个字节都不发给别人）----
 
@@ -332,8 +342,13 @@ class Pet:
                 self.pose = 'idle'
         elif self.timer > 0:
             self.timer -= dt
+            if self._anim_keys:
+                self._anim_t += dt
+                idx = int(self._anim_t * self._anim_fps) % len(self._anim_keys)
+                self.pose = self._anim_keys[idx]
             if self.timer <= 0:
                 self.pose = 'idle'
+                self._anim_keys = None
         self.win.show(self.pose, int(self.x), int(self.y))
 
     def bubble_anchor(self):

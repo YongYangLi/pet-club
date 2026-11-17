@@ -15,10 +15,17 @@ let timer = null;
 function sig(m) {
   const poses = (m && m.poses) || {};
   const acts = (m && m.actions) || {};
+  const anims = (m && m.anims) || {};
   const parts = Object.keys(acts).sort().map((k) => `${k}=${acts[k].label || ''}`);
   for (const role of Object.keys(poses).sort()) {
     for (const pose of Object.keys(poses[role]).sort()) {
       parts.push(`${role}/${pose}@${poses[role][pose]}`);
+    }
+  }
+  for (const role of Object.keys(anims).sort()) {
+    for (const pose of Object.keys(anims[role]).sort()) {
+      parts.push(`${role}/${pose}#${anims[role][pose].frames || 1}`
+        + `@${anims[role][pose].fps || 8}`);
     }
   }
   return parts.join('|');

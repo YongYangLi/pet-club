@@ -76,6 +76,7 @@ jobs:
           python tools/test_config.py
           python tools/test_media.py
           python tools/test_server.py
+          python tools/test_custom.py
           python tools/test_update.py
           python tools/test_auth.py
 

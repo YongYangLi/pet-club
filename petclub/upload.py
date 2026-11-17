@@ -24,7 +24,7 @@ CAP = 600          # 分析用工作尺寸：够精细，又不是几百万像�
 TOL = 34           # 去背容差（RGB 每通道）
 MAX_W = 200        # 和 custom.py 的上限对齐：超了服务端也会拒
 MAX_H = 240
-TIMEOUT = 8.0
+TIMEOUT = 20.0      # 多帧动作一次可能好几 MB，给足上传时间
 
 
 def _keyout(im, tol=TOL):
@@ -93,33 +93,74 @@ def _alpha_box(im):
     return mask.getbbox()
 
 
-def normalize(path, max_w=MAX_W, max_h=MAX_H, keyout=True):
-    """读一张图，返回 (png 字节, 宽, 高)。读不出来就抛 ValueError（中文原因）。"""
-    try:
-        im = Image.open(path)
-        im.load()
-    except (OSError, ValueError):
-        raise ValueError('这张图读不出来')
+def _prepare(im, keyout):
     im = im.convert('RGBA')
     if max(im.size) > CAP:
         im.thumbnail((CAP, CAP), Image.LANCZOS)
     if keyout:
         im = _keyout(im)
-    box = _alpha_box(im)
+    return im
+
+
+def _union_box(ims):
+    """所有帧透明边界的并集：动画按同一个画布裁，换帧时人不会跳。"""
+    box = None
+    for im in ims:
+        b = _alpha_box(im)
+        if b is None:
+            continue
+        if box is None:
+            box = list(b)
+        else:
+            box[0] = min(box[0], b[0])
+            box[1] = min(box[1], b[1])
+            box[2] = max(box[2], b[2])
+            box[3] = max(box[3], b[3])
+    return tuple(box) if box else None
+
+
+def normalize_frames(paths, max_w=MAX_W, max_h=MAX_H, keyout=True):
+    """读一组图，返回 (png 字节列表, 宽, 高)。所有帧输出同一个画布尺寸。"""
+    paths = list(paths or ())
+    if not paths:
+        raise ValueError('先选一张图')
+    ims = []
+    for i, path in enumerate(paths):
+        try:
+            im = Image.open(path)
+            im.load()
+        except (OSError, ValueError):
+            raise ValueError('第 %d 张图读不出来' % (i + 1)
+                             if len(paths) > 1 else '这张图读不出来')
+        ims.append(_prepare(im, keyout))
+    box = _union_box(ims)
     if box is None:
         raise ValueError('整张图都是透明的，换一张吧')
+    x0, y0, x1, y1 = box
+    bw = max(1, x1 - x0)
+    bh = max(1, y1 - y0)
     # 上限取「这个角色现有的包围盒」：新图绝不撑大窗口，
     # 否则其他姿势会跟着一起缩小。
     max_w = max(1, min(MAX_W, int(max_w)))
     max_h = max(1, min(MAX_H, int(max_h)))
-    im = im.crop(box)
-    k = min(max_w / im.width, max_h / im.height, 1.0)
-    if k < 1.0:
-        im = im.resize((max(1, round(im.width * k)),
-                        max(1, round(im.height * k))), Image.LANCZOS)
-    buf = io.BytesIO()
-    im.save(buf, 'PNG', optimize=True)
-    return buf.getvalue(), im.width, im.height
+    k = min(max_w / bw, max_h / bh, 1.0)
+    ow = max(1, int(round(bw * k)))
+    oh = max(1, int(round(bh * k)))
+    out = []
+    for im in ims:
+        part = im.crop(box)
+        if k < 1.0:
+            part = part.resize((ow, oh), Image.LANCZOS)
+        buf = io.BytesIO()
+        part.save(buf, 'PNG', optimize=True)
+        out.append(buf.getvalue())
+    return out, ow, oh
+
+
+def normalize(path, max_w=MAX_W, max_h=MAX_H, keyout=True):
+    """读一张图，返回 (png 字节, 宽, 高)。读不出来就抛 ValueError（中文原因）。"""
+    frames, w, h = normalize_frames([path], max_w, max_h, keyout)
+    return frames[0], w, h
 
 
 # ---------------- 网络 ----------------
@@ -152,9 +193,24 @@ def _post(host, http_port, path, payload, timeout=TIMEOUT):
     return data
 
 
-def send(host, http_port, role, png, action='', label='', dur=2.0):
-    """action 给了就是换图，没给就是新建动作。"""
-    payload = {'role': role, 'data': base64.b64encode(png).decode('ascii')}
+def send(host, http_port, role, frames, action='', label='', dur=2.0, fps=None):
+    """action 给了就是换图，没给就是新建动作。
+
+    frames 是一组 PNG 字节；同时带一份 data（第一帧）给还没升级的服务端，
+    老服务端会忽略 frames，至少能存成静态图。
+    """
+    if isinstance(frames, (bytes, bytearray)):
+        frames = [bytes(frames)]
+    frames = list(frames or ())
+    if not frames:
+        raise IOError('先选一张图')
+    payload = {
+        'role': role,
+        'data': base64.b64encode(frames[0]).decode('ascii'),
+        'frames': [base64.b64encode(f).decode('ascii') for f in frames],
+    }
+    if fps is not None:
+        payload['fps'] = fps
     if action:
         payload['action'] = action
     else:

@@ -88,6 +88,7 @@ class PetWindow(QWidget):
         self._masks = {}
         self._hit_cache = {}
         self._pose = 'idle'
+        self._mask_pose = 'idle'
         self.role = None            # App 建好窗口后填：反查用（命中测试、菜单）
         self._apply_mask('idle')    # 第一次也要装 mask，否则窗口是整块矩形
         self._x = 0.0
@@ -105,7 +106,12 @@ class PetWindow(QWidget):
         """
         if pose != self._pose:
             self._pose = pose
-            self._apply_mask(pose)
+            # 多帧动作的每一帧共用一张「所有帧的 alpha 并集」遮罩：
+            # 换帧时不用重装 mask，也不会把伸出去的胳膊裁掉。
+            base = self.sp.mask_base.get(pose, pose)
+            if base != self._mask_pose:
+                self._mask_pose = base
+                self._apply_mask(base)
             self.update()
         self.move_to(x, y)
         if not self.isVisible():
@@ -129,7 +135,11 @@ class PetWindow(QWidget):
         """
         region = self._masks.get(pose)
         if region is None:
-            q = self._qim.get(pose) or next(iter(self._qim.values()))
+            src = self.sp.mask_images.get(pose)
+            if src is not None:
+                q = to_qimage(src)
+            else:
+                q = self._qim.get(pose) or next(iter(self._qim.values()))
             bm = QBitmap.fromImage(q.createAlphaMask())
             if bm.isNull():
                 return
@@ -149,7 +159,8 @@ class PetWindow(QWidget):
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         pm = self._pix.get(self._pose) or next(iter(self._pix.values()))
         # 底部居中；循环帧的水平修正沿用 sprites 里的 dx（素材像素 → 逻辑像素）
-        dx = self.sp.dx.get(self._pose, 0) / self.pdpr
+        base = self.sp.mask_base.get(self._pose, self._pose)
+        dx = self.sp.dx.get(self._pose, self.sp.dx.get(base, 0)) / self.pdpr
         w = pm.width() / self.pdpr
         h = pm.height() / self.pdpr
         p.drawPixmap(QPoint(int(round((self._lw - w) / 2.0 + dx)),

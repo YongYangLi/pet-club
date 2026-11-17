@@ -49,6 +49,7 @@ class App {
     // 上一次见到的「每个角色有哪些覆盖图」。清单是整份下发的，
     // 但别人换的是他自己的图 —— 靠这份快照只重建真的变了的角色。
     this.posesSeen = {};
+    this.animsSeen = {};
     this.reminderTimer = null;
     this.waterOn = false;
     this.waterMin = 45;
@@ -101,6 +102,7 @@ class App {
       // 不记的话，进页面后第一次改图会被算成「什么都没变」——
       // 因为对比基准是空的，空对空永远是空。
       this.posesSeen = JSON.parse(JSON.stringify(spriteManifest().poses || {}));
+      this.animsSeen = JSON.parse(JSON.stringify(spriteManifest().anims || {}));
       await loadMeta();
     } catch (e) {
       this.claim.show('页面加载失败，刷新重试');
@@ -1081,14 +1083,20 @@ class App {
       return;
     }
     const now = spriteManifest().poses || {};
+    const nowAnims = spriteManifest().anims || {};
     const touched = state.roles.filter((role) => {
       const a = this.posesSeen[role] || {};
       const b = now[role] || {};
       const ka = Object.keys(a);
       return ka.length !== Object.keys(b).length
-        || ka.some((k) => a[k] !== b[k]);
+        || ka.some((k) => a[k] !== b[k])
+        // 只改帧率时图片 rev 不变，必须把 anims 也比一遍，否则缓存里的
+        // loadRole 还拿着旧 fps，播放速度不会变。
+        || JSON.stringify(this.animsSeen[role] || {})
+           !== JSON.stringify(nowAnims[role] || {});
     });
     this.posesSeen = JSON.parse(JSON.stringify(now));
+    this.animsSeen = JSON.parse(JSON.stringify(nowAnims));
 
     // 只有图真的变了的角色才重建。别人传自己的图，我这边其他人不该
     // 跟着闪一下；动作表（互动条 / 右键菜单）每次都重画，加了动作要能点。

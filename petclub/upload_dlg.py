@@ -14,16 +14,22 @@ assets/theme.json 来（theme.py 读同一份，网关注入成 CSS 变量），
 图片处理仍然全在 upload.normalize 里，这个文件只管交互。
 """
 
+import io
 import os
+import shutil
+import tempfile
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import (QBrush, QColor, QDoubleValidator, QPainter, QPen,
-                           QPixmap)
-from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QDialog,
-                               QFileDialog, QFrame, QGraphicsDropShadowEffect,
-                               QGridLayout, QHBoxLayout, QLabel, QLineEdit,
-                               QPushButton, QScrollArea, QStackedWidget,
+from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import (QBrush, QColor, QDoubleValidator, QDrag, QPainter,
+                           QPen, QPixmap)
+from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup,
+                               QDialog, QFileDialog, QFrame,
+                               QGraphicsDropShadowEffect, QGridLayout,
+                               QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QScrollArea, QSlider, QStackedWidget,
                                QVBoxLayout, QWidget)
+
+from PIL import Image
 
 from . import upload
 from .config import ROLE_NAME
@@ -267,22 +273,176 @@ class Tile(QAbstractButton):
         p.end()
 
 
+class FrameCell(QWidget):
+    """预览条上的一帧：缩略图 + 左上角序号 + 右上角删除叉。
+
+    和网页帧条同一套交互：单击选中（紫色描边），拖动换顺序。
+    """
+
+    SIZE = 46
+
+    def __init__(self, index, pix, on_remove, on_select=None, on_move=None,
+                 selected=False, parent=None):
+        super().__init__(parent)
+        self.index = index
+        self._pix = pix
+        self._on_remove = on_remove
+        self._on_select = on_select
+        self._on_move = on_move
+        self._selected = selected
+        self._press = None
+        self.setFixedSize(self.SIZE + 8, self.SIZE + 8)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAcceptDrops(True)
+        self.setToolTip('单击预览，拖动排序')
+
+    def set_selected(self, on):
+        if on != self._selected:
+            self._selected = on
+            self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        r = QRectF(2, 2, self.SIZE + 4, self.SIZE + 4)
+        if self._selected:
+            p.setPen(QPen(QColor(ACCENT), 2))
+            p.setBrush(QColor(ACCENT_SOFT))
+        else:
+            p.setPen(QPen(QColor(BORDER), 1))
+            p.setBrush(QColor('#ffffff'))
+        p.drawRoundedRect(r, 6, 6)
+        if self._pix is not None and not self._pix.isNull():
+            pm = self._pix.scaled(self.SIZE - 4, self.SIZE - 4,
+                                  Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            p.drawPixmap(int((self.width() - pm.width()) / 2),
+                         int((self.height() - pm.height()) / 2), pm)
+        p.setPen(QColor(MUTED))
+        p.setFont(font(7))
+        p.drawText(QRectF(4, self.height() - 14, 20, 12),
+                   Qt.AlignLeft | Qt.AlignVCenter, str(self.index + 1))
+        # 右上角红叉
+        c = QPointF(self.width() - 7, 7)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor('#d6455d'))
+        p.drawEllipse(c, 7, 7)
+        p.setPen(QPen(QColor('#ffffff'), 1.4))
+        p.drawLine(QPointF(c.x() - 2.6, c.y() - 2.6),
+                   QPointF(c.x() + 2.6, c.y() + 2.6))
+        p.drawLine(QPointF(c.x() + 2.6, c.y() - 2.6),
+                   QPointF(c.x() - 2.6, c.y() + 2.6))
+        p.end()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and e.position().x() >= self.width() - 16 \
+                and e.position().y() <= 16:
+            self._on_remove(self.index)
+            e.accept()
+            return
+        if e.button() == Qt.LeftButton:
+            self._press = e.position().toPoint()
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        if self._press is None or not (e.buttons() & Qt.LeftButton):
+            super().mouseMoveEvent(e)
+            return
+        moved = (e.position().toPoint() - self._press).manhattanLength()
+        if moved < QApplication.startDragDistance():
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText('petclub-frame:%d' % self.index)
+        drag.setMimeData(mime)
+        drag.exec(Qt.MoveAction)
+        self._press = None
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._press is not None:
+            self._press = None
+            if self._on_select:
+                self._on_select(self.index)
+        super().mouseReleaseEvent(e)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasText() \
+                and e.mimeData().text().startswith('petclub-frame:'):
+            e.setDropAction(Qt.MoveAction)
+            e.accept()
+        else:
+            e.ignore()
+
+    def dropEvent(self, e):
+        text = e.mimeData().text() if e.mimeData().hasText() else ''
+        if not text.startswith('petclub-frame:') or self._on_move is None:
+            e.ignore()
+            return
+        try:
+            src = int(text.split(':', 1)[1])
+        except ValueError:
+            src = -1
+        if src >= 0:
+            self._on_move(src, self.index)
+        e.accept()
+
+
+class AddCell(QAbstractButton):
+    """帧条最右侧的加图位：虚线小方框 + 加号，和网页的「＋」一致。"""
+
+    SIZE = FrameCell.SIZE
+
+    def __init__(self, on_click, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(self.SIZE + 8, self.SIZE + 8)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip('再加几张图')
+        self.clicked.connect(on_click)
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        pen = QPen(QColor(ACCENT_EDGE), 1.2)
+        pen.setStyle(Qt.DashLine)
+        p.setPen(pen)
+        p.setBrush(QColor(ACCENT_SOFT))
+        p.drawRoundedRect(QRectF(2, 2, self.SIZE + 4, self.SIZE + 4), 6, 6)
+        cx, cy = self.width() / 2.0, self.height() / 2.0
+        p.setPen(QPen(QColor(ACCENT), 1.6, Qt.SolidLine, Qt.RoundCap))
+        p.drawLine(QPointF(cx - 7, cy), QPointF(cx + 7, cy))
+        p.drawLine(QPointF(cx, cy - 7), QPointF(cx, cy + 7))
+        p.end()
+
+
 class UploadDialog(QDialog):
     """targets: [{'key','label','icon','tip','badge'}]，第一项是「新建动作」（key 为空）。"""
 
     def __init__(self, role, max_box, targets, on_restore=None, taken=(),
-                 parent=None):
+                 parent=None, preset_frames=None, preset_fps=None,
+                 preset_key='', load_preset=None):
         super().__init__(parent)
         self.role = role
         self.max_w, self.max_h = max_box
         self._on_restore = on_restore
+        self._load_cb = load_preset
+        self._loaded_key = None      # 当前这组帧是从哪个动作预载进来的
+        self._user_picked = False    # 用户自己选过图，就别再被预载覆盖
         # 已经被占用的名字（我自己的自定义动作 + 内置动作）。
         # 名字是「跟着做」的配对键：自己重名就不知道该演哪个。
         self._taken = {norm_label(t) for t in taken if t}
-        self._png = b''
+        self._frames = []
         self._w = self._h = 0
-        self._path = ''
+        self._paths = []
+        self._pixmaps = []
+        self._preview_i = 0
+        self._fps = 8.0
         self._drag = None
+        self._tmp_dir = None       # 编辑已有动作时，把预载帧落到这里当文件用
+        # 多帧动作在预览台上按 8fps 循环，用户能直接看到动起来的效果。
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(125)
+        self._preview_timer.timeout.connect(self._tick_preview)
 
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint
                             | Qt.WindowStaysOnTopHint
@@ -320,12 +480,12 @@ class UploadDialog(QDialog):
 
         body = QWidget(self.panel)
         bl = QVBoxLayout(body)
-        bl.setContentsMargins(16, 14, 16, 14)
+        bl.setContentsMargins(14, 12, 14, 12)
         bl.setSpacing(10)
 
         pickrow = QHBoxLayout()
         pickrow.setSpacing(10)
-        self.pick_btn = QPushButton('选一张图…')
+        self.pick_btn = QPushButton('选图（可多选）…')
         self.pick_btn.setObjectName('pick')
         self.pick_btn.setCursor(Qt.PointingHandCursor)
         self.pick_btn.clicked.connect(self._pick)
@@ -339,7 +499,54 @@ class UploadDialog(QDialog):
         self.stage = Stage()
         bl.addWidget(self.stage)
 
+        # 多帧预览条：每帧一个缩略图，右上角的叉可以删掉这一帧。
+        self.frame_scroll = QScrollArea()
+        self.frame_scroll.setObjectName('frames')
+        self.frame_scroll.setWidgetResizable(True)
+        self.frame_scroll.setFixedHeight(62)
+        self.frame_scroll.setFrameShape(QFrame.NoFrame)
+        self.frame_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.frame_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.frame_host = QWidget()
+        self.frame_host.setAutoFillBackground(False)
+        self.frame_host.setStyleSheet('background: #ffffff;')
+        self.frame_row = QHBoxLayout(self.frame_host)
+        self.frame_row.setContentsMargins(0, 0, 0, 0)
+        self.frame_row.setSpacing(6)
+        self.frame_row.addStretch(1)
+        self.frame_scroll.setWidget(self.frame_host)
+        self.frame_scroll.viewport().setAutoFillBackground(False)
+        self.frame_scroll.viewport().setStyleSheet('background: #ffffff;')
+        self.frame_scroll.setVisible(False)
+        bl.addWidget(self.frame_scroll)
+
+        # 播放控制：和网页弹层同一行、同一顺序 —— 自动播放、播放速度、
+        # 滑条、数值，紧跟在帧条下面，而不是压在最底部。
+        self.play_row = QWidget()
+        pl = QHBoxLayout(self.play_row)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(8)
+        self.auto_box = Check('自动播放', True)
+        self.auto_box.toggled.connect(self._sync_play)
+        pl.addWidget(self.auto_box, 0)
+        pl.addWidget(_hint('播放速度'), 0)
+        self.fps_slider = QSlider(Qt.Horizontal)
+        self.fps_slider.setRange(20, 240)
+        self.fps_slider.setValue(80)
+        self.fps_slider.setMinimumWidth(90)
+        self.fps_slider.setCursor(Qt.PointingHandCursor)
+        self.fps_slider.valueChanged.connect(self._fps_changed)
+        pl.addWidget(self.fps_slider, 1)
+        self.fps_val = QLabel('8.0')
+        self.fps_val.setFont(font(9))
+        self.fps_val.setStyleSheet('color: %s;' % SUB)
+        self.fps_val.setFixedWidth(30)
+        self.fps_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        pl.addWidget(self.fps_val, 0)
+        bl.addWidget(self.play_row)
+
         grid_host = QWidget()
+        grid_host.setStyleSheet('background: #ffffff;')
         grid = QGridLayout(grid_host)
         grid.setContentsMargins(2, 2, 2, 2)
         grid.setHorizontalSpacing(6)
@@ -352,7 +559,7 @@ class UploadDialog(QDialog):
             tile = Tile(key, t.get('label') or key,
                         pix=None if not key else _thumb_pix(t.get('icon')),
                         new=not key, badge=t.get('badge') or '')
-            tile.clicked.connect(lambda _c=False: self._sync_mode())
+            tile.clicked.connect(lambda _c=False, k=key: self._on_tile(k))
             self._group.addButton(tile)
             self.tiles[key] = tile
             grid.addWidget(tile, i // COLS, i % COLS, Qt.AlignHCenter)
@@ -368,7 +575,15 @@ class UploadDialog(QDialog):
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.scroll.setFixedHeight(min(178, need))
         self.scroll.viewport().setAutoFillBackground(False)
-        bl.addWidget(self.scroll)
+        self.scroll.viewport().setStyleSheet('background: #ffffff;')
+        # 「动作」这一列和网页一致：40px 标签 + 右边缩略图网格。
+        pose_row = QHBoxLayout()
+        pose_row.setSpacing(8)
+        pose_lab = _hint('动作')
+        pose_lab.setFixedWidth(40)
+        pose_row.addWidget(pose_lab, 0)
+        pose_row.addWidget(self.scroll, 1)
+        bl.addLayout(pose_row)
 
         self.fields = QWidget()
         fl = QGridLayout(self.fields)
@@ -459,11 +674,14 @@ class UploadDialog(QDialog):
         panel_lay.addWidget(body, 1)
         panel_lay.addWidget(foot)
 
-        self.setFixedWidth(466)
+        # 和网页 .upload-card 同宽（460 内容宽）+ 两侧各 18 的阴影留白。
+        self.setFixedWidth(496)
         first = targets[0].get('key') or ''
         self.tiles[first].setChecked(True)
         self._sync_mode()
-        self.resize(466, self.panel.sizeHint().height() + 36)
+        if preset_frames:
+            self._load_preset(preset_frames, preset_fps, preset_key)
+        self.resize(496, self.panel.sizeHint().height() + 36)
         self._center()
 
     # ---- 样式 ----
@@ -481,6 +699,7 @@ class UploadDialog(QDialog):
                     selection-color: %(fg)s; }
         QLineEdit:focus { border-color: %(accent_edge)s; }
         QScrollArea#poses { background: transparent; border: none; }
+        QScrollArea#frames { background: transparent; border: none; }
         QScrollBar:vertical { width: 8px; background: transparent; margin: 2px; }
         QScrollBar::handle:vertical { background: #d6d9e3; border-radius: 4px;
                                       min-height: 24px; }
@@ -490,14 +709,22 @@ class UploadDialog(QDialog):
                            font-size: 13px; font-weight: bold; padding: 8px 14px; }
         QPushButton#pick:hover { background: #e8e9ff; }
         QPushButton#primary { background: %(accent)s; color: #ffffff; border: none;
-                              border-radius: 9px; padding: 8px 18px;
+                              border-radius: 9px; padding: 8px 14px;
                               font-size: 13px; font-weight: bold; }
         QPushButton#primary:hover { background: %(accent_down)s; }
         QPushButton#primary:disabled { background: #dfe1ea; color: #ffffff; }
         QPushButton#ghost { background: transparent; color: %(sub)s;
                             border: 1px solid %(border)s; border-radius: 9px;
-                            padding: 8px 16px; font-size: 13px; }
+                            padding: 8px 14px; font-size: 13px; }
         QPushButton#ghost:hover { background: %(field)s; color: %(fg)s; }
+        QSlider::groove:horizontal { height: 4px; border-radius: 2px;
+                                     background: #e3e5ee; }
+        QSlider::sub-page:horizontal { background: %(accent)s;
+                                       border-radius: 2px; }
+        QSlider::handle:horizontal { width: 12px; height: 12px;
+                                     margin: -5px 0; border-radius: 6px;
+                                     background: #ffffff;
+                                     border: 2px solid %(accent)s; }
         """ % {'window': '#ffffff', 'line': LINE, 'card_bg': CARD_BG,
                'border': BORDER, 'fg': FG, 'sub': SUB, 'muted': MUTED,
                'field': '#f7f8fb', 'accent': ACCENT, 'accent_down': ACCENT_DOWN,
@@ -514,24 +741,31 @@ class UploadDialog(QDialog):
     # ---- 选图 ----
 
     def _pick(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, '选一张图', '', '图片 (*.png *.jpg *.jpeg *.webp *.bmp)')
-        if path:
-            self._path = path
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, '选一张或多张图（多张会按 8fps 循环）', '',
+            '图片 (*.png *.jpg *.jpeg *.webp *.bmp)')
+        if paths:
+            self._paths = list(paths[:16])
             self._load()
 
     def _reload(self, *_a):
-        if self._path:
+        if self._paths:
             self._load()
 
     def _load(self):
-        self._png = b''
+        self._user_picked = True
+        self._loaded_key = None
+        self._frames = []
+        self._pixmaps = []
+        self._preview_timer.stop()
         self._w = self._h = 0
         self.ok.setEnabled(False)
+        self._render_frames()
         self._say('处理中…')
         try:
-            png, w, h = upload.normalize(self._path, self.max_w, self.max_h,
-                                         keyout=self.keyout.isChecked())
+            frames, w, h = upload.normalize_frames(
+                self._paths, self.max_w, self.max_h,
+                keyout=self.keyout.isChecked())
         except ValueError as e:
             self._say(str(e), bad=True)
             self.stage.set_pixmap(None)
@@ -540,14 +774,212 @@ class UploadDialog(QDialog):
             self._say('读图失败：%s' % e, bad=True)
             self.stage.set_pixmap(None)
             return
-        self._png = png
+        self._frames = frames
         self._w = w
         self._h = h
-        pix = QPixmap()
-        pix.loadFromData(png, 'PNG')
-        self.stage.set_pixmap(pix)
-        self._say('已裁成 %d×%d' % (w, h))
+        for data in frames:
+            pix = QPixmap()
+            pix.loadFromData(data, 'PNG')
+            self._pixmaps.append(pix)
+        self._preview_i = 0
+        self._render_frames()
+        self._start_preview()
+        if len(self._pixmaps) > 1:
+            self._say('已裁成 %d×%d · %d 帧 · %.1ffps 循环'
+                      % (w, h, len(frames), self._fps))
+        else:
+            self._say('已裁成 %d×%d' % (w, h))
         self.ok.setEnabled(True)
+
+    def _load_preset(self, frames, fps=None, key=None):
+        """编辑已有动作：先把当前动画装进来，用户可以直接看到效果。"""
+        self._clean_tmp()
+        self._loaded_key = key
+        self._user_picked = False
+        self._frames = list(frames)
+        self._pixmaps = []
+        self._paths = []
+        # 预载帧只有图片字节、没有文件路径。落到临时目录当文件用，
+        # 「＋」加图、去白底重算才有统一的输入。
+        self._tmp_dir = tempfile.mkdtemp(prefix='petclub-dlg-')
+        for i, data in enumerate(self._frames):
+            pix = QPixmap()
+            pix.loadFromData(data, 'PNG')
+            self._pixmaps.append(pix)
+            try:
+                path = os.path.join(self._tmp_dir, 'preset-%d.png' % i)
+                with open(path, 'wb') as f:
+                    f.write(data)
+                self._paths.append(path)
+            except OSError:
+                pass
+        if self._pixmaps:
+            self._w = self._pixmaps[0].width()
+            self._h = self._pixmaps[0].height()
+        if fps is not None:
+            try:
+                self._fps = max(2.0, min(24.0, float(fps)))
+            except (TypeError, ValueError):
+                pass
+        self.fps_slider.blockSignals(True)
+        self.fps_slider.setValue(int(round(self._fps * 10)))
+        self.fps_slider.blockSignals(False)
+        self.fps_val.setText('%.1f' % self._fps)
+        self._preview_i = 0
+        self._render_frames()
+        self._start_preview()
+        self.ok.setEnabled(bool(self._pixmaps))
+        self._say('当前动作：%d 帧 · %.1ffps' % (len(self._frames), self._fps))
+
+    def _start_preview(self):
+        self._preview_timer.stop()
+        if not self._pixmaps:
+            return
+        idx = self._preview_i % len(self._pixmaps)
+        self._preview_i = idx
+        self.stage.set_pixmap(self._pixmaps[idx])
+        if not self.auto_box.isChecked() or len(self._pixmaps) < 2:
+            return
+        self._preview_timer.setInterval(max(40, int(1000.0 / self._fps)))
+        self._preview_timer.start()
+
+    def _sync_play(self, *_a):
+        self._start_preview()
+
+    def _fps_changed(self, value):
+        self._fps = max(2.0, min(24.0, value / 10.0))
+        self.fps_val.setText('%.1f' % self._fps)
+        self._start_preview()
+
+    def _render_frames(self):
+        while self.frame_row.count():
+            item = self.frame_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for i, pix in enumerate(self._pixmaps):
+            self.frame_row.addWidget(FrameCell(
+                i, pix, self._remove_frame,
+                on_select=self._select_frame, on_move=self._move_frame,
+                selected=(i == self._preview_i)))
+        # 和网页一样：最右侧留一个「＋」继续加图。
+        self.frame_row.addWidget(AddCell(self._pick_add))
+        self.frame_row.addStretch(1)
+        # 只剩一张也留着：用户要能确认删完留下的是哪张。
+        self.frame_scroll.setVisible(bool(self._pixmaps))
+
+    def _select_frame(self, index):
+        """点缩略图：选中它；自动播放关掉时舞台就停在这一张。"""
+        if not (0 <= index < len(self._pixmaps)):
+            return
+        self._preview_i = index
+        for i in range(self.frame_row.count()):
+            w = self.frame_row.itemAt(i).widget()
+            if isinstance(w, FrameCell):
+                w.set_selected(w.index == index)
+        if not self.auto_box.isChecked() or len(self._pixmaps) < 2:
+            self.stage.set_pixmap(self._pixmaps[index])
+
+    def _move_frame(self, src, dst):
+        """拖动排序：把第 src 帧挪到 dst 的位置。"""
+        n = len(self._frames)
+        if src == dst or not (0 <= src < n) or not (0 <= dst < n):
+            return
+        self._user_picked = True
+        self._frames.insert(dst, self._frames.pop(src))
+        self._pixmaps.insert(dst, self._pixmaps.pop(src))
+        self._preview_i = dst
+        self._render_frames()
+        self._start_preview()
+        self._say('顺序已调整。')
+
+    def _pick_add(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, '再加几张图（最多 16 帧）', '',
+            '图片 (*.png *.jpg *.jpeg *.webp *.bmp)')
+        if paths:
+            self._append_paths(paths)
+
+    def _append_paths(self, paths):
+        """追加新帧：输出和现有帧同尺寸、脚底对齐，服务端尺寸校验才过得去。"""
+        if not self._frames:
+            self._paths = list(paths)[:16]
+            self._load()
+            return
+        room = 16 - len(self._frames)
+        if room <= 0:
+            self._say('最多 16 帧', bad=True)
+            return
+        keyout = self.keyout.isChecked()
+        added = 0
+        for path in list(paths)[:room]:
+            try:
+                pngs, ow, oh = upload.normalize_frames(
+                    [path], self._w, self._h, keyout=keyout)
+            except Exception:
+                continue
+            try:
+                part = Image.open(io.BytesIO(pngs[0])).convert('RGBA')
+            except OSError:
+                continue
+            out = Image.new('RGBA', (self._w, self._h), (0, 0, 0, 0))
+            out.paste(part, ((self._w - ow) // 2, self._h - oh))
+            buf = io.BytesIO()
+            out.save(buf, 'PNG', optimize=True)
+            data = buf.getvalue()
+            self._frames.append(data)
+            pix = QPixmap()
+            pix.loadFromData(data, 'PNG')
+            self._pixmaps.append(pix)
+            self._paths.append(path)
+            added += 1
+        if not added:
+            self._say('新加的图读不出来，换几张吧', bad=True)
+            return
+        self._user_picked = True
+        self._preview_i = max(0, min(self._preview_i,
+                                    len(self._pixmaps) - 1))
+        self._render_frames()
+        self._start_preview()
+        self.ok.setEnabled(True)
+        self._say('已加到 %d 帧' % len(self._frames))
+
+    def _remove_frame(self, index):
+        if not (0 <= index < len(self._frames)):
+            return
+        self._user_picked = True
+        del self._frames[index]
+        del self._pixmaps[index]
+        if self._preview_i > index:
+            self._preview_i -= 1
+        self._preview_i = max(0, min(self._preview_i,
+                                    len(self._pixmaps) - 1))
+        self._render_frames()
+        if self._pixmaps:
+            self.stage.set_pixmap(self._pixmaps[self._preview_i])
+            self._start_preview()
+            self.ok.setEnabled(True)
+            self._say('还剩 %d 帧' % len(self._frames))
+        else:
+            self.stage.set_pixmap(None)
+            self.ok.setEnabled(False)
+            self._say('至少留一帧', bad=True)
+
+    def _tick_preview(self):
+        if len(self._pixmaps) < 2:
+            return
+        self._preview_i = (self._preview_i + 1) % len(self._pixmaps)
+        self.stage.set_pixmap(self._pixmaps[self._preview_i])
+
+    def _clean_tmp(self):
+        if self._tmp_dir:
+            shutil.rmtree(self._tmp_dir, ignore_errors=True)
+            self._tmp_dir = None
+
+    def done(self, result):
+        self._preview_timer.stop()
+        self._clean_tmp()
+        super().done(result)
 
     # ---- 模式 ----
 
@@ -561,7 +993,39 @@ class UploadDialog(QDialog):
         tile = self.tiles.get(key)
         if tile is not None:
             tile.setChecked(True)
-            self._sync_mode()
+            self._on_tile(key)
+
+    def _on_tile(self, key):
+        """切换动作格子：更新模式，需要时把该动作现有的动画装进弹层。"""
+        self._sync_mode()
+        if self._load_cb is None or key == self._loaded_key:
+            return
+        if self._user_picked:
+            return
+        try:
+            frames, fps = self._load_cb(key) or ([], None)
+        except Exception:
+            frames, fps = [], None
+        if frames:
+            self._load_preset(frames, fps, key)
+        else:
+            self._clear_frames(key)
+
+    def _clear_frames(self, key=None):
+        """切到还没图 / 新建动作：清掉上一组，别让旧图跟着上传。"""
+        self._clean_tmp()
+        self._frames = []
+        self._pixmaps = []
+        self._paths = []
+        self._w = self._h = 0
+        self._preview_i = 0
+        self._preview_timer.stop()
+        self._loaded_key = key
+        self._user_picked = False
+        self._render_frames()
+        self.stage.set_pixmap(None)
+        self.ok.setEnabled(False)
+        self._say('')
 
     def _sync_mode(self):
         is_new = not self._key()
@@ -595,9 +1059,10 @@ class UploadDialog(QDialog):
 
     def payload(self):
         """调用方拿这个直接传给 upload.send。没选图就返回 None。"""
-        if not self._png:
+        if not self._frames:
             return None
-        out = {'role': self.role, 'png': self._png}
+        out = {'role': self.role, 'frames': list(self._frames),
+               'fps': self._fps}
         key = self._key()
         if key:
             out['action'] = key
@@ -610,10 +1075,16 @@ class UploadDialog(QDialog):
         return out
 
     def accept(self):
-        if not self._png:
+        if not self._frames:
             self._say('先选一张图', bad=True)
             return
-        if not self._key():
+        key = self._key()
+        if len(self._frames) > 1:
+            # 内置姿势只有一张图：多帧动画属于用户自己新建的动作。
+            if key and self.tiles[key].badge != '新增':
+                self._say('内置姿势只能放一张图', bad=True)
+                return
+        if not key:
             label = self.name.text().strip()
             if not label:
                 self._say('给这个动作起个名字', bad=True)

@@ -2,7 +2,7 @@
 // 浏览器和 Qt 的差别只在「画到哪儿」：这里用同一个最大包围盒、
 // 同一套底部居中 + crawl 两帧质心修正。
 
-import { spriteUrl, remotePoses } from './asset.js';
+import { spriteUrl, spriteFrameUrl, remotePoses, remoteAnim } from './asset.js';
 
 const POSES = ['idle', 'wave', 'jump', 'sleep', 'fall', 'drag',
   'drink', 'heart', 'knock', 'crawl_1', 'crawl_2'];
@@ -31,6 +31,10 @@ export async function loadRole(role) {
   if (roleCache.has(role)) return roleCache.get(role);
   const p = (async () => {
     const poses = {};
+    // 多帧动作：base pose → [Image...]；anims 里记 fps。播放和桌面端一样，
+    // 固定 8fps 循环，动作时长到了回 idle。
+    const frames = {};
+    const anims = {};
     // 出厂 11 个姿势 + 用户加的动作。远程清单里可能是新名字（c1），
     // 也可能是覆盖了出厂姿势（wave）—— 两种都走 spriteUrl 那张查找表。
     const names = Array.from(new Set([...POSES, ...remotePoses(role)]));
@@ -39,6 +43,21 @@ export async function loadRole(role) {
         poses[pose] = await loadImage(spriteUrl(role, pose));
       } catch (_) {
         // 素材缺一张不影响整个角色，和 sprites.load_all 的退化一致
+      }
+      const anim = remoteAnim(role, pose);
+      if (anim && poses[pose]) {
+        const list = [poses[pose]];
+        for (let i = 1; i < Number(anim.frames); i += 1) {
+          try {
+            list.push(await loadImage(spriteFrameUrl(role, pose, i, anim.rev)));
+          } catch (_) {
+            // 少一帧就少一帧，别让整个动作加载失败
+          }
+        }
+        if (list.length > 1) {
+          frames[pose] = list;
+          anims[pose] = { fps: Number(anim.fps) || 8 };
+        }
       }
     }));
     if (!poses.idle) throw new Error('missing idle: ' + role);
@@ -57,7 +76,7 @@ export async function loadRole(role) {
       for (const [n, c] of cs) dx[n] = Math.round(avg - c);
     }
 
-    return { role, poses, w, h, bodyW, dx };
+    return { role, poses, w, h, bodyW, dx, frames, anims };
   })();
   roleCache.set(role, p);
   try {

@@ -13,12 +13,13 @@ const BUILD = (() => {
   return el ? (el.content || '') : '';
 })();
 
-// 服务端 /api/sprites 的清单：{actions, poses: {p1: {idle: 'rev', ...}}, seq}
-let manifest = { actions: {}, poses: {} };
+// 服务端 /api/sprites 的清单：{actions, poses: {p1: {idle: 'rev', ...}}, anims, seq}
+let manifest = { actions: {}, poses: {}, anims: {} };
 
 export function setSpriteManifest(m) {
-  manifest = (m && typeof m === 'object') ? m : { actions: {}, poses: {} };
+  manifest = (m && typeof m === 'object') ? m : { actions: {}, poses: {}, anims: {} };
   if (!manifest.poses) manifest.poses = {};
+  if (!manifest.anims) manifest.anims = {};
 }
 
 export function spriteManifest() {
@@ -47,6 +48,20 @@ export function spriteUrl(role, pose) {
     return `/sprites/${encodeURIComponent(role)}/${encodeURIComponent(pose)}.png?v=${encodeURIComponent(rev)}`;
   }
   return assetUrl(`/assets/roles/${role}/${pose}.png`);
+}
+
+// 多帧动作：第 0 帧还是 <pose>.png，第 n 帧是 <pose>.n.png。
+// 服务端清单 anims 里只有大于 1 帧的动作会出现。
+export function remoteAnim(role, pose) {
+  const per = manifest.anims && manifest.anims[role];
+  const a = per && per[pose];
+  return a && Number(a.frames) > 1 ? a : null;
+}
+
+export function spriteFrameUrl(role, pose, index, rev) {
+  if (!index) return spriteUrl(role, pose);
+  const v = rev || spriteRev(role, pose);
+  return `/sprites/${encodeURIComponent(role)}/${encodeURIComponent(pose)}.${index}.png?v=${encodeURIComponent(v)}`;
 }
 
 // 出厂原图，**永远不看覆盖图**。

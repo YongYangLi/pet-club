@@ -1534,8 +1534,8 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 .upload-mask.hidden { display: none; }
 
 .upload-card {
-  width: min(420px, 92vw);
-  max-height: 88vh;
+  width: min(460px, 94vw);
+  max-height: 92vh;
   display: flex;
   flex-direction: column;
   border-radius: 16px;
@@ -1564,7 +1564,7 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 .upload-x:hover { color: var(--fg); }
 
 .upload-body {
-  padding: 14px 16px;
+  padding: 12px 14px;
   overflow-y: auto;
 }
 
@@ -1597,14 +1597,46 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   cursor: pointer;
 }
 
+/* 勾选框自绘：原生方框的白底 + 系统蓝勾和这套卡片完全不搭。
+   勾用 SVG 背景画，不依赖 input 的伪元素（部分浏览器不渲染）。 */
+.upload-card input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background-color: #ffffff;
+  cursor: pointer;
+  transition: background-color .12s, border-color .12s;
+}
+
+.upload-card input[type="checkbox"]:hover { border-color: var(--accent-edge); }
+
+.upload-card input[type="checkbox"]:checked {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2l2.4 2.4 4.6-4.8' fill='none' stroke='%23ffffff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 11px 11px;
+}
+
+.upload-card input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-edge);
+  outline-offset: 1px;
+}
+
 /* 棋盘格底：能一眼看出图有没有真的透明 */
 .upload-stage {
   display: flex;
   align-items: flex-end;
   justify-content: center;
-  min-height: 132px;
-  margin-bottom: 12px;
-  padding: 10px;
+  min-height: 120px;
+  margin-bottom: 8px;
+  padding: 8px;
   border: 1px solid var(--line);
   border-radius: 10px;
   background-color: #f7f8fb;
@@ -1617,6 +1649,139 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   background-position: 0 0, 0 6px, 6px -6px, -6px 0;
 }
 .upload-stage canvas { display: block; image-rendering: auto; }
+
+/* 多帧预览：一排小缩略图 + 总帧数，确认到底传了几张 */
+.upload-frames {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0 10px;
+  min-height: 46px;
+  overflow: visible;
+}
+
+.upload-frames.hidden { display: none; }
+
+.upload-frame {
+  position: relative;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s, opacity .12s;
+}
+
+.upload-frame.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+}
+
+.upload-frame.drag { opacity: .4; }
+.upload-frame.over { border-color: var(--accent); border-style: dashed; }
+
+/* 最右侧的加图位：虚线小方框 + 加号 */
+.upload-frame-add {
+  flex: none;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px dashed var(--accent-edge);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+
+.upload-frame-add:hover { background: #e8e9ff; border-color: var(--accent); }
+
+.upload-frame img {
+  max-width: 34px;
+  max-height: 34px;
+  object-fit: contain;
+  border-radius: 5px;
+}
+
+.upload-frame i {
+  position: absolute;
+  left: 1px;
+  bottom: 0;
+  padding: 0 2px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .85);
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 12px;
+}
+
+.upload-frame-x {
+  position: absolute;
+  right: -5px;
+  top: -5px;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: #d6455d;
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+/* 播放控制单独一行：不套 .upload-row，避免被那边 40px 的标签宽度挤到重叠 */
+.upload-play-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 8px;
+}
+
+.upload-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--sub);
+  cursor: pointer;
+}
+
+.upload-fps-lab {
+  flex: none;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--sub);
+}
+
+.upload-play-row input[type="range"] {
+  flex: 1 1 90px;
+  min-width: 90px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.upload-fps-val {
+  flex: none;
+  width: 30px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--sub);
+}
 
 .upload-fields { display: flex; flex-direction: column; gap: 8px; }
 .upload-row {
@@ -1659,7 +1824,7 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(62px, 1fr));
   gap: 6px;
-  max-height: 178px;
+  max-height: 150px;
   overflow-y: auto;
   padding: 2px;
 }
@@ -1733,6 +1898,20 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 }
 .upload-note.bad { color: var(--err); }
 
+/* 说明文字 + 「恢复默认图 / 删掉这个动作」同一行，和桌面弹层一致。
+   按钮以前塞在底部，和取消/上传挤在一起，窄屏会顶出去。 */
+.upload-alt {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 10px;
+}
+.upload-alt .upload-note {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+}
+
 .upload-foot {
   display: flex;
   align-items: center;
@@ -1751,10 +1930,10 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   white-space: nowrap;
 }
 .upload-msg.bad { color: var(--err); }
-.upload-foot .btn { padding: 8px 14px; font-size: 13px; }
-.upload-foot .btn-ghost {
+.upload-card .btn { padding: 8px 14px; font-size: 13px; }
+.upload-card .btn-ghost {
   background: transparent;
   color: var(--sub);
   border: 1px solid var(--border);
 }
-.upload-foot .btn-ghost:hover:not(:disabled) { background: var(--field); color: var(--fg); }
+.upload-card .btn-ghost:hover:not(:disabled) { background: var(--field); color: var(--fg); }

@@ -12,9 +12,13 @@
 两样东西：
 
   registry.json        新建的动作（名字 / 时长 / 属于哪个角色）
-  <role>/<pose>.png    某个角色的某张图。两种来源共用一套存储：
+  <role>/<pose>.png    某个角色的第一帧。两种来源共用一套存储：
                        · 新动作的图（pose 就是动作 key）
                        · 换掉内置动作的图（pose 是内置的姿势名，比如 wave）
+  <role>/<pose>.<n>.png  多帧动作的第 n 帧（n 从 1 开始）。客户端按 8fps 循环。
+
+多帧只给自定义动作：内置姿势（wave 等）永远单张。第一帧沿用 <pose>.png，
+所以老客户端不认识多帧时也能显示一张静态图。
 
 纯标准库：服务端只需要校验 PNG 头，不装 Pillow。
 """
@@ -31,9 +35,22 @@ from .actions import ACTIONS
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, 'data', 'custom')
 
-MAX_BYTES = 2 * 1024 * 1024      # 上传体积上限（base64 解码后）
+MAX_BYTES = 2 * 1024 * 1024      # 单帧体积上限（base64 解码后）
 MAX_W = 200                      # 和现有素材同量级：p1 最宽 158、最高 234
 MAX_H = 240
+MAX_FRAMES = 16                  # 一个动作最多几帧：够做小动画，又不至于把上传撑爆
+MAX_TOTAL = 6 * 1024 * 1024      # 一次上传所有帧的总体积上限
+FPS = 8                          # 多帧动作的默认帧率
+MIN_FPS = 2
+MAX_FPS = 24
+
+
+def clamp_fps(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return FPS
+    return round(min(MAX_FPS, max(MIN_FPS, value)), 1)
 
 # 动作总数上限。6 个身份 × 每人十几个已经是极限，再多右键菜单就没法看了；
 # 顺带挡住「往上传几百张把磁盘塞满」。
@@ -61,6 +78,38 @@ def image_path(role, pose):
     return os.path.join(data_dir(), role, pose + '.png')
 
 
+def frame_path(role, pose, index):
+    """第 index 帧的路径。0 就是 <pose>.png（老客户端只认这一张）。"""
+    if not index:
+        return image_path(role, pose)
+    return os.path.join(data_dir(), role, '%s.%d.png' % (pose, index))
+
+
+def frame_files(role, pose):
+    """某个姿势现有的所有帧，按序号排列。
+
+    <pose>.png 是第一帧，<pose>.1.png、<pose>.2.png 是后续帧。
+    目录里还可能有别的姿势，靠前缀 + 纯数字后缀精确匹配。
+    """
+    paths = []
+    first = image_path(role, pose)
+    if os.path.isfile(first):
+        paths.append(first)
+    d = os.path.join(data_dir(), role)
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return paths
+    pattern = re.compile(r'^%s\.(\d+)\.png$' % re.escape(pose))
+    extra = []
+    for name in names:
+        m = pattern.match(name)
+        if m:
+            extra.append((int(m.group(1)), os.path.join(d, name)))
+    paths.extend(p for _, p in sorted(extra))
+    return paths
+
+
 def valid_name(name):
     return bool(name) and bool(NAME_RE.match(name))
 
@@ -86,13 +135,33 @@ def check_png(data):
     if not data:
         return None, '图片是空的'
     if len(data) > MAX_BYTES:
-        return None, '图片超过 %d MB' % (MAX_BYTES // 1024 // 1024)
+        return None, '单张图片超过 %d MB' % (MAX_BYTES // 1024 // 1024)
     size = png_size(data)
     if size is None:
         return None, '不是有效的 PNG'
     w, h = size
     if w > MAX_W or h > MAX_H:
         return None, '画布 %d×%d 超过上限 %d×%d' % (w, h, MAX_W, MAX_H)
+    return size, ''
+
+
+def check_frames(frames):
+    """校验一组帧。返回 ((宽, 高), 原因)；所有帧必须同尺寸，否则播放会跳。"""
+    if not frames:
+        return None, '至少要有一帧图片'
+    if len(frames) > MAX_FRAMES:
+        return None, '最多 %d 帧' % MAX_FRAMES
+    if sum(len(f) for f in frames) > MAX_TOTAL:
+        return None, '所有帧加起来超过 %d MB' % (MAX_TOTAL // 1024 // 1024)
+    size = None
+    for i, data in enumerate(frames):
+        s, err = check_png(data)
+        if err:
+            return None, ('第 %d 帧：%s' % (i + 1, err)) if len(frames) > 1 else err
+        if size is None:
+            size = s
+        elif s != size:
+            return None, '每一帧的画布大小必须一致（第 1 帧 %d×%d）' % size
     return size, ''
 
 
@@ -134,21 +203,32 @@ def save_registry(reg):
     os.replace(tmp, path)
 
 
-def _write_png(role, pose, data):
+def _write_frames(role, pose, frames):
+    """写一组帧，多出来的旧帧顺手删掉。"""
     _role_dir(role)                 # 第一次上传时这个角色还没有目录
-    path = image_path(role, pose)
-    tmp = path + '.tmp'
-    with open(tmp, 'wb') as f:
-        f.write(data)
-    os.replace(tmp, path)
+    for i, data in enumerate(frames):
+        path = frame_path(role, pose, i)
+        tmp = path + '.tmp'
+        with open(tmp, 'wb') as f:
+            f.write(data)
+        os.replace(tmp, path)
+    for stale in frame_files(role, pose)[len(frames):]:
+        try:
+            os.remove(stale)
+        except OSError:
+            pass
 
 
-def drop_png(role, pose):
-    try:
-        os.remove(image_path(role, pose))
-        return True
-    except OSError:
-        return False
+def drop_frames(role, pose):
+    """删掉一个姿势的所有帧。返回是否真的删掉了东西。"""
+    hit = False
+    for path in frame_files(role, pose):
+        try:
+            os.remove(path)
+            hit = True
+        except OSError:
+            pass
+    return hit
 
 
 # ---------------- 对外：动作表 / 清单 ----------------
@@ -164,23 +244,33 @@ def order():
 
 
 def rev(role, pose):
-    """内容版本号。用 mtime+size 派生：文件被覆盖 mtime 必变。
+    """内容版本号。用所有帧的 mtime+size 派生：任何一帧被覆盖都会变。
 
     不用内容 hash 是因为每张图几百 KB，每次清单请求都读一遍不划算；
     mtime 精度到纳秒，手工替换文件也能立刻被认出来。
     """
-    try:
-        st = os.stat(image_path(role, pose))
-    except OSError:
+    paths = frame_files(role, pose)
+    if not paths:
         return ''
-    key = '%d:%d' % (st.st_mtime_ns, st.st_size)
-    return hashlib.sha1(key.encode('utf-8')).hexdigest()[:8]
+    h = hashlib.sha1()
+    for path in paths:
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        h.update(('%d:%d;' % (st.st_mtime_ns, st.st_size)).encode('utf-8'))
+    return h.hexdigest()[:8]
 
 
 def manifest():
-    """客户端同步素材用的清单：有哪些自定义动作、每个角色有哪些覆盖图。"""
+    """客户端同步素材用的清单：动作表、覆盖图，以及多帧动作的帧数和帧率。"""
     reg = load_registry()
     poses = {}
+    anims = {}
+    fps_by_pose = {}
+    for spec in (reg.get('actions') or {}).values():
+        if isinstance(spec, dict) and spec.get('pose'):
+            fps_by_pose[spec['pose']] = clamp_fps(spec.get('fps'))
     base = data_dir()
     try:
         names = sorted(os.listdir(base))
@@ -196,15 +286,23 @@ def manifest():
                 continue
             pose = name[:-4]
             if not valid_name(pose):
-                continue
+                continue            # c1.1.png 这种后续帧不进 poses
             r = rev(role, pose)
-            if r:
-                m[pose] = r
+            if not r:
+                continue
+            m[pose] = r
+            frames = len(frame_files(role, pose))
+            if frames > 1:
+                anims.setdefault(role, {})[pose] = {
+                    'frames': frames,
+                    'fps': fps_by_pose.get(pose, FPS),
+                    'rev': r}
         if m:
             poses[role] = m
     return {
         'actions': dict(reg.get('actions') or {}),
         'poses': poses,
+        'anims': anims,
         'seq': int(reg.get('seq') or 0),
     }
 
@@ -222,8 +320,15 @@ def norm_label(label):
     return ' '.join(str(label or '').split()).casefold()
 
 
-def add_action(role, png, label, dur=2.0):
-    """新建一个动作。返回 (spec, 错误串)。
+def _norm_frames(frames):
+    """允许调用方传 bytes（老接口）或 list。"""
+    if isinstance(frames, (bytes, bytearray)):
+        return [bytes(frames)]
+    return list(frames or ())
+
+
+def add_action(role, frames, label, dur=2.0, fps=FPS):
+    """新建一个动作。frames 是一组 PNG 字节（1 张就是静态图）。
 
     动作 key 由服务端发号（c1、c2…），不用用户输入：中文名做文件名在
     Windows/Linux/网络传输三处都要额外处理，而 key 只做标识，没必要。
@@ -233,7 +338,8 @@ def add_action(role, png, label, dur=2.0):
     我做比耶、对方有比耶时才能各比各的。内置动作的名字也不许占：那会让
     「我做打招呼」有两个意思。
     """
-    size, err = check_png(png)
+    frames = _norm_frames(frames)
+    _, err = check_frames(frames)
     if err:
         return None, err
     label = (label or '').strip()[:20]
@@ -245,6 +351,7 @@ def add_action(role, png, label, dur=2.0):
     except (TypeError, ValueError):
         dur = 2.0
     dur = min(8.0, max(0.6, dur))
+    fps = clamp_fps(fps)
     if not valid_name(role):
         return None, '身份不合法'
 
@@ -268,30 +375,52 @@ def add_action(role, png, label, dur=2.0):
             'dur': round(dur, 2),
             'hint': '自定义动作（%s）' % label,
             'custom': True,
+            'frames': len(frames),
+            'fps': fps,
             # 镜像由「同名动作」承担：别人演的是他自己那份，不是这张图。
             'solo': True,
         }
-        _write_png(role, key, png)
+        _write_frames(role, key, frames)
         reg['seq'] = seq
         reg.setdefault('actions', {})[key] = spec
         save_registry(reg)
     return dict(spec, key=key), ''
 
 
-def replace_pose(role, pose, png):
-    """换掉某个已有姿势的图，动作表不动。返回 (spec, 错误串)。"""
-    _, err = check_png(png)
+def replace_pose(role, pose, frames, fps=None):
+    """换掉某个已有姿势的图，动作表不动。
+
+    自定义动作允许多帧；内置姿势只允许一张 —— 内置的时长和语义都是写死的，
+    多帧动画只属于用户自己新建的动作。
+    """
+    frames = _norm_frames(frames)
+    _, err = check_frames(frames)
     if err:
         return None, err
     if not valid_name(role) or not valid_name(pose):
         return None, '参数不合法'
     with _lock:
-        _write_png(role, pose, png)
-    return {'role': role, 'pose': pose, 'rev': rev(role, pose)}, ''
+        reg = load_registry()
+        item = None
+        for key, spec in (reg.get('actions') or {}).items():
+            if spec.get('pose') == pose or key == pose:
+                item = spec
+                break
+        if item is None and len(frames) > 1:
+            return None, '内置姿势只能放一张图'
+        _write_frames(role, pose, frames)
+        if item is not None:
+            item['frames'] = len(frames)
+            if fps is not None:
+                item['fps'] = clamp_fps(fps)
+            save_registry(reg)
+    return {'role': role, 'pose': pose, 'frames': len(frames),
+            'fps': clamp_fps(fps) if fps is not None else None,
+            'rev': rev(role, pose)}, ''
 
 
 def remove_action(key):
-    """删掉一个自定义动作：注册表条目 + 图片一起清。"""
+    """删掉一个自定义动作：注册表条目 + 所有帧一起清。"""
     with _lock:
         reg = load_registry()
         spec = (reg.get('actions') or {}).pop(key, None)
@@ -301,7 +430,7 @@ def remove_action(key):
         role = spec.get('role')
         pose = spec.get('pose') or key
         if role:
-            drop_png(role, pose)
+            drop_frames(role, pose)
     return True
 
 
@@ -309,4 +438,4 @@ def restore_pose(role, pose):
     """把被换掉的内置姿势恢复成出厂图（删掉覆盖文件即可）。"""
     if not valid_name(role) or not valid_name(pose):
         return False
-    return drop_png(role, pose)
+    return drop_frames(role, pose)

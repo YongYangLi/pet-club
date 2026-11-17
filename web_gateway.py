@@ -45,7 +45,7 @@ import server as game_server
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, 'web')
 ASSETS_DIR = os.path.join(ROOT, 'assets')
-MAX_POST = 4 * 1024 * 1024      # 上传请求体上限：2MB 的图 base64 之后约 2.7MB
+MAX_POST = 10 * 1024 * 1024     # 上传请求体上限：多帧动作最多 6MB 原图，base64 后约 8MB
 
 
 def acme_path(root, path):
@@ -645,11 +645,29 @@ class WebHandler(BaseHTTPRequestHandler):
         role = str(body.get('role') or '')
         if role not in game_server.ROLES:
             return self._json({'ok': False, 'error': '身份不合法'}, 400)
-        try:
-            png = base64.b64decode(''.join(str(body.get('data') or '').split()),
-                                   validate=True)
-        except (ValueError, TypeError):
-            return self._json({'ok': False, 'error': '图片编码坏了，重试一次'}, 400)
+
+        raw_frames = body.get('frames')
+        frames = []
+        if isinstance(raw_frames, list) and raw_frames:
+            if len(raw_frames) > custom.MAX_FRAMES:
+                return self._json(
+                    {'ok': False, 'error': '最多 %d 帧' % custom.MAX_FRAMES}, 400)
+            for i, item in enumerate(raw_frames):
+                try:
+                    frames.append(base64.b64decode(
+                        ''.join(str(item or '').split()), validate=True))
+                except (ValueError, TypeError):
+                    return self._json(
+                        {'ok': False, 'error': '第 %d 帧编码坏了，重试一次' % (i + 1)},
+                        400)
+        else:
+            try:
+                frames = [base64.b64decode(
+                    ''.join(str(body.get('data') or '').split()),
+                    validate=True)]
+            except (ValueError, TypeError):
+                return self._json(
+                    {'ok': False, 'error': '图片编码坏了，重试一次'}, 400)
 
         key = str(body.get('action') or '')
         if key:
@@ -659,12 +677,15 @@ class WebHandler(BaseHTTPRequestHandler):
                 pose = key
             if not pose:
                 return self._json({'ok': False, 'error': '没有这个动作'}, 400)
-            out, err = custom.replace_pose(role, pose, png)
+            out, err = custom.replace_pose(role, pose, frames, body.get('fps'))
         else:
-            out, err = custom.add_action(role, png, body.get('label'), body.get('dur'))
+            out, err = custom.add_action(role, frames, body.get('label'),
+                                         body.get('dur'), body.get('fps'))
         if err:
             return self._json({'ok': False, 'error': err}, 400)
-        log('素材更新 %s/%s（%d 字节）' % (role, out.get('pose') or key, len(png)))
+        log('素材更新 %s/%s（%d 帧，%d 字节）'
+            % (role, out.get('pose') or key, len(frames),
+               sum(len(f) for f in frames)))
         self._json({'ok': True, 'spec': out, 'manifest': custom.manifest()})
 
     def _restore(self):

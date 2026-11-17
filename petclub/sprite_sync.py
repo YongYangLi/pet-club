@@ -27,9 +27,10 @@ def manifest_url(host, http_port):
     return 'http://%s:%d/api/sprites' % (host, int(http_port))
 
 
-def image_url(host, http_port, role, pose, rev):
+def image_url(host, http_port, role, pose, rev, index=0):
+    name = pose if not index else '%s.%d' % (pose, index)
     return 'http://%s:%d/sprites/%s/%s.png?v=%s' % (
-        host, int(http_port), role, pose, rev)
+        host, int(http_port), role, name, rev)
 
 
 def _get(url, timeout):
@@ -82,9 +83,10 @@ def _write(path, data):
     os.replace(tmp, path)
 
 
-def _prune(cache_dir, poses):
+def _prune(cache_dir, want):
     """删掉远程已经不存在的图。返回删掉的张数。
 
+    want 是 {role: set(文件名)}，包含多帧动作的 pose.1.png 等。
     必须删：某个姿势被「恢复默认」之后，远程清单里就没有它了，
     缓存还留着的话桌面端会一直显示那张自定义图，怎么刷都不回去。
     删掉的张数要回传：只有「下载」和「删除」都算素材变了，调用方才知道
@@ -95,9 +97,9 @@ def _prune(cache_dir, poses):
         d = os.path.join(cache_dir, role)
         if not os.path.isdir(d):
             continue
-        want = set((poses.get(role) or {}).keys())
+        allowed = want.get(role) or set()
         for name in os.listdir(d):
-            if name.endswith('.png') and name[:-4] not in want:
+            if name.endswith('.png') and name not in allowed:
                 try:
                     os.remove(os.path.join(d, name))
                     removed += 1
@@ -118,34 +120,68 @@ def sync(host, http_port, cache_dir, timeout=TIMEOUT):
         raise ValueError('清单格式不对')
 
     poses = manifest.get('poses') or {}
+    anims = manifest.get('anims') or {}
     revs = load_revs(cache_dir)
     got = 0
+    want = {}
 
     for role, per in poses.items():
         if not isinstance(per, dict):
             continue
+        allowed = want.setdefault(role, set())
         for pose, rev in per.items():
             if not isinstance(rev, str) or not rev:
                 continue
-            target = os.path.join(cache_dir, role, pose + '.png')
-            if revs.get(role, {}).get(pose) == rev and os.path.exists(target):
-                continue
+            anim = (anims.get(role) or {}).get(pose) or {}
             try:
-                data = _get(image_url(host, http_port, role, pose, rev), timeout)
-            except OSError:
-                continue                    # 单张失败不影响其他张
-            if len(data) > MAX_BYTES:
-                continue
-            size = png_size(data)
-            if size is None or size[0] > MAX_SIDE or size[1] > MAX_SIDE:
-                continue
-            try:
-                _write(target, data)
-            except OSError:
-                continue
+                frames = max(1, int(anim.get('frames') or 1))
+            except (TypeError, ValueError):
+                frames = 1
+            names = [pose] + ['%s.%d' % (pose, i) for i in range(1, frames)]
+            for name in names:
+                allowed.add(name + '.png')
+            changed = revs.get(role, {}).get(pose) != rev
+            for i, name in enumerate(names):
+                target = os.path.join(cache_dir, role, name + '.png')
+                if not changed and os.path.exists(target):
+                    continue
+                try:
+                    data = _get(image_url(host, http_port, role, pose, rev, i),
+                                timeout)
+                except OSError:
+                    continue                # 单张失败不影响其他张
+                if len(data) > MAX_BYTES:
+                    continue
+                size = png_size(data)
+                if size is None or size[0] > MAX_SIDE or size[1] > MAX_SIDE:
+                    continue
+                try:
+                    _write(target, data)
+                except OSError:
+                    continue
+                got += 1
             revs.setdefault(role, {})[pose] = rev
-            got += 1
 
-    pruned = _prune(cache_dir, poses)
+    for role in want:
+        fps_map = {}
+        for pose, info in (anims.get(role) or {}).items():
+            if isinstance(info, dict) and info.get('frames', 0) > 1:
+                fps_map[pose] = info.get('fps') or 8
+        raw = json.dumps(fps_map, ensure_ascii=False).encode('utf-8')
+        path = os.path.join(cache_dir, role, 'anims.json')
+        try:
+            with open(path, 'rb') as f:
+                old = f.read()
+        except OSError:
+            old = b''
+        if raw != old:
+            try:
+                _write(path, raw)
+                # 只改帧率时图片一张都不会下载，也得让调用方重读素材。
+                got += 1
+            except OSError:
+                pass
+
+    pruned = _prune(cache_dir, want)
     save_revs(cache_dir, revs)
     return manifest, got, pruned

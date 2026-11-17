@@ -334,6 +334,9 @@ class Pet {
     this.phase = drop ? 'fall' : 'idle';
     this.pose = drop ? 'fall' : 'idle';
     this.poseName = '';
+    this.anim = null;
+    this.animT = 0;
+    this.animFps = 8;
     this.timer = 0;
     this.landed = !drop;
     this.crawlTo = null;
@@ -435,7 +438,11 @@ class Pet {
     const name = this.sp.poses[pose] ? pose : 'idle';
     if (name === this.poseName) return;
     this.poseName = name;
-    const img = this.sp.poses[name];
+    this.paintImage(this.sp.poses[name], name);
+  }
+
+  // 把某张图画到 <img> 上。多帧动作每帧调一次，所以抽出来。
+  paintImage(img, name) {
     this.img.src = img.src;
     const w = img.naturalWidth * this.scale;
     const h = img.naturalHeight * this.scale;
@@ -443,6 +450,13 @@ class Pet {
     this.img.style.height = `${h}px`;
     const dx = (this.sp.dx[name] || 0) * this.scale;
     this.img.style.transform = `translateX(-50%) translateX(${dx}px)`;
+  }
+
+  // 多帧动作：按 8fps 循环，poseName 置空让动作结束后 setPose('idle') 一定生效。
+  paintFrame(index) {
+    if (!this.anim || !this.anim.length) return;
+    this.poseName = '';
+    this.paintImage(this.anim[index % this.anim.length], '');
   }
 
   render() {
@@ -462,6 +476,17 @@ class Pet {
   act(pose, dur) {
     this.stopCrawl();
     if (this.phase === 'fall' || this.phase === 'hold' || this.phase === 'rise') return;
+    const frames = this.sp.frames && this.sp.frames[pose];
+    if (frames && frames.length > 1) {
+      this.anim = frames;
+      this.animFps = (this.sp.anims[pose] && this.sp.anims[pose].fps) || 8;
+      this.animT = 0;
+      this.pose = pose;
+      this.paintFrame(0);
+      this.timer = dur;
+      return;
+    }
+    this.anim = null;
     this.pose = pose;
     this.setPose(pose);
     this.timer = dur;
@@ -470,6 +495,7 @@ class Pet {
   grab() {
     this.stopCrawl();
     this.vy = 0;
+    this.anim = null;
     this.phase = 'hold';
     this.pose = 'drag';
     this.setPose('drag');
@@ -485,6 +511,7 @@ class Pet {
   release() {
     if (this.phase !== 'hold') return;
     // 松手就停在原地：桌宠可以摆在桌面任意位置，不再掉回底边
+    this.anim = null;
     this.phase = 'idle';
     this.pose = 'idle';
     this.setPose('idle');
@@ -497,6 +524,7 @@ class Pet {
 
   takeOff() {
     this.stopCrawl();
+    this.anim = null;
     this.landY = this.y;        // 飞一圈还回到起飞前那一层
     if (this.y <= this.top + 1) {
       this.phase = 'fall';
@@ -536,6 +564,7 @@ class Pet {
       return;
     }
     this.phase = 'crawl';
+    this.anim = null;
     this.pose = CRAWL_FRAMES[0];
     this.setPose(this.pose);
     this.timer = 0;
@@ -576,6 +605,7 @@ class Pet {
       if (this.y >= landY) {
         this.y = landY;
         this.vy = 0;
+        this.anim = null;
         this.phase = 'idle';
         this.pose = 'idle';
         this.setPose('idle');
@@ -623,7 +653,12 @@ class Pet {
       }
     } else if (this.timer > 0) {
       this.timer -= dt;
+      if (this.anim) {
+        this.animT += dt;
+        this.paintFrame(Math.floor(this.animT * this.animFps));
+      }
       if (this.timer <= 0) {
+        this.anim = null;
         this.pose = 'idle';
         this.setPose('idle');
       }

@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """角色素材加载与循环帧对齐。"""
 
+import json
 import os
+import re
 
-from PIL import Image
+from PIL import Image, ImageChops
 
 # crawl_1 / crawl_2 是「集合」爬行时交替的两帧
 POSES = ('idle', 'wave', 'jump', 'sleep', 'fall', 'drag',
@@ -11,6 +13,21 @@ POSES = ('idle', 'wave', 'jump', 'sleep', 'fall', 'drag',
 
 # 需要当作循环动画对齐的帧组
 LOOP_GROUPS = (('crawl_1', 'crawl_2'),)
+
+# 用户上传的多帧动作：<pose>.1.png / <pose>.2.png …，固定 8fps 循环。
+# 和 petclub/custom.py 的 FPS 是同一个值，改一边就得改另一边。
+FPS = 8
+FRAME_RE = re.compile(r'^(?P<base>[a-z][a-z0-9_]{0,15})\.(?P<idx>\d+)$')
+
+
+def _union_alpha(images):
+    """把多帧的 alpha 叠成一张，给窗口当遮罩：动起来也不会被裁掉。"""
+    union = images[0].getchannel('A')
+    for im in images[1:]:
+        union = ImageChops.lighter(union, im.getchannel('A'))
+    out = Image.new('RGBA', images[0].size, (0, 0, 0, 0))
+    out.putalpha(union)
+    return out
 
 
 def _centroid_x(im):
@@ -46,15 +63,41 @@ class Sprites:
 
     def __init__(self, role_dir, overlay_dir=None):
         self.poses = {}
+        # 多帧动作：base pose → [帧 key]，帧 key 形如 c1、c1.1、c1.2…
+        # Pet 播放时按这些 key 换图；窗口按 base 装一张合并后的 mask。
+        self.frame_keys = {}
+        self.anims = {}
+        self.mask_images = {}
+        self.mask_base = {}
         names = list(POSES)
+        extras = {}
+        fps_map = {}
         if overlay_dir:
             try:
+                with open(os.path.join(overlay_dir, 'anims.json'),
+                          'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    fps_map = data
+            except (OSError, ValueError):
+                fps_map = {}
+            try:
                 for name in sorted(os.listdir(overlay_dir)):
-                    if name.endswith('.png') and name[:-4] not in names:
-                        names.append(name[:-4])
+                    if not name.endswith('.png') or name.startswith('.'):
+                        continue
+                    stem = name[:-4]
+                    m = FRAME_RE.match(stem)
+                    if m:
+                        extras.setdefault(m.group('base'), []).append(
+                            (int(m.group('idx')), name))
+                        continue
+                    if stem not in names:
+                        names.append(stem)
             except OSError:
                 overlay_dir = None
+
         for name in names:
+            paths = []
             p = None
             if overlay_dir:
                 cand = os.path.join(overlay_dir, name + '.png')
@@ -62,12 +105,47 @@ class Sprites:
                     p = cand
             if p is None:
                 p = os.path.join(role_dir, name + '.png')
-            if not os.path.exists(p):
+            if p and os.path.exists(p):
+                paths.append(p)
+            # 后续帧只可能来自用户上传目录
+            if overlay_dir:
+                for _, fname in sorted(extras.get(name, ())):
+                    paths.append(os.path.join(overlay_dir, fname))
+            images = []
+            for path in paths:
+                try:
+                    images.append(Image.open(path).convert('RGBA'))
+                except OSError:
+                    continue        # 半张坏图不该拖垮整个角色
+            if not images:
                 continue
-            try:
-                self.poses[name] = Image.open(p).convert('RGBA')
-            except OSError:
-                continue            # 半张坏图不该拖垮整个角色
+            base = name
+            self.poses[base] = images[0]
+            self.mask_base[base] = base
+            if len(images) > 1:
+                # 帧画布必须一致：不一致时宁可按静态图放，也别让角色抖。
+                size = images[0].size
+                frames = [im for im in images if im.size == size]
+                if len(frames) > 1:
+                    keys = [base]
+                    for i, im in enumerate(frames[1:], 1):
+                        key = '%s.%d' % (base, i)
+                        self.poses[key] = im
+                        self.mask_base[key] = base
+                        keys.append(key)
+                    self.frame_keys[base] = keys
+                    try:
+                        fps = float(fps_map.get(base) or FPS)
+                    except (TypeError, ValueError):
+                        fps = FPS
+                    fps = max(2.0, min(24.0, fps))
+                    self.anims[base] = {'frames': len(keys), 'fps': fps}
+                    union = _union_alpha(frames)
+                    for key in keys:
+                        self.mask_images[key] = union
+            if base not in self.mask_images:
+                self.mask_images[base] = self.poses[base]
+
         if 'idle' not in self.poses:
             raise FileNotFoundError('缺少 idle.png：%s' % role_dir)
         self.w = max(im.width for im in self.poses.values())

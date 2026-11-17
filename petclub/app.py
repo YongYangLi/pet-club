@@ -5,6 +5,7 @@
 Qt 的槽都在主线程执行，跨线程只走 `queue.Queue`，不碰控件。
 """
 import base64
+import io
 import os
 import queue
 import random
@@ -1466,6 +1467,33 @@ class App:
                     lambda _=False, r=role, k=e['key']: self.restore_edit(r, k))
         return sub
 
+    def _preset_for(self, role, key):
+        """编辑某个动作时，把它当前的帧和播放速度交给弹层。
+
+        key 是动作 key，不一定等于姿势名（say / pet / gather 都用 wave 的图），
+        所以要先映射到 pose 再取帧。fps 优先读服务端清单，避免本地缓存慢一拍。
+        """
+        sp = self.sprites.get(role)
+        if sp is None or not key:
+            return [], None
+        spec = get(key) or self._custom.get(key) or {}
+        pose = spec.get('pose') or key
+        keys = getattr(sp, 'frame_keys', {}).get(pose) or []
+        if not keys and pose in sp.poses:
+            keys = [pose]
+        frames = []
+        for name in keys:
+            im = sp.poses.get(name)
+            if im is None:
+                continue
+            buf = io.BytesIO()
+            im.save(buf, 'PNG')
+            frames.append(buf.getvalue())
+        fps = (self._custom.get(key) or {}).get('fps')
+        if fps is None:
+            fps = (getattr(sp, 'anims', {}).get(pose) or {}).get('fps')
+        return frames, fps
+
     def start_upload(self, role=None, action=''):
         """选图 → 归一化 → 传服务器。成功了所有人（含本机）都能看到。"""
         role = role or (self.me['role'] if self.me else None)
@@ -1478,9 +1506,12 @@ class App:
         taken = [(get(k) or {}).get('label') for k in ORDER]
         taken += [s.get('label') for s in self._custom.values()
                   if s.get('role') == role]
+        # 编辑已有动作、或在弹层里点别的动作格子：统一由这个回调现取
+        # 当前帧和速度 —— 弹层不碰素材缓存。
         dlg = UploadDialog(role, box, self._upload_targets(role),
                            on_restore=lambda k, r=role: self._dialog_restore(r, k),
-                           taken=[t for t in taken if t])
+                           taken=[t for t in taken if t],
+                           load_preset=lambda k, r=role: self._preset_for(r, k))
         if action:
             dlg.select(action)
         ok = dlg.exec() == QDialog.Accepted
@@ -1491,8 +1522,9 @@ class App:
         if not data:
             return
         body, err = self._post_sprite(
-            upload.send, role, data['png'], data.get('action', ''),
-            data.get('label', ''), data.get('dur', 2.0))
+            upload.send, role, data['frames'], data.get('action', ''),
+            data.get('label', ''), data.get('dur', 2.0),
+            data.get('fps'))
         if body is None:
             self.toast('没传上去：%s' % err)
             return
