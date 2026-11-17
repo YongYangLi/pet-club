@@ -102,7 +102,8 @@ class FakePet:
         self.pose = 'idle'
         self.calls = []
 
-    def act(self, pose, dur):
+    def act(self, pose, dur, move=None):
+        # move 是自定义动作的轨迹（App._play 第三个位置参数），这里只记姿势
         self.pose = pose
         self.calls.append(('act', pose))
 

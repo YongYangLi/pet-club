@@ -75,14 +75,21 @@ def main():
     for name, w in (('一比一', one), ('1.75 倍', big), ('跟随 dpr', follow)):
         chk('%s：窗口逻辑宽 × dpr = 屏幕物理宽' % name,
             near(w._lw * dpr, w.win_w), (w._lw * dpr, w.win_w))
-        chk('%s：位图设备比 = dpr / scale' % name,
-            near(w._pix['idle'].devicePixelRatio(), dpr / w.scale, 0.001),
-            (w._pix['idle'].devicePixelRatio(), dpr / w.scale))
         pm = w._pix['idle']
+        # 位图在建窗时按 scale 一次性放大到屏幕物理尺寸，设备比恒等于 dpr；
+        # 绘制时按设备像素 1:1 贴，不再让 QPainter 每帧重新采样。
+        chk('%s：位图设备比 = 屏幕 dpr' % name,
+            near(pm.devicePixelRatio(), dpr, 0.001),
+            (pm.devicePixelRatio(), dpr))
+        chk('%s：位图物理宽高 = 素材 × scale' % name,
+            pm.width() == int(round(sp.poses['idle'].width * w.scale))
+            and pm.height() == int(round(sp.poses['idle'].height * w.scale)),
+            (pm.width(), pm.height(), w.scale))
         chk('%s：位图逻辑尺寸不超出窗口' % name,
-            0 < pm.width() / w.pdpr <= w._lw + 1
-            and 0 < pm.height() / w.pdpr <= w._lh + 1,
-            (pm.width() / w.pdpr, pm.height() / w.pdpr, w._lw, w._lh))
+            0 < pm.width() / pm.devicePixelRatio() <= w._lw + 1
+            and 0 < pm.height() / pm.devicePixelRatio() <= w._lh + 1,
+            (pm.width() / pm.devicePixelRatio(),
+             pm.height() / pm.devicePixelRatio(), w._lw, w._lh))
 
     print('\n--- 业务坐标不受缩放影响 ---')
     for name, w in (('一比一', one), ('1.75 倍', big)):

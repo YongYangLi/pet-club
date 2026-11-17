@@ -38,7 +38,7 @@ class FakePet:
         self.y = y          # 脚底中心的屏幕 y（Pets 里的 y 就是这个意思）
         self.acted = []
 
-    def act(self, pose, dur=1.0):
+    def act(self, pose, dur=1.0, move=None):
         self.acted.append((pose, dur))
         self.pose = pose
 
