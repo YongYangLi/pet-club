@@ -49,8 +49,10 @@ MAX_POST = 4 * 1024 * 1024      # 上传请求体上限：2MB 的图 base64 之�
 
 
 def acme_path(root, path):
-    """HTTP-01 验证文件：只认 /.well-known/acme-challenge/<文件名>。
+    """HTTP-01 验证文件：<root>/.well-known/acme-challenge/<文件名>。
 
+    acme.sh 的 --webroot 传的是「站点根目录」，它会把验证文件写进
+    .well-known/acme-challenge/ 子目录，所以这里要按同样的结构去找。
     文件名里不允许再出现斜杠，避免 ../ 之类的路径穿越。
     """
     if not root:
@@ -58,7 +60,7 @@ def acme_path(root, path):
     name = unquote(path.rsplit('/', 1)[-1])
     if not name or name.startswith('.') or '/' in name or '\\' in name:
         return None
-    full = os.path.join(root, name)
+    full = os.path.join(root, '.well-known', 'acme-challenge', name)
     return full if os.path.isfile(full) else None
 
 # 可以直接换图、但不对应任何动作的姿势。
