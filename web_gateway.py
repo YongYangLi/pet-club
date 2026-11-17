@@ -26,6 +26,7 @@ import json
 import mimetypes
 import os
 import socket
+import ssl
 import struct
 import sys
 import threading
@@ -45,6 +46,20 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(ROOT, 'web')
 ASSETS_DIR = os.path.join(ROOT, 'assets')
 MAX_POST = 4 * 1024 * 1024      # 上传请求体上限：2MB 的图 base64 之后约 2.7MB
+
+
+def acme_path(root, path):
+    """HTTP-01 验证文件：只认 /.well-known/acme-challenge/<文件名>。
+
+    文件名里不允许再出现斜杠，避免 ../ 之类的路径穿越。
+    """
+    if not root:
+        return None
+    name = unquote(path.rsplit('/', 1)[-1])
+    if not name or name.startswith('.') or '/' in name or '\\' in name:
+        return None
+    full = os.path.join(root, name)
+    return full if os.path.isfile(full) else None
 
 # 可以直接换图、但不对应任何动作的姿势。
 #
@@ -500,6 +515,14 @@ class WebHandler(BaseHTTPRequestHandler):
                     etag = etag[:-1] + '-' + stamp[1:]
         self._send_bytes(data, ctype, cache=cache, etag=etag)
 
+    def _serve_acme(self, path):
+        """Let's Encrypt 续期时来取验证文件；HTTPS / HTTP 两个口都走这里。"""
+        full = acme_path(getattr(self.server, 'acme_webroot', ''), path)
+        if not full:
+            self.send_error(404)
+            return
+        self._serve_file(full, cache='no-store')
+
     # ---- 路由 ----
 
     def do_HEAD(self):
@@ -508,6 +531,9 @@ class WebHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         try:
+            if path.startswith('/.well-known/acme-challenge/'):
+                self._serve_acme(path)
+                return
             if path == '/ws':
                 self._ws()
                 return
@@ -708,9 +734,80 @@ class WebServer(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
 
-    def __init__(self, addr, upstream):
+    def __init__(self, addr, upstream, acme_webroot=''):
         self.upstream = upstream
+        self.acme_webroot = acme_webroot
         super().__init__(addr, WebHandler)
+
+
+class RedirectHandler(BaseHTTPRequestHandler):
+    """HTTP 端口：ACME 验证照常回文件，其余全部 308 到 HTTPS。"""
+    server_version = 'pet-club-web/' + WEB_VERSION
+    protocol_version = 'HTTP/1.1'
+
+    def do_GET(self):
+        path = urlparse(self.path).path
+        if path.startswith('/.well-known/acme-challenge/'):
+            full = acme_path(getattr(self.server, 'acme_webroot', ''), path)
+            if not full:
+                self.send_error(404)
+                return
+            try:
+                with open(full, 'rb') as f:
+                    data = f.read()
+            except OSError:
+                self.send_error(404)
+                return
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                self.close_connection = True
+            return
+        # Host 可能带端口；跳转时换成真正的 HTTPS 端口。
+        host = (self.headers.get('Host') or 'localhost').split(':', 1)[0]
+        port = getattr(self.server, 'https_port', 443)
+        suffix = '' if port == 443 else ':%d' % port
+        target = 'https://%s%s%s' % (host, suffix, self.path)
+        try:
+            self.send_response(308)
+            self.send_header('Location', target)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            self.close_connection = True
+
+    do_HEAD = do_GET
+
+
+class RedirectServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, addr, https_port=443, acme_webroot=''):
+        self.https_port = https_port
+        self.acme_webroot = acme_webroot
+        super().__init__(addr, RedirectHandler)
+
+
+def wrap_tls(server, certfile, keyfile):
+    """把已经 bind 好的监听 socket 换成 TLS：accept 出来就是 SSLSocket。"""
+    proto = getattr(ssl, 'PROTOCOL_TLS_SERVER', ssl.PROTOCOL_TLS)
+    ctx = ssl.SSLContext(proto)
+    ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
+    server.socket = ctx.wrap_socket(server.socket, server_side=True)
+    return ctx
+
+
+def web_url(scheme, host, port):
+    if (scheme == 'https' and port == 443) or (scheme == 'http' and port == 80):
+        return '%s://%s/' % (scheme, host)
+    return '%s://%s:%d/' % (scheme, host, port)
 
 
 def parse_upstream(value):
@@ -726,11 +823,19 @@ def parse_upstream(value):
 def main():
     ap = argparse.ArgumentParser(description='pet-club 网页版网关')
     ap.add_argument('--host', default='0.0.0.0', help='监听地址（默认所有网卡）')
-    ap.add_argument('--port', type=int, default=80, help='网页端口（默认 80）')
+    ap.add_argument('--port', type=int, default=80,
+                    help='网页端口（默认 80；启用证书时通常写 443）')
     ap.add_argument('--extra-port', type=int, default=8766,
                     help='额外监听的端口：桌面端的素材同步还走 8766；0 = 不监听')
     ap.add_argument('--upstream', default='127.0.0.1:8765',
                     help='服务端地址 host:port（默认 127.0.0.1:8765）')
+    ap.add_argument('--cert', default='',
+                    help='TLS 证书链（fullchain.pem）；和 --key 一起给就启用 HTTPS')
+    ap.add_argument('--key', default='', help='TLS 私钥（privkey.pem）')
+    ap.add_argument('--acme-webroot', default='',
+                    help='ACME HTTP-01 验证目录：/.well-known/acme-challenge/ 从这里读')
+    ap.add_argument('--redirect-port', type=int, default=0,
+                    help='再监听一个 HTTP 端口，整站 308 跳到 HTTPS（ACME 除外；0=不监听）')
     args = ap.parse_args()
 
     try:
@@ -738,35 +843,66 @@ def main():
     except Exception:
         pass
 
+    if bool(args.cert) != bool(args.key):
+        log('--cert 和 --key 必须一起给')
+        raise SystemExit(1)
+    scheme = 'https' if args.cert else 'http'
+
     upstream = parse_upstream(args.upstream)
     ports = [args.port]
     if args.extra_port and args.extra_port != args.port:
         ports.append(args.extra_port)
 
     servers = []
+    redirect = None
     try:
         for p in ports:
-            servers.append(WebServer((args.host, p), upstream))
+            servers.append(WebServer((args.host, p), upstream, args.acme_webroot))
+        if args.cert:
+            wrap_tls(servers[0], args.cert, args.key)
+    except (ssl.SSLError, ValueError, FileNotFoundError) as e:
+        for s in servers:
+            s.server_close()
+        log('证书加载失败：%s' % e)
+        raise SystemExit(1)
     except OSError as e:
         for s in servers:
             s.server_close()
         log('端口监听失败：%s' % e)
-        log('80 端口需要 root 权限；也可以 --port 8766 换个端口。')
+        log('80/443 端口需要 root 权限；也可以 --port 8766 换个端口。')
         raise SystemExit(1)
 
-    for s in servers:
-        log('网页版已启动：http://%s:%d/' % (args.host, s.server_address[1]))
+    if args.redirect_port and args.cert:
+        try:
+            redirect = RedirectServer((args.host, args.redirect_port),
+                                      args.port, args.acme_webroot)
+        except OSError as e:
+            # 跳转只是方便：80 被别的程序占着时，HTTPS 本身不受影响。
+            log('HTTP 跳转端口 %d 没起来：%s（HTTPS 不受影响）'
+                % (args.redirect_port, e))
+
+    log('网页版已启动：%s' % web_url(scheme, args.host,
+                                    servers[0].server_address[1]))
+    for s in servers[1:]:
+        log('素材同步已启动：http://%s:%d/'
+            % (args.host, s.server_address[1]))
+    if redirect is not None:
+        log('HTTP 自动跳转：http://%s:%d/ -> https://%s/'
+            % (args.host, args.redirect_port,
+               args.host if args.port == 443 else '%s:%d' % (args.host, args.port)))
+    if args.acme_webroot:
+        log('ACME 验证目录：%s' % args.acme_webroot)
     log('上游服务端：%s:%d' % upstream)
 
     # 第一个端口跑主循环，其余端口各开一条线程（共用同一套 HTTP 处理）。
-    for s in servers[1:]:
+    for s in servers[1:] + ([redirect] if redirect else []):
         threading.Thread(target=s.serve_forever, daemon=True).start()
     try:
         servers[0].serve_forever()
     except KeyboardInterrupt:
         log('收到中断，退出')
     finally:
-        for s in servers:
+        for s in servers + ([redirect] if redirect else []):
             s.server_close()
 
 
