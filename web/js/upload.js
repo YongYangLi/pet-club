@@ -10,6 +10,7 @@
 import { state } from './state.js';
 import { loadRole } from './sprites.js';
 import { factoryUrl, remoteAnim, spriteRev, spriteUrl } from './asset.js';
+import { moveOffset } from './motion.js';
 import { LOOSE_POSES, loosePose, normName } from './actions.js';
 
 const CAP = 600;      // 分析用工作尺寸：够精细，又不是几百万像素
@@ -70,6 +71,26 @@ function ensureDom() {
             <span class="upload-unit">秒</span>
           </div>
         </div>
+        <div class="upload-move" id="up-move-box">
+          <div class="upload-move-row">
+            <label for="up-move-kind">移动</label>
+            <select id="up-move-kind">
+              <option value="">静止</option>
+              <option value="line">横穿（飞出去再回来）</option>
+              <option value="arc">弧线（腾空飞越）</option>
+              <option value="orbit">环绕（绕一圈）</option>
+              <option value="hover">原地悬停</option>
+            </select>
+          </div>
+          <div class="upload-move-row" id="up-move-nums">
+            <label for="up-move-h">高度</label>
+            <input id="up-move-h" type="range" min="5" max="80" step="1" value="35">
+            <span id="up-move-h-val" class="upload-move-val">35%</span>
+            <label for="up-move-d">跨度</label>
+            <input id="up-move-d" type="range" min="20" max="100" step="1" value="80">
+            <span id="up-move-d-val" class="upload-move-val">80%</span>
+          </div>
+        </div>
         <div class="upload-alt">
           <p class="upload-note" id="up-note">图会自动裁边、缩放到和这个角色一样大。</p>
           <button type="button" class="btn btn-ghost hidden" data-cmd="reset" id="up-reset">恢复默认图</button>
@@ -116,6 +137,9 @@ function ensureDom() {
     root.querySelector('#up-fps-val').textContent = box.fps.toFixed(1);
     startPreview();
   });
+  root.querySelector('#up-move-kind').addEventListener('change', () => syncMove(true));
+  root.querySelector('#up-move-h').addEventListener('input', () => syncMove(false));
+  root.querySelector('#up-move-d').addEventListener('input', () => syncMove(false));
   root.querySelector('#up-poses').addEventListener('click', (e) => {
     const tile = e.target.closest && e.target.closest('.pose-tile');
     if (!tile || !box) return;
@@ -140,11 +164,12 @@ export function openUpload(role, onDone) {
   box = {
     role, frames: [], previews: [], b64: '', w: 0, h: 0, onDone,
     files: [], mode: '', fps: 8, auto: true, userPicked: false,
-    fpsTouched: false, loadSeq: 0, selected: 0,
+    fpsTouched: false, loadSeq: 0, selected: 0, move: null, previewT: 0,
   };
   root.querySelector('#up-auto').checked = true;
   root.querySelector('#up-fps').value = '8';
   root.querySelector('#up-fps-val').textContent = '8.0';
+  setMoveControls(null);
   const strip = root.querySelector('#up-frames');
   if (strip) {
     strip.innerHTML = '';
@@ -248,9 +273,16 @@ function syncMode() {
   const key = box.mode;
   const isNew = !key;
   root.querySelector('#up-new-row').classList.toggle('hidden', !isNew);
-  root.querySelector('#up-dur-row').classList.toggle('hidden', !isNew);
 
   const spec = isNew ? null : specOf(key);
+  const custom = isNew || !!(spec && spec.custom);
+  // 自定义动作可以改时长；内置姿势的时长是语义的一部分，不给改。
+  root.querySelector('#up-dur-row').classList.toggle('hidden', !custom);
+  if (isNew) {
+    root.querySelector('#up-dur').value = '2';
+  } else if (spec && spec.custom) {
+    root.querySelector('#up-dur').value = String(spec.dur || 2);
+  }
   const pose = isNew ? '' : poseOf(key);
   const changed = !!(pose && spriteRev(box.role, pose));
   const rst = root.querySelector('#up-reset');
@@ -259,6 +291,8 @@ function syncMode() {
   rst.textContent = (spec && spec.custom) ? '删掉这个动作' : '恢复默认图';
 
   root.querySelector('#up-send').textContent = isNew ? '上传' : '换这张';
+  // 移动轨迹只给自定义动作：内置姿势的时长和语义是写死的。
+  root.querySelector('#up-move-box').classList.toggle('hidden', !custom);
 }
 
 export function closeUpload() {
@@ -271,6 +305,46 @@ function stopPreview() {
   clearInterval(previewTimer);
   previewTimer = null;
   previewIndex = 0;
+  if (preview) preview.style.transform = '';
+}
+
+// ---------------- 移动轨迹 ----------------
+// 轨迹只属于自定义动作。数值是比例，服务端只做白名单校验。
+
+function readMove() {
+  if (!root) return null;
+  const kind = root.querySelector('#up-move-kind').value;
+  if (!kind) return null;
+  return {
+    kind,
+    dir: 'lr',
+    height: Number(root.querySelector('#up-move-h').value) / 100,
+    distance: Number(root.querySelector('#up-move-d').value) / 100,
+  };
+}
+
+function syncMove(restart) {
+  if (!box) return;
+  box.move = readMove();
+  const kind = box.move ? box.move.kind : '';
+  root.querySelector('#up-move-h').disabled = !kind;
+  root.querySelector('#up-move-d').disabled = !kind || kind === 'hover';
+  root.querySelector('#up-move-h-val').textContent
+    = `${root.querySelector('#up-move-h').value}%`;
+  root.querySelector('#up-move-d-val').textContent
+    = `${root.querySelector('#up-move-d').value}%`;
+  if (restart) startPreview();
+}
+
+function setMoveControls(mv) {
+  if (!root) return;
+  const kind = (mv && mv.kind) || '';
+  const h = Math.round(((mv && mv.height) || 0.35) * 100);
+  const d = Math.round(((mv && mv.distance) || 0.8) * 100);
+  root.querySelector('#up-move-kind').value = kind;
+  root.querySelector('#up-move-h').value = String(Math.min(80, Math.max(5, h)));
+  root.querySelector('#up-move-d').value = String(Math.min(100, Math.max(20, d)));
+  syncMove(true);
 }
 
 function drawPreviewIndex(index) {
@@ -412,13 +486,34 @@ function startPreview() {
   const n = box.previews.length;
   box.selected = Math.max(0, Math.min(box.selected || 0, n - 1));
   previewIndex = box.selected;
+  box.previewT = 0;
   drawPreviewIndex(previewIndex);
-  if (!box.auto || n < 2) return;
+  if (!box.auto) return;
+  // 只有一帧但带轨迹时也要跑：静态姿势也能飞。
+  if (n < 2 && !(box.move && box.move.kind)) return;
   const ms = Math.max(40, 1000 / (box.fps || 8));
-  previewTimer = setInterval(() => {
-    previewIndex = (previewIndex + 1) % n;
+  previewTimer = setInterval(() => tickPreview(ms), ms);
+}
+
+function tickPreview(ms) {
+  if (!box || !box.previews.length) return;
+  if (box.previews.length > 1) {
+    previewIndex = (previewIndex + 1) % box.previews.length;
     drawPreviewIndex(previewIndex);
-  }, ms);
+  }
+  const mv = box.move;
+  if (!mv || !mv.kind) {
+    preview.style.transform = '';
+    return;
+  }
+  // 预览台就是一块缩小的屏幕：轨迹跑 2 秒一轮，结束正好回到原点。
+  box.previewT += ms / 1000;
+  const t = (box.previewT / 2) % 1;
+  const stage = root.querySelector('.upload-stage');
+  const w = Math.max(40, (stage.clientWidth || 300) - 16);
+  const h = Math.max(40, (stage.clientHeight || 120) - 16);
+  const [dx, dy] = moveOffset(mv, t, w, h, w / 2, w / 2, h * 0.55, h * 0.45);
+  preview.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
 }
 
 function imageCanvas(img) {
@@ -437,6 +532,7 @@ function resetFrames() {
   box.w = 0;
   box.h = 0;
   box.selected = 0;
+  setMoveControls(null);
   stopPreview();
   renderFrameStrip();
   preview.width = 0;
@@ -484,6 +580,7 @@ async function loadExisting(mode) {
       root.querySelector('#up-fps').value = String(box.fps);
       root.querySelector('#up-fps-val').textContent = box.fps.toFixed(1);
     }
+    setMoveControls(spec.move);
     renderFrameStrip();
     startPreview();
     root.querySelector('#up-send').disabled = !box.frames.length;
@@ -772,6 +869,11 @@ async function submit() {
     frames: box.frames,
     fps: shownFps > 0 ? shownFps : box.fps,
   };
+  // 时长和轨迹只属于自定义动作；内置姿势不带这些字段，服务端不会动它的配置。
+  if (!mode || (acts[mode] && acts[mode].custom)) {
+    payload.dur = Number(root.querySelector('#up-dur').value) || 2;
+    payload.move = box.move || null;
+  }
   if (mode) {
     payload.action = mode;
   } else {

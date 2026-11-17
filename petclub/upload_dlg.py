@@ -23,15 +23,14 @@ from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (QBrush, QColor, QDoubleValidator, QDrag, QPainter,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup,
-                               QDialog, QFileDialog, QFrame,
+                               QComboBox, QDialog, QFileDialog, QFrame,
                                QGraphicsDropShadowEffect, QGridLayout,
                                QHBoxLayout, QLabel, QLineEdit, QPushButton,
-                               QScrollArea, QSlider, QStackedWidget,
-                               QVBoxLayout, QWidget)
+                               QScrollArea, QSlider, QVBoxLayout, QWidget)
 
 from PIL import Image
 
-from . import upload
+from . import motion, upload
 from .config import ROLE_NAME
 from .custom import norm_label
 from .theme import (ACCENT, ACCENT_DOWN, ACCENT_EDGE, ACCENT_SOFT, BORDER,
@@ -152,6 +151,8 @@ class Stage(QWidget):
         super().__init__(parent)
         self._pix = None
         self._empty = '还没选图'
+        self._dx = 0.0
+        self._dy = 0.0
         self.setFixedHeight(STAGE_H)
         self._board = self._make_board()
 
@@ -167,6 +168,14 @@ class Stage(QWidget):
 
     def set_pixmap(self, pix):
         self._pix = pix
+        self.update()
+
+    def set_offset(self, dx, dy):
+        """轨迹预览：在当前图的基础上再挪一点（会被预览台边界裁掉）。"""
+        if abs(dx - self._dx) < 0.3 and abs(dy - self._dy) < 0.3:
+            return
+        self._dx = float(dx)
+        self._dy = float(dy)
         self.update()
 
     def paintEvent(self, _e):
@@ -189,9 +198,13 @@ class Stage(QWidget):
                 inner.height() / max(1, self._pix.height()), 1.0)
         w = self._pix.width() * k
         h = self._pix.height() * k
-        p.drawPixmap(int(round(inner.center().x() - w / 2)),
-                     int(round(inner.center().y() - h / 2)),
+        # 轨迹预览会把人移出原来的位置，裁在预览台里，别画到卡片外面。
+        p.save()
+        p.setClipRect(inner)
+        p.drawPixmap(int(round(inner.center().x() - w / 2 + self._dx)),
+                     int(round(inner.center().y() - h / 2 + self._dy)),
                      int(round(w)), int(round(h)), self._pix)
+        p.restore()
         p.end()
 
 
@@ -436,6 +449,7 @@ class UploadDialog(QDialog):
         self._paths = []
         self._pixmaps = []
         self._preview_i = 0
+        self._move_prev_t = 0.0
         self._fps = 8.0
         self._drag = None
         self._tmp_dir = None       # 编辑已有动作时，把预载帧落到这里当文件用
@@ -586,36 +600,45 @@ class UploadDialog(QDialog):
         bl.addLayout(pose_row)
 
         self.fields = QWidget()
-        fl = QGridLayout(self.fields)
+        fl = QVBoxLayout(self.fields)
         fl.setContentsMargins(0, 0, 0, 0)
-        fl.setHorizontalSpacing(10)
-        fl.setVerticalSpacing(8)
+        fl.setSpacing(8)
+
+        # 名字只给「新建动作」；时长自定义动作也能改，所以两行分开控制。
+        self.name_row = QWidget()
+        nl = QHBoxLayout(self.name_row)
+        nl.setContentsMargins(0, 0, 0, 0)
+        nl.setSpacing(10)
         name_lab = _hint('名字')
+        name_lab.setFixedWidth(40)
         self.name = QLineEdit()
         self.name.setMaxLength(10)
         self.name.setPlaceholderText('比如 跳舞、比耶')
         self.name.returnPressed.connect(self.accept)
+        nl.addWidget(name_lab)
+        nl.addWidget(self.name, 1)
+        fl.addWidget(self.name_row)
+
+        self.dur_row = QWidget()
+        dl = QHBoxLayout(self.dur_row)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(10)
         dur_lab = _hint('时长')
+        dur_lab.setFixedWidth(40)
         self.dur = QLineEdit('2.0')
         self.dur.setValidator(QDoubleValidator(0.6, 8.0, 1, self))
         self.dur.setFixedWidth(86)
         self.dur.returnPressed.connect(self.accept)
-        dur_row = QHBoxLayout()
-        dur_row.setSpacing(8)
-        dur_row.addWidget(self.dur)
         unit = QLabel('秒')
         unit.setFont(font(9))
         unit.setStyleSheet('color: %s;' % MUTED)
-        dur_row.addWidget(unit)
-        dur_row.addStretch(1)
-        fl.addWidget(name_lab, 0, 0)
-        fl.addWidget(self.name, 0, 1)
-        fl.addWidget(dur_lab, 1, 0)
-        fl.addLayout(dur_row, 1, 1)
-        fl.setColumnStretch(1, 1)
+        dl.addWidget(dur_lab)
+        dl.addWidget(self.dur)
+        dl.addWidget(unit)
+        dl.addStretch(1)
+        fl.addWidget(self.dur_row)
 
-        # 换图时这块不空着，也不让窗口变矮：换成一句说明 +「恢复默认图」，
-        # 正好补上网页弹层有、桌面端之前只能在「我的动作」菜单里找的入口。
+        # 换图时这块不空着：说明 +「恢复默认图 / 删掉这个动作」。
         self.alt = QWidget()
         al = QHBoxLayout(self.alt)
         al.setContentsMargins(0, 0, 0, 0)
@@ -631,11 +654,64 @@ class UploadDialog(QDialog):
         self.restore_btn.clicked.connect(self._restore)
         al.addWidget(self.restore_btn, 0, Qt.AlignRight)
 
-        self.stack = QStackedWidget()
-        self.stack.setFixedHeight(76)
-        self.stack.addWidget(self.fields)
-        self.stack.addWidget(self.alt)
-        bl.addWidget(self.stack)
+        bl.addWidget(self.fields)
+        bl.addWidget(self.alt)
+
+        # 移动轨迹：御剑飞行那种。只对自定义动作开放 —— 内置姿势的语义
+        # 和时长是写死的，飞起来反而怪。数值全是比例，播放时按屏幕算。
+        self.move_box = QWidget()
+        mvl = QVBoxLayout(self.move_box)
+        mvl.setContentsMargins(0, 0, 0, 0)
+        mvl.setSpacing(6)
+
+        mr = QHBoxLayout()
+        mr.setSpacing(8)
+        mr.addWidget(_hint('移动'))
+        self.move_kind = QComboBox()
+        self.move_kind.addItem('静止', '')
+        self.move_kind.addItem('横穿（飞出去再回来）', 'line')
+        self.move_kind.addItem('弧线（腾空飞越）', 'arc')
+        self.move_kind.addItem('环绕（绕一圈）', 'orbit')
+        self.move_kind.addItem('原地悬停', 'hover')
+        self.move_kind.setCursor(Qt.PointingHandCursor)
+        self.move_kind.currentIndexChanged.connect(self._move_changed)
+        mr.addWidget(self.move_kind, 1)
+        mvl.addLayout(mr)
+
+        nr = QHBoxLayout()
+        nr.setSpacing(8)
+        nr.addWidget(_hint('高度'))
+        self.move_h = QSlider(Qt.Horizontal)
+        self.move_h.setRange(5, 80)
+        self.move_h.setValue(35)
+        self.move_h.setMinimumWidth(80)
+        self.move_h.setCursor(Qt.PointingHandCursor)
+        self.move_h.valueChanged.connect(self._move_changed)
+        nr.addWidget(self.move_h, 1)
+        self.move_h_val = QLabel('35%')
+        self.move_h_val.setFont(font(9))
+        self.move_h_val.setStyleSheet('color: %s;' % SUB)
+        self.move_h_val.setFixedWidth(34)
+        self.move_h_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        nr.addWidget(self.move_h_val)
+        nr.addSpacing(8)
+        nr.addWidget(_hint('跨度'))
+        self.move_d = QSlider(Qt.Horizontal)
+        self.move_d.setRange(20, 100)
+        self.move_d.setValue(80)
+        self.move_d.setMinimumWidth(80)
+        self.move_d.setCursor(Qt.PointingHandCursor)
+        self.move_d.valueChanged.connect(self._move_changed)
+        nr.addWidget(self.move_d, 1)
+        self.move_d_val = QLabel('80%')
+        self.move_d_val.setFont(font(9))
+        self.move_d_val.setStyleSheet('color: %s;' % SUB)
+        self.move_d_val.setFixedWidth(34)
+        self.move_d_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        nr.addWidget(self.move_d_val)
+        mvl.addLayout(nr)
+        bl.addWidget(self.move_box)
+        self._move_changed()
 
         self.note = QLabel('图会自动裁边、缩放到和这个角色一样大，别人也能看到。')
         self.note.setWordWrap(True)
@@ -791,11 +867,37 @@ class UploadDialog(QDialog):
             self._say('已裁成 %d×%d' % (w, h))
         self.ok.setEnabled(True)
 
-    def _load_preset(self, frames, fps=None, key=None):
+    def _load_preset(self, frames, fps=None, key=None, move=None, dur=None):
         """编辑已有动作：先把当前动画装进来，用户可以直接看到效果。"""
         self._clean_tmp()
         self._loaded_key = key
         self._user_picked = False
+        if dur is not None:
+            try:
+                self.dur.setText('%.1f' % max(0.6, min(8.0, float(dur))))
+            except (TypeError, ValueError):
+                pass
+        mv = move if isinstance(move, dict) else {}
+        if hasattr(self, 'move_kind'):
+            self.move_kind.blockSignals(True)
+            self.move_h.blockSignals(True)
+            self.move_d.blockSignals(True)
+            self.move_kind.setCurrentIndex(max(
+                0, self.move_kind.findData(mv.get('kind') or '')))
+            try:
+                h = float(mv.get('height') or 0.35)
+            except (TypeError, ValueError):
+                h = 0.35
+            try:
+                d = float(mv.get('distance') or 0.8)
+            except (TypeError, ValueError):
+                d = 0.8
+            self.move_h.setValue(int(round(h * 100)))
+            self.move_d.setValue(int(round(d * 100)))
+            self.move_kind.blockSignals(False)
+            self.move_h.blockSignals(False)
+            self.move_d.blockSignals(False)
+            self._move_labels()
         self._frames = list(frames)
         self._pixmaps = []
         self._paths = []
@@ -838,7 +940,12 @@ class UploadDialog(QDialog):
         idx = self._preview_i % len(self._pixmaps)
         self._preview_i = idx
         self.stage.set_pixmap(self._pixmaps[idx])
-        if not self.auto_box.isChecked() or len(self._pixmaps) < 2:
+        self.stage.set_offset(0.0, 0.0)
+        self._move_prev_t = 0.0
+        if not self.auto_box.isChecked():
+            return
+        # 只有一帧但带轨迹时也要跑定时器：静态姿势也能飞。
+        if len(self._pixmaps) < 2 and not self._move_cfg():
             return
         self._preview_timer.setInterval(max(40, int(1000.0 / self._fps)))
         self._preview_timer.start()
@@ -850,6 +957,34 @@ class UploadDialog(QDialog):
         self._fps = max(2.0, min(24.0, value / 10.0))
         self.fps_val.setText('%.1f' % self._fps)
         self._start_preview()
+
+    def _move_cfg(self):
+        """当前选择的移动配置；静止返回 None。"""
+        if not hasattr(self, 'move_kind'):
+            return None
+        kind = self.move_kind.currentData() or ''
+        if not kind:
+            return None
+        return {'kind': kind, 'dir': 'lr',
+                'height': round(self.move_h.value() / 100.0, 2),
+                'distance': round(self.move_d.value() / 100.0, 2)}
+
+    def _move_labels(self):
+        """只刷新百分比和可用状态，不重开预览。"""
+        if not hasattr(self, 'move_h_val'):
+            return
+        kind = self.move_kind.currentData() or ''
+        moving = bool(kind)
+        self.move_h.setEnabled(moving)
+        self.move_d.setEnabled(moving and kind != 'hover')
+        self.move_h_val.setText('%d%%' % self.move_h.value())
+        self.move_d_val.setText('%d%%' % self.move_d.value())
+
+    def _move_changed(self, *_a):
+        """下拉/滑条变了：更新百分比，并在预览台上重放一遍轨迹。"""
+        self._move_labels()
+        if self._pixmaps:
+            self._start_preview()
 
     def _render_frames(self):
         while self.frame_row.count():
@@ -878,6 +1013,7 @@ class UploadDialog(QDialog):
             if isinstance(w, FrameCell):
                 w.set_selected(w.index == index)
         if not self.auto_box.isChecked() or len(self._pixmaps) < 2:
+            self.stage.set_offset(0.0, 0.0)
             self.stage.set_pixmap(self._pixmaps[index])
 
     def _move_frame(self, src, dst):
@@ -966,10 +1102,21 @@ class UploadDialog(QDialog):
             self._say('至少留一帧', bad=True)
 
     def _tick_preview(self):
-        if len(self._pixmaps) < 2:
+        if len(self._pixmaps) > 1:
+            self._preview_i = (self._preview_i + 1) % len(self._pixmaps)
+            self.stage.set_pixmap(self._pixmaps[self._preview_i])
+        cfg = self._move_cfg()
+        if not cfg:
+            self.stage.set_offset(0.0, 0.0)
             return
-        self._preview_i = (self._preview_i + 1) % len(self._pixmaps)
-        self.stage.set_pixmap(self._pixmaps[self._preview_i])
+        # 预览台就是一块缩小的屏幕：轨迹跑 2 秒一轮，结束正好回到原点。
+        self._move_prev_t += self._preview_timer.interval() / 1000.0
+        t = (self._move_prev_t / 2.0) % 1.0
+        w = max(40.0, self.stage.width() - 2.0 * Stage.PAD)
+        h = max(40.0, self.stage.height() - 2.0 * Stage.PAD)
+        dx, dy = motion.offset(cfg, t, w, h, w / 2.0, w / 2.0,
+                               h * 0.55, h * 0.45)
+        self.stage.set_offset(dx, dy)
 
     def _clean_tmp(self):
         if self._tmp_dir:
@@ -1003,17 +1150,34 @@ class UploadDialog(QDialog):
         if self._user_picked:
             return
         try:
-            frames, fps = self._load_cb(key) or ([], None)
+            got = self._load_cb(key) or ([], None, None)
         except Exception:
-            frames, fps = [], None
+            got = ([], None, None)
+        frames = got[0] if got else []
+        fps = got[1] if len(got) > 1 else None
+        move = got[2] if len(got) > 2 else None
+        dur = got[3] if len(got) > 3 else None
         if frames:
-            self._load_preset(frames, fps, key)
+            self._load_preset(frames, fps, key, move, dur)
         else:
             self._clear_frames(key)
 
     def _clear_frames(self, key=None):
         """切到还没图 / 新建动作：清掉上一组，别让旧图跟着上传。"""
         self._clean_tmp()
+        if hasattr(self, 'dur'):
+            self.dur.setText('2.0')
+        if hasattr(self, 'move_kind'):
+            self.move_kind.blockSignals(True)
+            self.move_h.blockSignals(True)
+            self.move_d.blockSignals(True)
+            self.move_kind.setCurrentIndex(0)
+            self.move_h.setValue(35)
+            self.move_d.setValue(80)
+            self.move_kind.blockSignals(False)
+            self.move_h.blockSignals(False)
+            self.move_d.blockSignals(False)
+            self._move_labels()
         self._frames = []
         self._pixmaps = []
         self._paths = []
@@ -1028,13 +1192,21 @@ class UploadDialog(QDialog):
         self._say('')
 
     def _sync_mode(self):
-        is_new = not self._key()
+        key = self._key()
+        is_new = not key
+        tile = self.tiles.get(key) if key else None
+        custom = is_new or bool(tile is not None and tile.badge == '新增')
         self.ok.setText('上传' if is_new else '换这张')
-        self.stack.setCurrentIndex(0 if is_new else 1)
         self.note.setText('图会自动裁边、缩放到和这个角色一样大，别人也能看到。'
                           if is_new else '换完所有人都能看到新的样子。')
+        self.name_row.setVisible(is_new)
+        # 时长只对自定义动作开放：内置姿势的时长是语义的一部分。
+        self.dur_row.setVisible(custom)
+        self.alt.setVisible(not is_new)
+        if is_new:
+            self.dur.setText('2.0')
         if not is_new:
-            t = self.tiles[self._key()]
+            t = self.tiles[key]
             if t.badge == '新增':
                 self.alt_text.setText('这是你自己加的动作，换一张图就是改它的样子。')
                 self.restore_btn.setVisible(bool(self._on_restore))
@@ -1043,6 +1215,10 @@ class UploadDialog(QDialog):
                 self.alt_text.setText('换掉「%s」现在的图，随时能换回。' % t.label)
                 self.restore_btn.setText('恢复默认图')
                 self.restore_btn.setVisible(bool(t.badge) and bool(self._on_restore))
+        self.move_box.setVisible(custom)
+        if self.isVisible():
+            # 内置动作没有时长/轨迹这两块，窗口收回去，别留空白。
+            self.resize(496, self.panel.sizeHint().height() + 36)
 
     def _restore(self):
         key = self._key()
@@ -1064,14 +1240,18 @@ class UploadDialog(QDialog):
         out = {'role': self.role, 'frames': list(self._frames),
                'fps': self._fps}
         key = self._key()
+        # 时长和轨迹只属于自定义动作；内置姿势不带这些字段，服务端不动它。
+        if not key or self.tiles[key].badge == '新增':
+            out['move'] = self._move_cfg()
+            try:
+                d = float(self.dur.text().replace(',', '.'))
+            except ValueError:
+                d = 2.0
+            out['dur'] = min(8.0, max(0.6, d))
         if key:
             out['action'] = key
         else:
             out['label'] = self.name.text().strip()
-            try:
-                out['dur'] = float(self.dur.text().replace(',', '.'))
-            except ValueError:
-                out['dur'] = 2.0
         return out
 
     def accept(self):

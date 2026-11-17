@@ -193,11 +193,15 @@ def _post(host, http_port, path, payload, timeout=TIMEOUT):
     return data
 
 
-def send(host, http_port, role, frames, action='', label='', dur=2.0, fps=None):
+def send(host, http_port, role, frames, action='', label='', dur=2.0, fps=None,
+         move=None, set_move=False, set_dur=False):
     """action 给了就是换图，没给就是新建动作。
 
     frames 是一组 PNG 字节；同时带一份 data（第一帧）给还没升级的服务端，
     老服务端会忽略 frames，至少能存成静态图。
+
+    `set_move=True` 才把 move 一起发过去（None 表示改回静止）；
+    `set_dur=True` 才把时长一起发过去（编辑已有动作时改时长用）。
     """
     if isinstance(frames, (bytes, bytearray)):
         frames = [bytes(frames)]
@@ -211,11 +215,14 @@ def send(host, http_port, role, frames, action='', label='', dur=2.0, fps=None):
     }
     if fps is not None:
         payload['fps'] = fps
+    if set_move:
+        payload['move'] = move
+    if set_dur or not action:
+        payload['dur'] = dur
     if action:
         payload['action'] = action
     else:
         payload['label'] = label
-        payload['dur'] = dur
     return _post(host, http_port, '/api/sprites', payload)
 
 

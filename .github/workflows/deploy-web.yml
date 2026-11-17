@@ -110,6 +110,20 @@ jobs:
           $SSH "$DEPLOY_USER@$DEPLOY_HOST" \
             "cd '$DEPLOY_PATH' && tar -xzf pet-club-web.tar.gz && rm -f pet-club-web.tar.gz && sh deploy/stop.sh && sh deploy/start.sh"
 
+      # 站点起不来时，CI 日志里要能直接看到「哪个端口没监听、日志最后几行」。
+      - name: 检查进程与端口
+        if: always()
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/pet-club' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" \
+            -o StrictHostKeyChecking=accept-new \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            "cd '$DEPLOY_PATH' && sh deploy/status.sh" || true
+
       # 部署脚本自己会自检 PID，但那只证明「进程起来了」。
       # 这里再从外面问一句：线上那份的 build 号，是不是刚打出来的那个？
       - name: 核对线上版本

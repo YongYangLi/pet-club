@@ -1647,9 +1647,9 @@ body[data-pet-size="large"] { --pet-space: 330px; }
     linear-gradient(-45deg, transparent 75%, #e9ebf2 75%);
   background-size: 12px 12px;
   background-position: 0 0, 0 6px, 6px -6px, -6px 0;
+  overflow: hidden;   /* 轨迹预览会把人挪出去，别溢到卡片上 */
 }
 .upload-stage canvas { display: block; image-rendering: auto; }
-
 /* 多帧预览：一排小缩略图 + 总帧数，确认到底传了几张 */
 .upload-frames {
   display: flex;
@@ -1778,6 +1778,58 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 .upload-fps-val {
   flex: none;
   width: 30px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--sub);
+}
+
+/* 移动轨迹：只对自定义动作显示 */
+.upload-move {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.upload-move.hidden { display: none; }
+
+.upload-move-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.upload-move-row > label {
+  width: 40px;
+  flex: none;
+  color: var(--sub);
+  font-size: 12px;
+}
+
+.upload-move-row select {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12px;
+  color: var(--fg);
+}
+.upload-move-row select:focus { outline: none; border-color: var(--accent-edge); }
+
+.upload-move-row input[type="range"] {
+  flex: 1 1 60px;
+  min-width: 60px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.upload-move-val {
+  flex: none;
+  width: 34px;
   text-align: right;
   font-size: 12px;
   color: var(--sub);

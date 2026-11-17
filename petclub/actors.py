@@ -16,6 +16,9 @@
 只把目标 x 交给 Pet，网络上一个字节都不用多传。
 """
 
+from . import motion
+
+
 def gather_targets(anchor_x, xs, widths, anchor_w, gap, lo, hi):
     """集合落点：给每只角色算一个 x，返回顺序和 xs 一致。
 
@@ -126,6 +129,15 @@ class Pet:
         self._anim_keys = None          # 多帧动作的帧 key，按 fps 循环
         self._anim_t = 0.0
         self._anim_fps = 8.0
+        # 带移动轨迹的动作（御剑飞行）：起点 + 进度 + 时长，见 motion.py
+        self._move = None
+        self._move_t = 0.0
+        self._move_dur = 0.0
+        self._move_x0 = 0.0
+        self._move_y0 = 0.0
+        # 屏幕工作区 (ox, oy, sw, sh)。由 App 在 _spawn 时补上；
+        # 没补就当没有屏幕信息，动作原地播（探针里就是这种情况）。
+        self.box = (0.0, 0.0, 0.0, 0.0)
         # 「这次下来停在哪儿」：可以比地面高（上次被摆在半空）。ground 仍旧
         # 是地面，只用来定拖动上限和默认落点，不再兼任「记住的位置」。
         if land_y is not None:
@@ -152,6 +164,7 @@ class Pet:
     def _begin_crawl(self):
         if self._crawl_to is None:
             return
+        self._move = None           # 集合优先：爬过去，不再飞
         if self._crawl_to_y is None:
             self._crawl_to_y = self.y
         if (abs(self._crawl_to - self.x) < 1.0
@@ -192,10 +205,11 @@ class Pet:
             self.phase = 'idle'
             self.pose = 'idle'
 
-    def act(self, pose, dur):
+    def act(self, pose, dur, move=None):
         """做一个指定动作，dur 秒后自动回 idle。下落、被抓着、起飞时都不接动作。
 
         新动作一律顶掉正在进行的爬行 —— 连点不用排队，也不会两个姿势交错。
+        `move` 是可选轨迹（御剑飞行那种），姿势照常循环，位置按 motion.offset 走。
         """
         self._stop_crawl()
         if self.phase in ('fall', 'hold', 'rise'):
@@ -209,6 +223,14 @@ class Pet:
         self._anim_fps = float(info.get('fps') or 8.0)
         if self._anim_keys:
             self.pose = self._anim_keys[0]
+        if isinstance(move, dict) and move.get('kind'):
+            self._move = dict(move)
+            self._move_x0 = self.x
+            self._move_y0 = self.y
+            self._move_t = 0.0
+            self._move_dur = max(0.6, float(dur or 0.0))
+        else:
+            self._move = None
 
     # ---- 拖动（纯本地效果，一个字节都不发给别人）----
 
@@ -219,6 +241,7 @@ class Pet:
         手一碰到人，正在爬的那段就作废：鼠标比指令优先。
         """
         self._stop_crawl()
+        self._move = None           # 手一抓，飞行立刻作废
         if x is not None:
             self.x = float(x)
         if y is not None:
@@ -257,6 +280,7 @@ class Pet:
         半空的人飞一圈后还回到原来那一层，不会被顺手扔回屏幕底边。
         """
         self._stop_crawl()
+        self._move = None
         self._land_y = self.y
         if self.y <= self.top + 1:
             self.phase = 'fall'         # 已经在顶上了，没什么可升的，直接掉
@@ -295,6 +319,32 @@ class Pet:
     def body_w(self):
         """站着时人实际占多宽（窗口包含透明留白，比人宽）。集合排队按它算。"""
         return self.win.body_w
+
+    def _step_move(self, dt):
+        """按轨迹挪位置。t=1 时严格回到起点，绝不把角色留在半空。"""
+        ox, oy, sw, sh = getattr(self, 'box', (0.0, 0.0, 0.0, 0.0))
+        if sw <= 0 or sh <= 0 or self._move_dur <= 0:
+            self._move = None
+            self.x, self.y = self._move_x0, self._move_y0
+            return
+        self._move_t += dt
+        t = min(1.0, self._move_t / self._move_dur)
+        win_w, win_h = self.win.win_w, self.win.win_h
+        left = ox + win_w / 2.0
+        right = ox + sw - win_w / 2.0
+        top = oy + win_h
+        dx, dy = motion.offset(
+            self._move, t, sw, sh,
+            room_left=max(0.0, self._move_x0 - left),
+            room_right=max(0.0, right - self._move_x0),
+            rise=max(0.0, self._move_y0 - top),
+            drop=max(0.0, self.ground - self._move_y0))
+        self.x = self._move_x0 + dx
+        self.y = self._move_y0 + dy
+        if t >= 1.0:
+            self._move = None
+            self.x = self._move_x0
+            self.y = self._move_y0
 
     def update(self, dt):
         if self.phase == 'fall':
@@ -346,9 +396,16 @@ class Pet:
                 self._anim_t += dt
                 idx = int(self._anim_t * self._anim_fps) % len(self._anim_keys)
                 self.pose = self._anim_keys[idx]
+            if self._move:
+                self._step_move(dt)
             if self.timer <= 0:
                 self.pose = 'idle'
                 self._anim_keys = None
+                if self._move:
+                    # 时长到了就回原位，别把人留在天上。
+                    self._move = None
+                    self.x = self._move_x0
+                    self.y = self._move_y0
         self.win.show(self.pose, int(self.x), int(self.y))
 
     def bubble_anchor(self):

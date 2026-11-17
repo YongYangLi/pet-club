@@ -670,6 +670,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     {'ok': False, 'error': '图片编码坏了，重试一次'}, 400)
 
         key = str(body.get('action') or '')
+        move = body.get('move')
         if key:
             spec = actions.ACTIONS.get(key) or custom.actions().get(key)
             pose = (spec or {}).get('pose')
@@ -677,10 +678,13 @@ class WebHandler(BaseHTTPRequestHandler):
                 pose = key
             if not pose:
                 return self._json({'ok': False, 'error': '没有这个动作'}, 400)
-            out, err = custom.replace_pose(role, pose, frames, body.get('fps'))
+            # 只有显式带了 move / dur 字段才改对应配置；不带就是保持原样。
+            out, err = custom.replace_pose(role, pose, frames, body.get('fps'),
+                                           move, 'move' in body,
+                                           body.get('dur'), 'dur' in body)
         else:
             out, err = custom.add_action(role, frames, body.get('label'),
-                                         body.get('dur'), body.get('fps'))
+                                         body.get('dur'), body.get('fps'), move)
         if err:
             return self._json({'ok': False, 'error': err}, 400)
         log('素材更新 %s/%s（%d 帧，%d 字节）'
@@ -750,17 +754,55 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """CentOS 8 自带 Python 3.6 没有 http.server.ThreadingHTTPServer（3.7+），
     这里自己拼一个，保证服务器上不需要额外升级 Python。"""
     daemon_threads = True
+    # 爬虫/扫描器会同时开很多连接；线程无限长会吃光内存。
+    max_workers = 200
+
+    def process_request(self, request, client_address):
+        if threading.active_count() > self.max_workers:
+            try:
+                request.close()
+            except OSError:
+                pass
+            return
+        super().process_request(request, client_address)
+
+
+# TLS 握手超时：扫描器常常连上不说话，不设上限会一直占着线程。
+TLS_HANDSHAKE_TIMEOUT = 8.0
 
 
 class WebServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
-    request_queue_size = 64
+    request_queue_size = 128
+    tls_ctx = None
 
-    def __init__(self, addr, upstream, acme_webroot=''):
+    def __init__(self, addr, upstream, acme_webroot='', tls_ctx=None):
         self.upstream = upstream
         self.acme_webroot = acme_webroot
+        self.tls_ctx = tls_ctx
         super().__init__(addr, WebHandler)
+
+    def process_request_thread(self, request, client_address):
+        """TLS 握手挪到工作线程里做。
+
+        以前是把监听 socket 直接 wrap 成 SSL：accept() 时同步握手，一个
+        连上就不说话的扫描器就能把整个 accept 循环卡死，accept 队列满
+        （ss 里 Recv-Q 顶到 Send-Q），整站 443 打不开，而 8766 纯 HTTP
+        毫发无损 —— 线上就是这么挂的。
+        """
+        if self.tls_ctx is not None:
+            try:
+                request.settimeout(TLS_HANDSHAKE_TIMEOUT)
+                request = self.tls_ctx.wrap_socket(request, server_side=True)
+                request.settimeout(None)
+            except (ssl.SSLError, OSError):
+                try:
+                    request.close()
+                except OSError:
+                    pass
+                return
+        super().process_request_thread(request, client_address)
 
 
 class RedirectHandler(BaseHTTPRequestHandler):
@@ -807,10 +849,18 @@ class RedirectHandler(BaseHTTPRequestHandler):
 
     do_HEAD = do_GET
 
+    def log_request(self, code='-', size='-'):
+        # 80 端口收到的几乎全是扫描器在扫随机路径，每条 308 都写一行会把
+        # 日志和磁盘吃光；ACME 校验和真正的错误照样记。
+        if str(code) == '308':
+            return
+        super().log_request(code, size)
+
 
 class RedirectServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    request_queue_size = 128
 
     def __init__(self, addr, https_port=443, acme_webroot=''):
         self.https_port = https_port
@@ -818,12 +868,11 @@ class RedirectServer(ThreadingHTTPServer):
         super().__init__(addr, RedirectHandler)
 
 
-def wrap_tls(server, certfile, keyfile):
-    """把已经 bind 好的监听 socket 换成 TLS：accept 出来就是 SSLSocket。"""
+def make_tls_context(certfile, keyfile):
+    """只建上下文，不碰监听 socket —— 握手在 WebServer 的工作线程里做。"""
     proto = getattr(ssl, 'PROTOCOL_TLS_SERVER', ssl.PROTOCOL_TLS)
     ctx = ssl.SSLContext(proto)
     ctx.load_cert_chain(certfile=certfile, keyfile=keyfile)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
     return ctx
 
 
@@ -878,22 +927,32 @@ def main():
 
     servers = []
     redirect = None
+    tls_ctx = None
+    if args.cert:
+        try:
+            tls_ctx = make_tls_context(args.cert, args.key)
+        except (ssl.SSLError, ValueError, FileNotFoundError) as e:
+            log('证书加载失败：%s' % e)
+            raise SystemExit(1)
+
+    # 主站端口必须先单独成功：它起不来就没什么可发布的。
     try:
-        for p in ports:
-            servers.append(WebServer((args.host, p), upstream, args.acme_webroot))
-        if args.cert:
-            wrap_tls(servers[0], args.cert, args.key)
-    except (ssl.SSLError, ValueError, FileNotFoundError) as e:
-        for s in servers:
-            s.server_close()
-        log('证书加载失败：%s' % e)
-        raise SystemExit(1)
+        servers.append(WebServer((args.host, args.port), upstream,
+                                 args.acme_webroot, tls_ctx=tls_ctx))
     except OSError as e:
-        for s in servers:
-            s.server_close()
         log('端口监听失败：%s' % e)
         log('80/443 端口需要 root 权限；也可以 --port 8766 换个端口。')
         raise SystemExit(1)
+
+    # 素材同步端口是附加的：它被旧进程占着时，只让桌面端同步失败，
+    # 绝不能把主站（80/443）一起拖下水 —— 以前就是这样整站打不开的。
+    for p in ports[1:]:
+        try:
+            servers.append(WebServer((args.host, p), upstream,
+                                     args.acme_webroot))
+        except OSError as e:
+            log('素材同步端口 %d 没起来：%s（主站不受影响，检查是否有旧进程占着）'
+                % (p, e))
 
     if args.redirect_port and args.cert:
         try:

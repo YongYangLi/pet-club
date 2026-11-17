@@ -44,6 +44,11 @@ FPS = 8                          # 多帧动作的默认帧率
 MIN_FPS = 2
 MAX_FPS = 24
 
+# 动作播放时可以带一条移动轨迹（御剑飞行那种）。只开放几种模板，
+# 不让客户端传任意坐标：屏幕尺寸每个客户端都不一样，存比例最稳。
+MOVE_KINDS = ('line', 'arc', 'orbit', 'hover')
+MOVE_MIN_DUR = 1.2               # 带移动时动作至少这么久，不然像瞬移
+
 
 def clamp_fps(value):
     try:
@@ -51,6 +56,36 @@ def clamp_fps(value):
     except (TypeError, ValueError):
         return FPS
     return round(min(MAX_FPS, max(MIN_FPS, value)), 1)
+
+
+def clamp_move(value):
+    """把客户端传来的移动配置收成白名单 + 几个夹紧的比例。
+
+    返回 None 表示「静止」。kind 不认识时当作静止，不报错 —— 老客户端
+    或手滑传错一个字段，不该让整次上传失败。
+    """
+    if not isinstance(value, dict):
+        return None
+    kind = str(value.get('kind') or '').strip()
+    if kind not in MOVE_KINDS:
+        return None
+    direction = str(value.get('dir') or 'lr')
+    if direction not in ('lr', 'rl'):
+        direction = 'lr'
+    try:
+        height = float(value.get('height'))
+    except (TypeError, ValueError):
+        height = 0.35
+    try:
+        distance = float(value.get('distance'))
+    except (TypeError, ValueError):
+        distance = 0.8
+    return {
+        'kind': kind,
+        'dir': direction,
+        'height': round(min(0.8, max(0.05, height)), 2),
+        'distance': round(min(1.0, max(0.2, distance)), 2),
+    }
 
 # 动作总数上限。6 个身份 × 每人十几个已经是极限，再多右键菜单就没法看了；
 # 顺带挡住「往上传几百张把磁盘塞满」。
@@ -327,7 +362,7 @@ def _norm_frames(frames):
     return list(frames or ())
 
 
-def add_action(role, frames, label, dur=2.0, fps=FPS):
+def add_action(role, frames, label, dur=2.0, fps=FPS, move=None):
     """新建一个动作。frames 是一组 PNG 字节（1 张就是静态图）。
 
     动作 key 由服务端发号（c1、c2…），不用用户输入：中文名做文件名在
@@ -352,6 +387,10 @@ def add_action(role, frames, label, dur=2.0, fps=FPS):
         dur = 2.0
     dur = min(8.0, max(0.6, dur))
     fps = clamp_fps(fps)
+    move = clamp_move(move)
+    if move:
+        # 飞行动作太短会像瞬移，给一个下限。
+        dur = max(dur, MOVE_MIN_DUR)
     if not valid_name(role):
         return None, '身份不合法'
 
@@ -380,6 +419,8 @@ def add_action(role, frames, label, dur=2.0, fps=FPS):
             # 镜像由「同名动作」承担：别人演的是他自己那份，不是这张图。
             'solo': True,
         }
+        if move:
+            spec['move'] = move
         _write_frames(role, key, frames)
         reg['seq'] = seq
         reg.setdefault('actions', {})[key] = spec
@@ -387,11 +428,15 @@ def add_action(role, frames, label, dur=2.0, fps=FPS):
     return dict(spec, key=key), ''
 
 
-def replace_pose(role, pose, frames, fps=None):
+def replace_pose(role, pose, frames, fps=None, move=None, set_move=False,
+                 dur=None, set_dur=False):
     """换掉某个已有姿势的图，动作表不动。
 
     自定义动作允许多帧；内置姿势只允许一张 —— 内置的时长和语义都是写死的，
     多帧动画只属于用户自己新建的动作。
+
+    `set_move=True` 才动移动配置：传 None 是「改回静止」，不传是「保持原样」。
+    `set_dur=True` 才改时长（内置姿势忽略，它们的时长是语义的一部分）。
     """
     frames = _norm_frames(frames)
     _, err = check_frames(frames)
@@ -413,9 +458,27 @@ def replace_pose(role, pose, frames, fps=None):
             item['frames'] = len(frames)
             if fps is not None:
                 item['fps'] = clamp_fps(fps)
+            if set_move:
+                mv = clamp_move(move)
+                if mv:
+                    item['move'] = mv
+                    item['dur'] = round(max(float(item.get('dur') or 2.0),
+                                            MOVE_MIN_DUR), 2)
+                else:
+                    item.pop('move', None)
+            if set_dur and dur is not None:
+                try:
+                    d = float(dur)
+                except (TypeError, ValueError):
+                    d = 2.0
+                d = min(8.0, max(0.6, d))
+                if item.get('move'):
+                    d = max(d, MOVE_MIN_DUR)
+                item['dur'] = round(d, 2)
             save_registry(reg)
     return {'role': role, 'pose': pose, 'frames': len(frames),
             'fps': clamp_fps(fps) if fps is not None else None,
+            'move': clamp_move(move) if set_move else None,
             'rev': rev(role, pose)}, ''
 
 

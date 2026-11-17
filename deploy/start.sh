@@ -101,6 +101,40 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
+# 进程活着不等于端口在听：旧进程可能还占着某个端口。
+# 主站端口没起来 = 网页打不开，必须算失败；素材端口只影响桌面端同步。
+listening() {
+    port=$1
+    if command -v ss >/dev/null 2>&1; then
+        ss -lnt 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}'
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -lnt 2>/dev/null | awk -v p=":$port" '$4 ~ p"$" {found=1} END {exit !found}'
+    else
+        return 0
+    fi
+}
+
+if ! listening "$SERVER_PORT"; then
+    echo "  [失败] 服务端端口 $SERVER_PORT 没有监听"
+    tail -n 20 "$LOG_DIR/server.log" 2>/dev/null
+    fail=1
+fi
+if ! listening "$WEB_PORT"; then
+    echo "  [失败] 网页端口 $WEB_PORT 没有监听"
+    tail -n 20 "$LOG_DIR/web.log" 2>/dev/null
+    fail=1
+fi
+if ! listening "$WEB_EXTRA_PORT"; then
+    echo "  [警告] 素材同步端口 $WEB_EXTRA_PORT 没有监听：桌面端同步会失败，网页不受影响"
+fi
+if [ "$fail" -ne 0 ]; then
+    echo
+    echo "被谁占着可以看：ss -lntp | grep -E ':($SERVER_PORT|$WEB_PORT|$WEB_EXTRA_PORT)\\b'"
+    echo "旧进程残留的话：ps -ef | grep -E 'web_gateway|server.py' | grep -v grep"
+    echo "启动失败，看上面的日志"
+    exit 1
+fi
+
 IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -n "$IP" ] || IP="<服务器公网IP>"
 

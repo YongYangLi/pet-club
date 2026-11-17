@@ -37,4 +37,24 @@ for name in web server; do
     rm -f "$pid_file"
 done
 
+# PID 文件可能丢（手工起过、或上一版脚本没写），留下孤儿进程占着 80/443/8766。
+# 按「工作目录 = 本目录」+ 脚本名精确清理，不碰机器上别的 Python 服务。
+if command -v pgrep >/dev/null 2>&1; then
+    for script in 'web_gateway\.py' 'server\.py'; do
+        for pid in $(pgrep -f "$script" 2>/dev/null); do
+            [ "$pid" = "$$" ] && continue
+            cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null)
+            [ "$cwd" = "$APP_DIR" ] || continue
+            echo "  清理残留进程（PID $pid，$script）"
+            kill "$pid" 2>/dev/null
+            i=0
+            while [ "$i" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+                sleep 0.1
+                i=$((i + 1))
+            done
+            kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+        done
+    done
+fi
+
 echo "== 已全部停止 =="

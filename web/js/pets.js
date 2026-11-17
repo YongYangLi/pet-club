@@ -4,6 +4,7 @@
 import { state, roleName } from './state.js';
 import { loadRole } from './sprites.js';
 import { BubbleLayer } from './bubble.js';
+import { moveOffset } from './motion.js';
 
 const CRAWL_FRAMES = ['crawl_1', 'crawl_2'];
 const CRAWL_FRAME_SEC = 0.16;
@@ -235,11 +236,11 @@ export class PetLayer {
     }
   }
 
-  play(role, what, dur) {
+  play(role, what, dur, move = null) {
     const pet = this.pets.get(role);
     if (!pet) return;
     if (what === 'launch') pet.takeOff();
-    else if (what && dur) pet.act(what, dur);
+    else if (what && dur) pet.act(what, dur, move);
   }
 
   say(role, text) {
@@ -337,6 +338,12 @@ class Pet {
     this.anim = null;
     this.animT = 0;
     this.animFps = 8;
+    // 带轨迹的动作（御剑飞行）：起点 + 进度 + 时长，见 motion.js
+    this.moveCfg = null;
+    this.moveT = 0;
+    this.moveDur = 0;
+    this.moveX0 = 0;
+    this.moveY0 = 0;
     this.timer = 0;
     this.landed = !drop;
     this.crawlTo = null;
@@ -473,10 +480,19 @@ class Pet {
     };
   }
 
-  act(pose, dur) {
+  act(pose, dur, move = null) {
     this.stopCrawl();
     if (this.phase === 'fall' || this.phase === 'hold' || this.phase === 'rise') return;
     const frames = this.sp.frames && this.sp.frames[pose];
+    if (move && move.kind) {
+      this.moveCfg = { ...move };
+      this.moveX0 = this.x;
+      this.moveY0 = this.y;
+      this.moveT = 0;
+      this.moveDur = Math.max(0.6, Number(dur) || 0);
+    } else {
+      this.moveCfg = null;
+    }
     if (frames && frames.length > 1) {
       this.anim = frames;
       this.animFps = (this.sp.anims[pose] && this.sp.anims[pose].fps) || 8;
@@ -492,8 +508,32 @@ class Pet {
     this.timer = dur;
   }
 
+  stepMove(dt) {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const left = this.winW / 2;
+    const right = w - this.winW / 2;
+    const top = this.winH;
+    this.moveT += dt;
+    const t = Math.min(1, this.moveT / this.moveDur);
+    const [dx, dy] = moveOffset(
+      this.moveCfg, t, w, h,
+      Math.max(0, this.moveX0 - left),
+      Math.max(0, right - this.moveX0),
+      Math.max(0, this.moveY0 - top),
+      Math.max(0, this.ground - this.moveY0));
+    this.x = this.moveX0 + dx;
+    this.y = this.moveY0 + dy;
+    if (t >= 1) {
+      this.moveCfg = null;
+      this.x = this.moveX0;
+      this.y = this.moveY0;
+    }
+  }
+
   grab() {
     this.stopCrawl();
+    this.moveCfg = null;        // 手一抓，飞行立刻作废
     this.vy = 0;
     this.anim = null;
     this.phase = 'hold';
@@ -524,6 +564,7 @@ class Pet {
 
   takeOff() {
     this.stopCrawl();
+    this.moveCfg = null;
     this.anim = null;
     this.landY = this.y;        // 飞一圈还回到起飞前那一层
     if (this.y <= this.top + 1) {
@@ -553,6 +594,7 @@ class Pet {
 
   beginCrawl() {
     if (this.crawlTo === null) return;
+    this.moveCfg = null;        // 集合优先：爬过去，不再飞
     if (this.crawlToY === null) this.crawlToY = this.y;
     if (Math.abs(this.crawlTo - this.x) < 1
       && Math.abs(this.crawlToY - this.y) < 1) {
@@ -657,10 +699,17 @@ class Pet {
         this.animT += dt;
         this.paintFrame(Math.floor(this.animT * this.animFps));
       }
+      if (this.moveCfg) this.stepMove(dt);
       if (this.timer <= 0) {
         this.anim = null;
         this.pose = 'idle';
         this.setPose('idle');
+        if (this.moveCfg) {
+          // 时长到了就回原位，别把人留在天上。
+          this.moveCfg = null;
+          this.x = this.moveX0;
+          this.y = this.moveY0;
+        }
       }
     }
     this.render();

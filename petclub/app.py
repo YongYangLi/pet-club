@@ -695,7 +695,8 @@ class App:
                 and spec.get('role') in (None, actor):
             # 动作属于发起人就由他演；右键别人的动作时 spec 是对方的，
             # 发起人没有那张图，不能硬套（会把自己的姿势顶成 idle）。
-            self._play(self.pets[actor], self._what(spec), spec.get('dur'))
+            self._play(self.pets[actor], self._what(spec), spec.get('dur'),
+                       spec.get('move'))
         if target:
             peers = [target] if target != actor else []
         else:
@@ -705,21 +706,23 @@ class App:
                 continue
             mine = self._custom_like(role, label)
             if mine is not None:
-                self._play(self.pets[role], self._what(mine), mine.get('dur'))
+                self._play(self.pets[role], self._what(mine), mine.get('dur'),
+                           mine.get('move'))
 
-    def _play(self, pet, what, dur=None):
+    def _play(self, pet, what, dur=None, move=None):
         """让一只角色动一下。
 
         `what` 一般是姿势名（wave/drink/jump…），直接丢给 Pet.act；
          'launch' 是起飞 —— 它不是姿势，是把角色从当前位置升到最高处再
         掉下来，走 Pet.take_off 的物理，落地手感和拖动松手完全一样。
+         `move` 是自定义动作自带的轨迹（见 motion.py），内置动作没有。
         """
         if pet is None:
             return
         if what == 'launch':
             pet.take_off()
         elif what and dur:
-            pet.act(what, dur)
+            pet.act(what, dur, move)
 
     def _gather(self, anchor, only=None):
         """让桌上别的角色爬到 anchor 身边，返回真的动起来的身份。
@@ -976,6 +979,8 @@ class App:
         y = min(max(y, self.oy + win.win_h), floor)
         x = self._free_x(role, x, y, sp)
         pet = Pet(sp, win, x, floor, drop=drop, land_y=y)
+        # 轨迹按这块屏幕的工作区算：换显示器 / 改缩放都不用重新存坐标。
+        pet.box = (self.ox, self.oy, self.sw, self.sh)
         self.pets[role] = pet
         return True
 
@@ -1492,7 +1497,9 @@ class App:
         fps = (self._custom.get(key) or {}).get('fps')
         if fps is None:
             fps = (getattr(sp, 'anims', {}).get(pose) or {}).get('fps')
-        return frames, fps
+        move = (self._custom.get(key) or {}).get('move')
+        dur = (self._custom.get(key) or {}).get('dur')
+        return frames, fps, move, dur
 
     def start_upload(self, role=None, action=''):
         """选图 → 归一化 → 传服务器。成功了所有人（含本机）都能看到。"""
@@ -1524,7 +1531,7 @@ class App:
         body, err = self._post_sprite(
             upload.send, role, data['frames'], data.get('action', ''),
             data.get('label', ''), data.get('dur', 2.0),
-            data.get('fps'))
+            data.get('fps'), data.get('move'), True, True)
         if body is None:
             self.toast('没传上去：%s' % err)
             return

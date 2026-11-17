@@ -564,7 +564,7 @@ class App {
 
     if (m.kind === 'say') {
       if (this.pets.has(actor)) {
-        this.pets.play(actor, spec.pose, spec.dur);
+        this.pets.play(actor, spec.pose, spec.dur, spec.move);
         if (mt === 'text' || mt === 'emoji') this.pets.say(actor, text);
         else this.pets.say(actor, mediaLine(mt, actor));
       }
@@ -588,7 +588,7 @@ class App {
     }
 
     if (this.pets.has(actor)) {
-      this.pets.play(actor, what(spec), spec.dur);
+      this.pets.play(actor, what(spec), spec.dur, spec.move);
       this.pets.say(actor, text || sayLine(m.kind, actor));
     }
     this.chat.store(key, {
@@ -647,14 +647,14 @@ class App {
     // 动作属于发起人才由他演；右键别人的动作时 spec 是对方的，发起人没有
     // 那张图，不能硬套（会把自己的姿势顶成 idle）。
     if (spec && this.pets.has(actor) && (!spec.role || spec.role === actor)) {
-      this.pets.play(actor, what(spec), spec.dur);
+      this.pets.play(actor, what(spec), spec.dur, spec.move);
     }
     let peers;
     if (target) peers = target === actor ? [] : [target];
     else peers = [...this.pets.pets.keys()].filter((r) => r !== actor);
     for (const r of peers) {
       const mine = this.customLike(r, label);
-      if (mine) this.pets.play(r, what(mine), mine.dur);
+      if (mine) this.pets.play(r, what(mine), mine.dur, mine.move);
     }
   }
 
