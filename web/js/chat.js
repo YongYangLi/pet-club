@@ -16,7 +16,7 @@ const EMOJI_CHARS = ['😀', '😄', '😅', '😂', '😊', '😉', '😍', '�
 const STICKER_POSES = ['idle', 'wave', 'drink', 'heart', 'jump', 'sleep', 'knock', 'drag'];
 
 export class ChatUI {
-  constructor({ onSend, onAction, onLeave, onQuit, onRemote, onMedia, onPetSize, onGame, onFx, onToy, onReminder, reminderState, onPoseAdd, onPoseReset }) {
+  constructor({ onSend, onAction, onLeave, onQuit, onRemote, onMedia, onPetSize, onGame, onFx, onToy, onReminder, reminderState, onPoseAdd, onPoseEdit, onPoseReset }) {
     this.onSend = onSend;
     this.onAction = onAction;
     this.onLeave = onLeave;
@@ -30,6 +30,7 @@ export class ChatUI {
     this.onReminder = onReminder;
     this.reminderState = reminderState || (() => ({ on: false, min: 45 }));
     this.onPoseAdd = onPoseAdd;
+    this.onPoseEdit = onPoseEdit;
     this.onPoseReset = onPoseReset;
 
     this.root = document.getElementById('main-screen');
@@ -1098,6 +1099,8 @@ export class ChatUI {
   // 「我的动作」子菜单里那几行：**只列自己动过的** ——
   // 新增的自定义动作可以删掉，被换过图的内置动作可以还原。
   // 没动过的内置动作一行都不出现，否则六个动作永远挂在那儿占地方。
+  // 每一行自己再挂一个三级菜单（换一张 / 删掉或还原），和桌面版一致：
+  // 「换一张」是最常用的，直接一级就能点到。
   poseRows() {
     const me = state.me ? state.me.role : null;
     if (!me) return '';
@@ -1117,12 +1120,22 @@ export class ChatUI {
     const rows = [];
     for (const it of items) {
       if (!spriteRev(me, it.pose)) continue;      // 没动过，不列
-      rows.push(`<div class="pose-row" data-key="${escapeHtml(it.key)}">
-        <img class="pose-row-thumb" src="${spriteUrl(me, it.pose)}" alt="">
-        <span class="pose-row-name">${escapeHtml(it.label)}</span>
-        <span class="pose-row-tag">${it.custom ? '新增' : '已换'}</span>
-        <button type="button" class="pose-row-act" data-act="${it.custom ? 'del' : 'undo'}"
-          title="${it.custom ? '删掉这个动作' : '还原成出厂图'}">${it.custom ? '删掉' : '还原'}</button>
+      const key = escapeHtml(it.key);
+      rows.push(`<div class="ctx-sub">
+        <button type="button" class="ctx-item ctx-parent pose-row" data-key="${key}">
+          <img class="pose-row-thumb" src="${spriteUrl(me, it.pose)}" alt="">
+          <span class="pose-row-name">${escapeHtml(it.label)}（${it.custom
+            ? '新增' : '已换'}）</span>
+          <span class="ctx-arrow">›</span>
+        </button>
+        <div class="ctx-submenu pose-acts">
+          <button type="button" class="ctx-item" data-cmd="pose-edit"
+            data-key="${key}">换一张…</button>
+          <button type="button" class="ctx-item${it.custom ? ' ctx-danger' : ''}"
+            data-cmd="pose-reset" data-key="${key}"
+            data-act="${it.custom ? 'del' : 'undo'}">${it.custom
+              ? '删掉这个动作' : '恢复默认图'}</button>
+        </div>
       </div>`);
     }
     return rows.join('');
@@ -1217,6 +1230,15 @@ export class ChatUI {
           this.onRemote(!state.remoteOn);
         } else if (cmd === 'pose-add') {
           if (this.onPoseAdd && state.me) this.onPoseAdd(state.me.role);
+        } else if (cmd === 'pose-edit') {
+          if (this.onPoseEdit && state.me) {
+            this.onPoseEdit(state.me.role, btn.dataset.key || '');
+          }
+        } else if (cmd === 'pose-reset') {
+          if (this.onPoseReset && state.me) {
+            this.onPoseReset(state.me.role, btn.dataset.key || '',
+              btn.dataset.act || 'del');
+          }
         } else if (cmd === 'leave') {
           this.onLeave();
         } else if (cmd === 'quit') {
@@ -1250,22 +1272,6 @@ export class ChatUI {
         const now = this.reminderState()[kind];
         row.querySelector('.rem-min').textContent = `${now.min} 分钟`;
         row.classList.toggle('on', now.on);
-      });
-    });
-
-    menu.querySelectorAll('.pose-row-act').forEach((btn) => {
-      btn.addEventListener('click', (e) => {
-        // 在子菜单里，别让点击冒泡到 .ctx-item 的「点完就关」逻辑上：
-        // 删失败时菜单还开着，用户能直接再点一次。
-        e.stopPropagation();
-        const row = btn.closest('.pose-row');
-        if (!row || !state.me) return;
-        btn.disabled = true;
-        const label = row.querySelector('.pose-row-name');
-        if (label) label.textContent = '处理中…';
-        if (this.onPoseReset) {
-          this.onPoseReset(state.me.role, row.dataset.key, btn.dataset.act);
-        }
       });
     });
   }

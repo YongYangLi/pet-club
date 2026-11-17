@@ -142,15 +142,8 @@ function ensureDom() {
   root.querySelector('#up-move-d').addEventListener('input', () => syncMove(false));
   root.querySelector('#up-poses').addEventListener('click', (e) => {
     const tile = e.target.closest && e.target.closest('.pose-tile');
-    if (!tile || !box) return;
-    const next = tile.dataset.key || '';
-    if (next !== box.mode) box.fpsTouched = false;
-    box.mode = next;
-    root.querySelectorAll('.pose-tile').forEach((t) => {
-      t.classList.toggle('on', t === tile);
-    });
-    syncMode();
-    if (!box.userPicked) loadExisting(box.mode);
+    if (!tile) return;
+    pickMode(tile.dataset.key || '');
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && root && !root.classList.contains('hidden')) closeUpload();
@@ -158,7 +151,20 @@ function ensureDom() {
   return root;
 }
 
-export function openUpload(role, onDone) {
+// 选中一个动作格子（新建 / 某个已有动作）。菜单里的「换一张…」也走这里：
+// 打开弹层时直接把目标动作选好，用户只需要选图。
+function pickMode(key) {
+  if (!box) return;
+  if (key !== box.mode) box.fpsTouched = false;
+  box.mode = key;
+  root.querySelectorAll('.pose-tile').forEach((t) => {
+    t.classList.toggle('on', (t.dataset.key || '') === key);
+  });
+  syncMode();
+  if (!box.userPicked) loadExisting(box.mode);
+}
+
+export function openUpload(role, onDone, presetKey = '') {
   ensureDom();
   stopPreview();
   box = {
@@ -176,7 +182,11 @@ export function openUpload(role, onDone) {
     strip.classList.add('hidden');
   }
   const name = (document.querySelector('#up-title'));
-  if (name) name.textContent = `给「${roleName(role)}」加个动作`;
+  if (name) {
+    name.textContent = presetKey
+      ? `给「${roleName(role)}」换一张`
+      : `给「${roleName(role)}」加个动作`;
+  }
 
   renderPosePick(role);
   syncMode();
@@ -192,6 +202,8 @@ export function openUpload(role, onDone) {
   preview.width = 0;
   preview.height = 0;
   root.classList.remove('hidden');
+  // 从菜单的「换一张…」进来：直接把目标动作选好（会异步预载它的帧和帧率）。
+  if (presetKey) pickMode(presetKey);
 }
 
 // 「换哪个动作」的缩略图格子。

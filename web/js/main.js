@@ -79,6 +79,7 @@ class App {
       }),
       onPetSize: (level) => this.setPetSize(level),
       onPoseAdd: (role) => this.uploadSprite(role),
+      onPoseEdit: (role, key) => this.uploadSprite(role, key),
       onPoseReset: (role, key, act) => this.removeSpriteChange(role, key, act),
     });
     this.pets = new PetLayer({
@@ -1037,8 +1038,8 @@ class App {
     });
   }
 
-  uploadSprite(role) {
-    openUpload(role, (manifest) => this.afterUpload(manifest));
+  uploadSprite(role, key = '') {
+    openUpload(role, (manifest) => this.afterUpload(manifest), key);
   }
 
   afterUpload(manifest) {

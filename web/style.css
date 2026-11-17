@@ -1247,16 +1247,13 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   font-size: 13px;
 }
 .ctx-submenu.left { left: auto; right: calc(100% + 2px); }
-.ctx-sub:hover .ctx-submenu,
-.ctx-sub.open .ctx-submenu { display: block; }
+/* 只认直接子级：三级菜单嵌在二级菜单里，用后代选择器会让所有三级同时展开 */
+.ctx-sub:hover > .ctx-submenu,
+.ctx-sub.open > .ctx-submenu { display: block; }
 .ctx-arrow { color: var(--muted); font-size: 13px; }
 
-/* 「我的动作」子菜单：一行一个自己改过的动作，右边是删掉 / 还原 */
-.pose-sub {
-  min-width: 218px;
-  max-height: 300px;
-  overflow-y: auto;
-}
+/* 「我的动作」子菜单：一行一个自己改过的动作，点开是三级菜单（换一张 / 删掉） */
+.pose-sub { min-width: 218px; }
 .pose-row {
   display: flex;
   align-items: center;
@@ -1278,20 +1275,7 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   white-space: nowrap;
   text-overflow: ellipsis;
 }
-.pose-row-tag { flex: none; font-size: 10px; color: var(--muted); }
-.pose-row-act {
-  flex: none;
-  padding: 1px 7px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: #ffffff;
-  color: var(--sub);
-  font-family: inherit;
-  font-size: 11px;
-  cursor: pointer;
-}
-.pose-row-act:hover { border-color: var(--err); color: var(--err); }
-.pose-row-act:disabled { opacity: .45; cursor: default; }
+.pose-acts { min-width: 152px; }
 .ctx-sep { height: 1px; margin: 4px 6px; background: var(--line); }
 
 .toast {

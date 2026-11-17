@@ -32,7 +32,7 @@ ENDPOINT = (SERVER_HOST, SERVER_PORT)
 
 HEARTBEAT_SEC = 5.0        # 心跳间隔，服务端 30 秒收不到就判离线
 RECONNECT_SEC = 3.0        # 断线重连的初始退避（会一路退到 20 秒）
-POLL_MS = 33               # 主循环节拍（约 30fps）
+POLL_MS = 33               # 主循环节拍上限：实际跟随屏幕刷新率（更小），拿不到才用这个
 
 # 姿势图和素材清单走网页网关的 HTTP 端口。桌面端 WebSocket 连 8765；
 # 线上网关默认在 80 提供网页、同时保留 8766 给桌面端同步素材，所以这里
@@ -78,7 +78,7 @@ def pet_scale(dpr):
 # （tools/build_app.py 读这里），发版时 tools/make_release.py 再把同一个号写进
 # COS 上的清单。三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
-VERSION = '1.9.1'
+VERSION = '1.9.2'
 
 # 发版地址：网页端的「下载桌面客户端」优先用对象存储里的 exe（GitHub 访问慢），
 # 清单和产物在同一个目录里，所以地址直接从 UPDATE_URL 推导。

@@ -214,6 +214,60 @@ def main():
     check('没有把 .1 当成新姿势',
           'c9.1' not in sp.anims or sp.anims['c9.1'].get('frames') == 1)
 
+    print('--- 播放节拍 ---')
+    from petclub import actors
+
+    class FakeWin(object):
+        win_w = 100.0
+        win_h = 200.0
+        body_w = 80.0
+
+        def __init__(self):
+            self.shown = []
+
+        def show(self, pose, x, y):
+            self.shown.append(pose)
+
+    class FakeSp(object):
+        w = 100
+        h = 200
+        body_w = 80
+        poses = {'idle': None, 'fx': None, 'fx.1': None, 'fx.2': None}
+        frame_keys = {'fx': ['fx', 'fx.1', 'fx.2']}
+        mask_base = {'fx': 'fx', 'fx.1': 'fx', 'fx.2': 'fx'}
+        mask_images = {}
+        dx = {}
+
+    def run(fps, step, seconds=3.0):
+        """按 step 的节拍跑一段动作，返回换帧次数 / 实际耗时。"""
+        sp = FakeSp()
+        sp.anims = {'fx': {'frames': 3, 'fps': fps}}
+        win = FakeWin()
+        pet = actors.Pet(sp, win, 500.0, 800.0, drop=False)
+        pet.act('fx', seconds)
+        last = None
+        changes = 0
+        t = 0.0
+        while t < seconds:
+            pet.update(step)
+            t += step
+            pose = win.shown[-1]
+            if last is not None and pose != last:
+                changes += 1
+            last = pose
+        return changes / t, t
+
+    # 主循环现在跟随屏幕刷新率（60Hz ≈ 0.017s）；这里分别按 60Hz / 30Hz
+    # 采样，确认「配多少帧率就播多少帧」，不会被节拍带偏。
+    for fps in (2, 8, 14, 24):
+        for step in (0.017, 0.033):
+            rate, span = run(fps, step)
+            check('fps=%d 节拍 %.0fms 实测 %.1f' % (fps, step * 1000, rate),
+                  abs(rate - fps) <= 0.8, rate)
+    low, _ = run(6, 0.017)
+    high, _ = run(20, 0.017)
+    check('改帧率后播得更快', high > low * 2.5, (low, high))
+
     print('\n通过 %d 项，失败 %d 项' % (len(PASS), len(FAIL)))
     for name in FAIL:
         print('  - ' + name)

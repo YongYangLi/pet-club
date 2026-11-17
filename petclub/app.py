@@ -195,7 +195,18 @@ class App:
 
         self.tray = None
         self._timer = QTimer(self.qapp)
-        self._timer.setInterval(max(16, int(config.POLL_MS)))
+        # 主循环跟着屏幕刷新率走（浏览器 rAF 也是这个节奏）。固定 33ms 时，
+        # 8 / 14fps 的动作帧会落成「2 拍 / 3 拍」交替 —— 每帧停留 66ms 或
+        # 99ms，看着一跳一跳；对齐后每帧的停留时长才是均匀的。
+        # 上限仍取 POLL_MS（省电），下限 16ms（不追 120Hz+）。
+        screen = self.qapp.primaryScreen()
+        try:
+            hz = float(screen.refreshRate()) if screen is not None else 0.0
+        except (AttributeError, TypeError, ValueError):
+            hz = 0.0
+        interval = (int(round(1000.0 / hz)) if hz >= 30
+                    else int(config.POLL_MS))
+        self._timer.setInterval(max(16, min(int(config.POLL_MS), interval)))
         self._timer.timeout.connect(self.tick)
 
     # ---------------- 启动 ----------------

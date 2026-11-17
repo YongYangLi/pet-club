@@ -165,6 +165,7 @@ class Pet:
         if self._crawl_to is None:
             return
         self._move = None           # 集合优先：爬过去，不再飞
+        self._end_move_route()
         if self._crawl_to_y is None:
             self._crawl_to_y = self.y
         if (abs(self._crawl_to - self.x) < 1.0
@@ -212,6 +213,7 @@ class Pet:
         `move` 是可选轨迹（御剑飞行那种），姿势照常循环，位置按 motion.offset 走。
         """
         self._stop_crawl()
+        self._end_move_route()
         if self.phase in ('fall', 'hold', 'rise'):
             return
         self.pose = pose
@@ -229,8 +231,44 @@ class Pet:
             self._move_y0 = self.y
             self._move_t = 0.0
             self._move_dur = max(0.6, float(dur or 0.0))
+            self._begin_move_route()
         else:
             self._move = None
+
+    def _begin_move_route(self):
+        """轨迹动作开始前，把窗口换成一块覆盖整条路线的固定画布。
+
+        飞行期间窗口不再挪位置，人改为在画布内部偏移绘制 —— 顶层窗口每帧
+        move() 一次，Windows 会先合成「新位置 + 旧位图」再收到重绘，这才是
+        整窗拖影的来源。路线先按 motion.offset 采样一圈，画布和 mask 都按
+        采样点并集一次算好。
+        """
+        begin = getattr(self.win, 'begin_route', None)
+        if not callable(begin) or not self._move:
+            return
+        ox, oy, sw, sh = getattr(self, 'box', (0.0, 0.0, 0.0, 0.0))
+        if sw <= 0 or sh <= 0:
+            return
+        left = ox + self.win.win_w / 2.0
+        right = ox + sw - self.win.win_w / 2.0
+        top = oy + self.win.win_h
+        room_left = max(0.0, self._move_x0 - left)
+        room_right = max(0.0, right - self._move_x0)
+        rise = max(0.0, self._move_y0 - top)
+        drop = max(0.0, self.ground - self._move_y0)
+        steps = 48
+        points = []
+        for i in range(steps + 1):
+            t = i / float(steps)
+            dx, dy = motion.offset(self._move, t, sw, sh,
+                                   room_left, room_right, rise, drop)
+            points.append((self._move_x0 + dx, self._move_y0 + dy))
+        begin(points, getattr(self.sp, 'mask_base', {}).get(self.pose, self.pose))
+
+    def _end_move_route(self):
+        end = getattr(self.win, 'end_route', None)
+        if callable(end):
+            end()
 
     # ---- 拖动（纯本地效果，一个字节都不发给别人）----
 
@@ -246,6 +284,7 @@ class Pet:
             self.x = float(x)
         if y is not None:
             self.y = float(y)
+        self._end_move_route()      # 先站到手上，再缩回紧包窗口
         self.vy = 0.0
         self.phase = 'hold'
         self.pose = self.HOLD_POSE
@@ -281,6 +320,7 @@ class Pet:
         """
         self._stop_crawl()
         self._move = None
+        self._end_move_route()
         self._land_y = self.y
         if self.y <= self.top + 1:
             self.phase = 'fall'         # 已经在顶上了，没什么可升的，直接掉
@@ -398,6 +438,8 @@ class Pet:
                 self.pose = self._anim_keys[idx]
             if self._move:
                 self._step_move(dt)
+                if self._move is None:
+                    self._end_move_route()
             if self.timer <= 0:
                 self.pose = 'idle'
                 self._anim_keys = None
@@ -406,6 +448,7 @@ class Pet:
                     self._move = None
                     self.x = self._move_x0
                     self.y = self._move_y0
+                self._end_move_route()
         self.win.show(self.pose, int(self.x), int(self.y))
 
     def bubble_anchor(self):

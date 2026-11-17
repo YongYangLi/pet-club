@@ -7,23 +7,27 @@
   WA_TranslucentBackground（按 alpha 合成）。抗锯齿边缘、半透明、预乘 alpha
   全由 Qt 处理。
 
-【点击穿透】分层窗口的透明像素天然不参与命中测试，Qt 的窗口却是矩形 ——
-  不处理的话，角色周围那一大圈透明区域会把桌面图标挡住，用户点不到。
-  所以按当前姿势的 alpha 生成一个 QRegion mask：只有画到人的地方才吃鼠标。
-  mask 只在换姿势时重算（缓存），不是每帧。
+【点击穿透】Windows 的分层窗口按像素 alpha 做命中测试，alpha 为 0 的地方
+  本来就穿透；只有 macOS 这类按矩形命中测试的平台需要额外裁一个
+  QRegion mask，否则角色周围那一圈透明区域会挡住桌面图标。
+  ⚠️ 别在 Windows 上装 mask：QRegion 是 1 bit 的，alpha < 128 的半透明
+  像素会被整块裁掉，剑光/柔边这些细节会变成硬切边（看起来像丢了细节）。
 
 【DPI】素材是物理像素，Qt 的窗口尺寸是逻辑像素。屏幕 dpr 负责把
-  「物理坐标」翻成「Qt 逻辑坐标」；素材位图另有一个 dpr/scale 的设备比，
-  让 1 个素材像素在屏幕上占 scale 个物理像素。scale = 1 就是一比一，
-  scale = 屏幕 dpr 就是旧 Tk 版那种「被系统再放大一次」的观感（见
-  config.PET_SCALE）。两者分开，拖动和落地用的业务坐标才不会跟着变。
+  「物理坐标」翻成「Qt 逻辑坐标」；素材位图在建窗时按 scale 一次性放大到
+  屏幕物理尺寸（LANCZOS），设备比设成 dpr —— 于是每帧只是把位图 1:1 搬到
+  整数设备像素上，不再重采样（分数 dpr 下反复采样会让细节抖）。scale = 1
+  是一比一，scale = 屏幕 dpr 就是旧 Tk 版那种「被系统再放大一次」的观感
+  （见 config.PET_SCALE）。两者分开，拖动和落地用的业务坐标才不会跟着变。
 
 【坐标】对外一律用**屏幕物理像素**，脚底中心对齐。
 """
-from PySide6.QtCore import QPoint, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QBitmap, QColor, QFont, QFontMetrics, QImage,
                            QPainter, QPen, QPixmap, QRegion)
 from PySide6.QtWidgets import QApplication, QWidget
+
+from PIL import Image
 
 from . import config, host
 
@@ -81,21 +85,43 @@ class PetWindow(QWidget):
         self._qim = {}
         for name, im in sp.poses.items():
             q = to_qimage(im)
-            self._qim[name] = q                 # 物理尺寸，生成 mask 用
-            pm = QPixmap.fromImage(q)
-            pm.setDevicePixelRatio(self.pdpr)
-            self._pix[name] = pm
+            self._qim[name] = q                 # 素材像素：mask、命中点用
+            self._pix[name] = self._device_pix(im)
         self._masks = {}
         self._hit_cache = {}
         self._pose = 'idle'
         self._mask_pose = 'idle'
+        # 轨迹画布：不为 None 时窗口位置固定，人按这个物理原点做内部偏移绘制。
+        # 见 begin_route()：顶层窗口每帧挪一次，Windows 会同时露出「新位置 +
+        # 旧位图」和「新位置 + 新位图」，看起来就是整窗拖影。
+        self._canvas = None
+        # 见文件头【点击穿透】：Windows 靠 alpha 命中测试，装 mask 反而会
+        # 把半透明像素裁掉；只有矩形命中的平台才需要 mask。
+        self._masked = not host.IS_WIN
         self.role = None            # App 建好窗口后填：反查用（命中测试、菜单）
-        self._apply_mask('idle')    # 第一次也要装 mask，否则窗口是整块矩形
+        self._apply_mask('idle')    # 需要 mask 的平台先装上，否则窗口是整块矩形
         self._x = 0.0
         self._y = 0.0
         super().show()                  # 注意不能写 self.show()：下面重载了同名方法
 
     # ---- 画 ----
+
+    def _device_pix(self, im):
+        """把素材一次性放大到屏幕物理尺寸，之后每帧按 1:1 贴。
+
+        以前是把素材像素当逻辑像素、让 QPainter 用设备比现场放大：dpr 是
+        1.25 这种分数时，每一帧都要重新做双线性采样；窗口一挪，采样相位还会
+        在 .0/.25/.5/.75 之间来回跳，细节就跟着抖。放大挪到这里只做一次
+        （LANCZOS），位图设备比设成 dpr，绘制时正好落在整数设备像素上，
+        和网页端「光栅化一次、之后只平移」同一个思路。
+        """
+        w = max(1, int(round(im.width * self.scale)))
+        h = max(1, int(round(im.height * self.scale)))
+        if (w, h) != (im.width, im.height):
+            im = im.resize((w, h), Image.LANCZOS)
+        pm = QPixmap.fromImage(to_qimage(im))
+        pm.setDevicePixelRatio(self.dpr)
+        return pm
 
     def show(self, pose, x, y):
         """换姿势 + 挪位置。pose 不认识就退回 idle（和 sprites.get 一致）。
@@ -104,30 +130,109 @@ class PetWindow(QWidget):
         `win.show(pose, x, y)`）。所以本类内部要显示窗口一律用
         `super().show()`，绝不能写 `self.show()`。
         """
-        if pose != self._pose:
+        changed = pose != self._pose
+        if changed:
             self._pose = pose
             # 多帧动作的每一帧共用一张「所有帧的 alpha 并集」遮罩：
             # 换帧时不用重装 mask，也不会把伸出去的胳膊裁掉。
-            base = self.sp.mask_base.get(pose, pose)
-            if base != self._mask_pose:
-                self._mask_pose = base
-                self._apply_mask(base)
-            self.update()
+            # 画布模式下 mask 是整条轨迹的并集，已经装好，换帧不再动它。
+            if self._canvas is None:
+                base = self.sp.mask_base.get(pose, pose)
+                if base != self._mask_pose:
+                    self._mask_pose = base
+                    self._apply_mask(base)
         self.move_to(x, y)
         if not self.isVisible():
             super().show()
+        if self._canvas is not None:
+            # 画布里人每拍都在挪，必须每拍重画；窗口本身不动，没有拖影。
+            self.update()
+        elif changed:
+            # 先挪窗口、再画：新位置和新那一帧在同一拍里提交，少一次
+            # 「旧图停在新位置」的残影。
+            if self.isVisible():
+                self.repaint()
+            else:
+                self.update()
+
+    # ---- 轨迹画布 ----
+
+    def begin_route(self, points, mask_pose):
+        """按整条轨迹撑开窗口，轨迹期间只重画、不再挪窗口。
+
+        points 是这次动画会经过的脚底中心点（屏幕物理像素）。窗口按这些点
+        的并集一次就位；需要 mask 的平台还要取这些点上人形的并集，开始/结束
+        各装一次（代价是轨迹扫过的那一条都会吃鼠标）。Windows 靠 alpha 命中
+        测试，这一步直接跳过。
+        """
+        points = list(points or ())
+        if not points:
+            return
+        half = self.win_w / 2.0
+        left = min(px for px, _ in points) - half
+        top = min(py for _, py in points) - self.win_h
+        right = max(px for px, _ in points) + half
+        bottom = max(py for _, py in points)
+        # 对齐到逻辑像素网格：Qt 的窗口坐标只收整数逻辑像素，先取整再反算
+        # 物理原点，画布原点才和窗口实际原点重合。
+        lx = int(round(left / self.dpr))
+        ly = int(round(top / self.dpr))
+        lw = max(1, int(round((right - left) / self.dpr)))
+        lh = max(1, int(round((bottom - top) / self.dpr)))
+        self._canvas = (lx * self.dpr, ly * self.dpr)
+        # 换尺寸、换 mask 的中间态太容易被合成器看到，先停刷新，一次提交。
+        self.setUpdatesEnabled(False)
+        self.setFixedSize(lw, lh)
+        self.move(lx, ly)
+
+        base = self._region_for(mask_pose) if self._masked else None
+        if base is not None:
+            union = QRegion()
+            seen = set()
+            for px, py in points:
+                # 采样点是屏幕物理像素，region 是窗口逻辑坐标，先换算
+                dx = int(round((px - half - self._canvas[0]) / self.dpr))
+                dy = int(round((py - self.win_h - self._canvas[1]) / self.dpr))
+                if (dx, dy) in seen:
+                    continue
+                seen.add((dx, dy))
+                part = QRegion(base)
+                part.translate(dx, dy)
+                union = union.united(part)
+            self.setMask(union)
+        self.setUpdatesEnabled(True)
+        self.update()
+
+    def end_route(self):
+        """退出画布模式：窗口缩回紧包尺寸，装回当前姿势的 mask。"""
+        if self._canvas is None:
+            return
+        self._canvas = None
+        self.setUpdatesEnabled(False)
+        self.setFixedSize(max(1, int(round(self._lw))),
+                          max(1, int(round(self._lh))))
+        lx = int(round(self._x / self.dpr - self._lw / 2.0))
+        ly = int(round(self._y / self.dpr - self._lh))
+        self.move(lx, ly)
+        base = self.sp.mask_base.get(self._pose, self._pose)
+        self._mask_pose = base
+        self._apply_mask(base)
+        self.setUpdatesEnabled(True)
+        self.update()
 
     def move_to(self, x, y):
         """(x, y) 是脚底中心的屏幕坐标（物理像素）。"""
         self._x = float(x)
         self._y = float(y)
+        if self._canvas is not None:
+            return                      # 画布模式：位置只记在 _x/_y，窗口不动
         lx = int(round(x / self.dpr - self._lw / 2.0))
         ly = int(round(y / self.dpr - self._lh))
         if (lx, ly) != (self.x(), self.y()):
             self.move(lx, ly)
 
-    def _apply_mask(self, pose):
-        """给当前姿势装一个「只有人身上才吃鼠标」的区域。
+    def _region_for(self, pose):
+        """紧包窗口坐标系里「只有人身上才吃鼠标」的区域（按姿势缓存）。
 
         不能用 QPixmap.mask()：那张 pixmap 设了 devicePixelRatio，
         mask() 在某些缩放比下直接返回空。老老实实从 alpha 生成 1bit 蒙版，
@@ -142,7 +247,7 @@ class PetWindow(QWidget):
                 q = self._qim.get(pose) or next(iter(self._qim.values()))
             bm = QBitmap.fromImage(q.createAlphaMask())
             if bm.isNull():
-                return
+                return None
             # 素材像素 → 逻辑像素（和 paintEvent 里的绘制尺寸同一个换算）
             w = max(1, int(round(q.width() / self.pdpr)))
             h = max(1, int(round(q.height() / self.pdpr)))
@@ -152,19 +257,33 @@ class PetWindow(QWidget):
             region.translate(int(round((self._lw - w) / 2.0 + dx)),
                              int(round(self._lh - h)))
             self._masks[pose] = region
-        self.setMask(region)
+        return region
+
+    def _apply_mask(self, pose):
+        if not self._masked:
+            return                      # Windows：alpha 命中测试，不裁形状
+        region = self._region_for(pose)
+        if region is not None:
+            self.setMask(region)
 
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         pm = self._pix.get(self._pose) or next(iter(self._pix.values()))
-        # 底部居中；循环帧的水平修正沿用 sprites 里的 dx（素材像素 → 逻辑像素）
+        # 底部居中；循环帧的水平修正沿用 sprites 里的 dx（素材像素 → 物理像素）
         base = self.sp.mask_base.get(self._pose, self._pose)
-        dx = self.sp.dx.get(self._pose, self.sp.dx.get(base, 0)) / self.pdpr
-        w = pm.width() / self.pdpr
-        h = pm.height() / self.pdpr
-        p.drawPixmap(QPoint(int(round((self._lw - w) / 2.0 + dx)),
-                            int(round(self._lh - h))), pm)
+        dx = self.sp.dx.get(self._pose, self.sp.dx.get(base, 0))
+        off_x = off_y = 0.0
+        if self._canvas is not None:
+            # 画布模式：人的位置是「紧包窗口的左上角」相对画布原点差多少。
+            off_x = self._x - self.win_w / 2.0 - self._canvas[0]
+            off_y = self._y - self.win_h - self._canvas[1]
+        # 落点先算成设备像素，再换回逻辑坐标交给 QPainter：目标尺寸和设备
+        # 像素正好 1:1，Qt 只做位块搬运，不会再采样一次。
+        x_dev = int(round((self.win_w - pm.width()) / 2.0
+                          + dx * self.scale + off_x))
+        y_dev = int(round(self.win_h - pm.height() + off_y))
+        p.drawPixmap(QPointF(x_dev / self.dpr, y_dev / self.dpr), pm)
         p.end()
 
     # ---- 鼠标 ----
@@ -197,12 +316,9 @@ class PetWindow(QWidget):
         必须落在人身上：落在透明处会一路穿透到桌面，被误判成「被盖住了」，
         然后每 3 秒白白插一次队。
         """
-        pm = self._pix.get(self._pose)
-        if pm is None:
-            return None
+        img = self._qim.get(self._pose) or self._qim['idle']
         off = self._hit_cache.get(self._pose)
         if off is None:
-            img = pm.toImage()
             cx = img.width() // 2
             off = None
             for y in range(0, img.height(), 4):
@@ -220,11 +336,10 @@ class PetWindow(QWidget):
             self._hit_cache[self._pose] = off
         if off is None:
             return None
-        q = self._qim.get(self._pose) or self._qim['idle']
         # 绘制时素材图在窗口内底部居中，循环帧另有 dx 修正；这里按同一套
         # 偏移把「素材像素」换算成「屏幕物理像素」（放大后一个像素顶 scale 个）。
-        off_x = (self.sp.w - q.width()) / 2.0 + self.sp.dx.get(self._pose, 0)
-        off_y = self.sp.h - q.height()
+        off_x = (self.sp.w - img.width()) / 2.0 + self.sp.dx.get(self._pose, 0)
+        off_y = self.sp.h - img.height()
         left = self._x - self.win_w / 2.0
         top = self._y - self.win_h
         return (int(left + (off_x + off[0]) * self.scale),
