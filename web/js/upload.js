@@ -70,6 +70,11 @@ function ensureDom() {
             <input id="up-dur" type="number" min="0.6" max="8" step="0.2" value="2">
             <span class="upload-unit">秒</span>
           </div>
+          <div class="upload-row" id="up-scale-row">
+            <label for="up-scale">大小</label>
+            <input id="up-scale" type="range" min="70" max="160" step="5" value="100">
+            <span id="up-scale-val" class="upload-unit">100%</span>
+          </div>
         </div>
         <div class="upload-move" id="up-move-box">
           <div class="upload-move-row">
@@ -137,6 +142,13 @@ function ensureDom() {
     root.querySelector('#up-fps-val').textContent = box.fps.toFixed(1);
     startPreview();
   });
+  root.querySelector('#up-scale').addEventListener('input', (e) => {
+    if (!box) return;
+    const v = Number(e.target.value) || 100;
+    root.querySelector('#up-scale-val').textContent = `${v}%`;
+    box.scale = v / 100;
+    applyScale();
+  });
   root.querySelector('#up-move-kind').addEventListener('change', () => syncMove(true));
   root.querySelector('#up-move-h').addEventListener('input', () => syncMove(false));
   root.querySelector('#up-move-d').addEventListener('input', () => syncMove(false));
@@ -171,10 +183,13 @@ export function openUpload(role, onDone, presetKey = '') {
     role, frames: [], previews: [], b64: '', w: 0, h: 0, onDone,
     files: [], mode: '', fps: 8, auto: true, userPicked: false,
     fpsTouched: false, loadSeq: 0, selected: 0, move: null, previewT: 0,
+    // 人物大小：basePreviews 是归一化后的原始帧，previews 是按 scale 缩放后的。
+    basePreviews: [], scale: 1,
   };
   root.querySelector('#up-auto').checked = true;
   root.querySelector('#up-fps').value = '8';
   root.querySelector('#up-fps-val').textContent = '8.0';
+  setScaleUI(1);
   setMoveControls(null);
   const strip = root.querySelector('#up-frames');
   if (strip) {
@@ -291,8 +306,9 @@ function syncMode() {
   const labelEl = root.querySelector('#up-label');
   if (isNew) labelEl.value = '';
   else if (custom) labelEl.value = spec.label || '';
-  // 自定义动作可以改时长；内置姿势的时长是语义的一部分，不给改。
+  // 自定义动作可以改时长和大小；内置姿势的时长/比例是语义的一部分，不给改。
   root.querySelector('#up-dur-row').classList.toggle('hidden', !custom);
+  root.querySelector('#up-scale-row').classList.toggle('hidden', !custom);
   if (isNew) {
     root.querySelector('#up-dur').value = '2';
   } else if (spec && spec.custom) {
@@ -457,33 +473,24 @@ function selectFrame(index) {
 }
 
 function moveFrame(from, to) {
-  if (!box || from === to || from < 0 || to < 0
-    || from >= box.frames.length || to >= box.frames.length) return;
+  const n = box && box.basePreviews ? box.basePreviews.length : 0;
+  if (!box || from === to || from < 0 || to < 0 || from >= n || to >= n) return;
   box.userPicked = true;
-  const [f] = box.frames.splice(from, 1);
-  box.frames.splice(to, 0, f);
-  const [p] = box.previews.splice(from, 1);
-  box.previews.splice(to, 0, p);
-  box.b64 = box.frames[0];
+  const [p] = box.basePreviews.splice(from, 1);
+  box.basePreviews.splice(to, 0, p);
   box.selected = to;
-  renderFrameStrip();
-  startPreview();
+  applyScale();
 }
 
 function removeFrame(index) {
-  if (!box || index < 0 || index >= box.frames.length) return;
+  const n = box && box.basePreviews ? box.basePreviews.length : 0;
+  if (!box || index < 0 || index >= n) return;
   box.userPicked = true;
-  box.frames.splice(index, 1);
-  box.previews.splice(index, 1);
-  box.b64 = box.frames[0] || '';
-  if (box.previews.length) {
-    box.w = box.previews[0].width;
-    box.h = box.previews[0].height;
-  }
+  box.basePreviews.splice(index, 1);
   if (box.selected > index) box.selected -= 1;
-  box.selected = Math.max(0, Math.min(box.selected, box.frames.length - 1));
-  renderFrameStrip();
-  startPreview();
+  box.selected = Math.max(0, Math.min(
+    box.selected, Math.max(0, box.basePreviews.length - 1)));
+  applyScale();
   root.querySelector('#up-send').disabled = !box.frames.length;
   if (!box.frames.length) {
     preview.width = 0;
@@ -539,14 +546,100 @@ function imageCanvas(img) {
   return c;
 }
 
+// 把一张图画进 cw×ch 的画布、底部居中（多出来的是透明留白）。
+function padCanvas(src, cw, ch) {
+  if (src.width === cw && src.height === ch) return src;
+  const out = document.createElement('canvas');
+  out.width = cw;
+  out.height = ch;
+  out.getContext('2d').drawImage(
+    src, Math.round((cw - src.width) / 2), ch - src.height);
+  return out;
+}
+
+function setScaleUI(scale) {
+  if (!root) return;
+  const v = Math.round(scale * 100);
+  const s = root.querySelector('#up-scale');
+  if (s) s.value = String(v);
+  const lab = root.querySelector('#up-scale-val');
+  if (lab) lab.textContent = `${v}%`;
+}
+
+// 一帧里人物（alpha）占的高度。只用来估默认大小，不需要很精确。
+function alphaHeight(canvas) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const data = ctx.getImageData(0, 0, w, h).data;
+  let top = -1;
+  let bottom = -1;
+  for (let y = 0; y < h; y += 1) {
+    let hit = false;
+    for (let x = 0; x < w; x += 1) {
+      if (data[(y * w + x) * 4 + 3] > 8) {
+        hit = true;
+        break;
+      }
+    }
+    if (hit) {
+      if (top < 0) top = y;
+      bottom = y;
+    }
+  }
+  return top < 0 ? 0 : bottom - top + 1;
+}
+
+function autoScale(canvases, idleH) {
+  if (!idleH) return 1;
+  const hs = canvases.map(alphaHeight).filter((n) => n > 0)
+    .sort((a, b) => a - b);
+  if (!hs.length) return 1;
+  const body = hs[Math.floor(hs.length / 2)];
+  const raw = (idleH * 0.9) / body;
+  const clamped = Math.max(0.7, Math.min(1.3, raw));
+  return Math.round(clamped * 20) / 20;
+}
+
+// 按当前比例从基准帧重新生成上传用的帧和预览（画布尺寸不变，底部中心对齐）。
+function applyScale() {
+  if (!box) return;
+  const src = box.basePreviews || [];
+  const s = box.scale || 1;
+  box.previews = src.map((c) => {
+    if (Math.abs(s - 1) < 0.001) return c;
+    const out = document.createElement('canvas');
+    out.width = c.width;
+    out.height = c.height;
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingQuality = 'high';
+    const nw = Math.max(1, Math.round(c.width * s));
+    const nh = Math.max(1, Math.round(c.height * s));
+    ctx.drawImage(c, Math.round((c.width - nw) / 2), c.height - nh, nw, nh);
+    return out;
+  });
+  box.frames = box.previews.map((c) => c.toDataURL('image/png').split(',')[1]);
+  box.b64 = box.frames[0] || '';
+  if (box.previews.length) {
+    box.w = box.previews[0].width;
+    box.h = box.previews[0].height;
+  }
+  box.selected = Math.max(0, Math.min(box.selected, box.previews.length - 1));
+  renderFrameStrip();
+  startPreview();
+}
+
 function resetFrames() {
   if (!box) return;
   box.frames = [];
   box.previews = [];
+  box.basePreviews = [];
+  box.scale = 1;
   box.b64 = '';
   box.w = 0;
   box.h = 0;
   box.selected = 0;
+  setScaleUI(1);
   setMoveControls(null);
   stopPreview();
   renderFrameStrip();
@@ -578,12 +671,14 @@ async function loadExisting(mode) {
       let imgs = (sp.frames && sp.frames[mode]) || [];
       if (!imgs.length && sp.poses[mode]) imgs = [sp.poses[mode]];
       if (!imgs.length) return;
-      box.previews = imgs.map(imageCanvas);
-      box.frames = box.previews.map((c) => c.toDataURL('image/png').split(',')[1]);
-      box.b64 = box.frames[0];
-      box.w = box.previews[0].width;
-      box.h = box.previews[0].height;
+      // 已有动作的帧已经是用户上次确认过的大小，再进来就按 100% 起。
+      // 老动作的帧可能只有紧贴人物的画布；先补到角色包围盒，
+      // 这样「人物大小」往上调时不会一放大就裁头。
+      box.basePreviews = imgs.map((im) => padCanvas(imageCanvas(im), sp.w, sp.h));
+      box.scale = 1;
       box.selected = 0;
+      setScaleUI(1);
+      applyScale();
     }
     if (!box.fpsTouched) {
       // 清单里的 anims 是上传成功后立刻写进来的那一份，最不容易读到旧值；
@@ -751,17 +846,15 @@ async function appendFrames(files) {
     octx.imageSmoothingQuality = 'high';
     octx.drawImage(c, bb.x, bb.y, bb.w, bb.h,
       Math.round((w - dw) / 2), h - dh, dw, dh);
-    box.previews.push(out);
-    box.frames.push(out.toDataURL('image/png').split(',')[1]);
-    added.push(box.frames.length - 1);
+    box.basePreviews.push(out);
+    added.push(box.basePreviews.length - 1);
   }
   if (!added.length) {
     msg('新加的图都是透明的，换几张吧', true);
     return;
   }
   box.selected = added[0];
-  renderFrameStrip();
-  startPreview();
+  applyScale();
   root.querySelector('#up-send').disabled = false;
   msg('');
   note(`已加到 ${box.frames.length} 帧。`);
@@ -774,8 +867,11 @@ async function prepare(files) {
   box.files = list;
   box.frames = [];
   box.previews = [];
+  box.basePreviews = [];
+  box.scale = 1;
   box.b64 = '';
   box.userPicked = true;
+  setScaleUI(1);
   stopPreview();
   renderFrameStrip();
   preview.width = 0;
@@ -787,10 +883,12 @@ async function prepare(files) {
   // 也就不会让其他姿势跟着缩小。
   let maxW = 200;
   let maxH = 240;
+  let idleH = 0;
   try {
     const sp = await loadRole(box.role);
     maxW = Math.max(60, Math.min(200, sp.w));
     maxH = Math.max(60, Math.min(240, sp.h));
+    idleH = (sp.poses && sp.poses.idle) ? sp.poses.idle.naturalHeight : 0;
   } catch (_) {
     // 角色还没加载出来就用上限兜底
   }
@@ -832,32 +930,33 @@ async function prepare(files) {
   const oh = Math.max(1, Math.round(bh * k));
 
   const outs = [];
-  const frames = [];
   for (const it of items) {
     const out = document.createElement('canvas');
-    out.width = ow;
-    out.height = oh;
+    // 画布撑成角色的最大包围盒、内容底部居中：给「人物大小」留放大空间。
+    out.width = maxW;
+    out.height = maxH;
     const octx = out.getContext('2d');
     octx.imageSmoothingQuality = 'high';
-    octx.drawImage(it.c, u.x, u.y, bw, bh, 0, 0, ow, oh);
+    octx.drawImage(it.c, u.x, u.y, bw, bh,
+      Math.round((maxW - ow) / 2), maxH - oh, ow, oh);
     outs.push(out);
-    frames.push(out.toDataURL('image/png').split(',')[1]);
   }
 
-  box.frames = frames;
-  box.previews = outs;
-  box.b64 = frames[0];
-  box.w = ow;
-  box.h = oh;
+  box.basePreviews = outs;
+  box.scale = 1;
+  box.w = maxW;
+  box.h = maxH;
   box.selected = 0;
-
-  renderFrameStrip();
-  startPreview();
+  // 按站立高度估一个初始大小：带特效、人物占比小的动作不用手动找比例。
+  const auto = autoScale(outs, idleH);
+  setScaleUI(auto);
+  box.scale = auto;
+  applyScale();
 
   root.querySelector('#up-send').disabled = false;
   msg('');
-  note(frames.length > 1
-    ? `已裁成 ${ow}×${oh}，共 ${frames.length} 帧。`
+  note(outs.length > 1
+    ? `已裁成 ${ow}×${oh}，共 ${outs.length} 帧。`
     : `已裁成 ${ow}×${oh}，和其他姿势一样贴地。`);
 }
 

@@ -1529,7 +1529,10 @@ class App:
         dlg = UploadDialog(role, box, self._upload_targets(role),
                            on_restore=lambda k, r=role: self._dialog_restore(r, k),
                            taken=[t for t in taken if t],
-                           load_preset=lambda k, r=role: self._preset_for(r, k))
+                           load_preset=lambda k, r=role: self._preset_for(r, k),
+                           idle_h=(sp.poses['idle'].height
+                                   if sp is not None and sp.poses.get('idle')
+                                   else 0))
         if action:
             dlg.select(action)
         ok = dlg.exec() == QDialog.Accepted

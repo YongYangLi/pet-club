@@ -78,7 +78,7 @@ def pet_scale(dpr):
 # （tools/build_app.py 读这里），发版时 tools/make_release.py 再把同一个号写进
 # COS 上的清单。三处必须是同一个来源，否则会出现「客户端说自己 1.1.0，清单也说 1.1.0，
 # 但内容其实不一样」这种最难受的情况。
-VERSION = '1.9.3'
+VERSION = '1.9.4'
 
 # 发版地址：网页端的「下载桌面客户端」优先用对象存储里的 exe（GitHub 访问慢），
 # 清单和产物在同一个目录里，所以地址直接从 UPDATE_URL 推导。

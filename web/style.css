@@ -1822,6 +1822,8 @@ body[data-pet-size="large"] { --pet-space: 330px; }
 }
 
 .upload-fields { display: flex; flex-direction: column; gap: 8px; }
+#up-scale { flex: 1; min-width: 90px; accent-color: var(--accent); }
+#up-scale-val { flex: none; width: 38px; text-align: right; }
 .upload-row {
   display: flex;
   align-items: center;

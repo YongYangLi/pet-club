@@ -146,13 +146,19 @@ def normalize_frames(paths, max_w=MAX_W, max_h=MAX_H, keyout=True):
     k = min(max_w / bw, max_h / bh, 1.0)
     ow = max(1, int(round(bw * k)))
     oh = max(1, int(round(bh * k)))
+    # 画布按角色的最大包围盒出、内容底部居中：播放位置不变，但给「人物大小」
+    # 留出放大空间（不先把画布撑满，放大就只能裁头）。
+    cw = max(1, int(max_w))
+    ch = max(1, int(max_h))
     out = []
     for im in ims:
         part = im.crop(box)
         if k < 1.0:
             part = part.resize((ow, oh), Image.LANCZOS)
+        canvas = Image.new('RGBA', (cw, ch), (0, 0, 0, 0))
+        canvas.paste(part, ((cw - ow) // 2, ch - oh), part)
         buf = io.BytesIO()
-        part.save(buf, 'PNG', optimize=True)
+        canvas.save(buf, 'PNG', optimize=True)
         out.append(buf.getvalue())
     return out, ow, oh
 

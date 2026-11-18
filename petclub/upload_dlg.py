@@ -58,6 +58,76 @@ def _thumb_pix(path):
     return pix
 
 
+def _median_alpha_height(frames):
+    """一组帧里人物（alpha）高度的中位数，用来自动估一个大合适的初始比例。"""
+    heights = []
+    for data in frames:
+        try:
+            im = Image.open(io.BytesIO(data)).convert('RGBA')
+        except (OSError, ValueError):
+            continue
+        box = im.getchannel('A').getbbox()
+        if box:
+            heights.append(box[3] - box[1])
+    if not heights:
+        return 0
+    heights.sort()
+    return heights[len(heights) // 2]
+
+
+def _pad_frame(data, cw, ch):
+    """把一帧放进 cw×ch 的画布、底部居中（多出来的只是透明留白）。"""
+    try:
+        im = Image.open(io.BytesIO(data)).convert('RGBA')
+    except (OSError, ValueError):
+        return data
+    if im.size == (cw, ch):
+        return data
+    canvas = Image.new('RGBA', (cw, ch), (0, 0, 0, 0))
+    x = (cw - im.width) // 2
+    y = ch - im.height
+    left, top = max(0, x), max(0, y)
+    right, bottom = min(cw, x + im.width), min(ch, y + im.height)
+    if right > left and bottom > top:
+        part = im.crop((left - x, top - y, right - x, bottom - y))
+        canvas.paste(part, (left, top), part)
+    buf = io.BytesIO()
+    canvas.save(buf, 'PNG', optimize=True)
+    return buf.getvalue()
+
+
+def _zoom_png(data, scale):
+    """把一帧以底部中心为锚点缩放，画布尺寸不变（超出的部分裁掉）。
+
+    多帧动作上传后只做过「裁边 + 缩小」，永远不会放大；带特效的动作
+    人物占比会很小。这里给用户一个手动补偿的机会，缩放直接烘进 PNG，
+    播放端（桌面/网页）完全不用知道这件事。
+    """
+    if abs(scale - 1.0) < 0.001:
+        return data
+    try:
+        im = Image.open(io.BytesIO(data)).convert('RGBA')
+    except (OSError, ValueError):
+        return data
+    w, h = im.size
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    if (nw, nh) == (w, h):
+        return data
+    scaled = im.resize((nw, nh), Image.LANCZOS)
+    canvas = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    x = (w - nw) // 2
+    y = h - nh
+    left, top = max(0, x), max(0, y)
+    right, bottom = min(w, x + nw), min(h, y + nh)
+    if right > left and bottom > top:
+        part = scaled.crop((left - x, top - y, right - x, bottom - y))
+        canvas.paste(part, (left, top), part)
+    buf = io.BytesIO()
+    canvas.save(buf, 'PNG', optimize=True)
+    return buf.getvalue()
+
+
 def _hint(text):
     """表单左侧那列灰标签。"""
     lab = QLabel(text)
@@ -435,14 +505,19 @@ class UploadDialog(QDialog):
 
     def __init__(self, role, max_box, targets, on_restore=None, taken=(),
                  parent=None, preset_frames=None, preset_fps=None,
-                 preset_key='', load_preset=None):
+                 preset_key='', load_preset=None, idle_h=0):
         super().__init__(parent)
         self.role = role
         self.max_w, self.max_h = max_box
+        self._idle_h = float(idle_h or 0)
         self._on_restore = on_restore
         self._load_cb = load_preset
         self._loaded_key = None      # 当前这组帧是从哪个动作预载进来的
         self._user_picked = False    # 用户自己选过图，就别再被预载覆盖
+        # 「人物大小」：原始归一化后的帧 + 当前缩放。缩放只改上传的图，
+        # 播放端完全不用知道（见 _zoom_png）。
+        self._base_frames = []
+        self._scale = 1.0
         # 已经被占用的名字（我自己的自定义动作 + 内置动作）。
         # 名字是「跟着做」的配对键：自己重名就不知道该演哪个。
         self._taken = {norm_label(t) for t in taken if t}
@@ -643,6 +718,32 @@ class UploadDialog(QDialog):
         dl.addStretch(1)
         fl.addWidget(self.dur_row)
 
+        # 人物大小：上传时只裁边、只缩小，带特效的动作人物会显得小。
+        # 这里按底部中心缩放，直接烘进上传的帧里，播放端不需要改。
+        self.scale_row = QWidget()
+        sl = QHBoxLayout(self.scale_row)
+        sl.setContentsMargins(0, 0, 0, 0)
+        sl.setSpacing(10)
+        scale_lab = _hint('大小')
+        scale_lab.setFixedWidth(40)
+        self.scale_slider = QSlider(Qt.Horizontal)
+        self.scale_slider.setRange(70, 160)
+        self.scale_slider.setSingleStep(5)
+        self.scale_slider.setPageStep(5)
+        self.scale_slider.setValue(100)
+        self.scale_slider.setMinimumWidth(120)
+        self.scale_slider.setCursor(Qt.PointingHandCursor)
+        self.scale_slider.valueChanged.connect(self._scale_changed)
+        self.scale_val = QLabel('100%')
+        self.scale_val.setFont(font(9))
+        self.scale_val.setStyleSheet('color: %s;' % SUB)
+        self.scale_val.setFixedWidth(38)
+        self.scale_val.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        sl.addWidget(scale_lab)
+        sl.addWidget(self.scale_slider, 1)
+        sl.addWidget(self.scale_val)
+        fl.addWidget(self.scale_row)
+
         # 换图时这块不空着：说明 +「恢复默认图 / 删掉这个动作」。
         self.alt = QWidget()
         al = QHBoxLayout(self.alt)
@@ -832,6 +933,52 @@ class UploadDialog(QDialog):
         if self._paths:
             self._load()
 
+    # ---- 人物大小 ----
+
+    def _scale_changed(self, value):
+        if abs(value / 100.0 - self._scale) < 0.001:
+            return
+        self._scale = value / 100.0
+        self.scale_val.setText('%d%%' % value)
+        if self._base_frames:
+            self._apply_scale()
+
+    def _set_bases(self, frames, auto=False):
+        """换一组基准帧；auto=True 时按站立高度估一个初始大小。"""
+        self._base_frames = [bytes(f) for f in frames]
+        scale = 1.0
+        if auto and self._base_frames and self._idle_h > 0:
+            body = _median_alpha_height(self._base_frames)
+            if body > 0:
+                scale = 0.9 * self._idle_h / body
+        scale = max(0.7, min(1.3, round(scale * 20) / 20.0))   # 5% 一档
+        self._scale = scale
+        self.scale_slider.blockSignals(True)
+        self.scale_slider.setValue(int(round(scale * 100)))
+        self.scale_slider.blockSignals(False)
+        self.scale_val.setText('%d%%' % int(round(scale * 100)))
+        self._apply_scale()
+
+    def _apply_scale(self):
+        """按当前比例重新生成上传用的帧和预览图（基准帧不动）。"""
+        if not self._base_frames:
+            self._frames = []
+            self._pixmaps = []
+            self._render_frames()
+            return
+        self._frames = [_zoom_png(data, self._scale) for data in self._base_frames]
+        self._pixmaps = []
+        for data in self._frames:
+            pix = QPixmap()
+            pix.loadFromData(data, 'PNG')
+            self._pixmaps.append(pix)
+        if self._pixmaps:
+            self._w = self._pixmaps[0].width()
+            self._h = self._pixmaps[0].height()
+        self._preview_i = max(0, min(self._preview_i, len(self._pixmaps) - 1))
+        self._render_frames()
+        self._start_preview()
+
     def _load(self):
         self._user_picked = True
         self._loaded_key = None
@@ -854,16 +1001,13 @@ class UploadDialog(QDialog):
             self._say('读图失败：%s' % e, bad=True)
             self.stage.set_pixmap(None)
             return
-        self._frames = frames
-        self._w = w
-        self._h = h
-        for data in frames:
-            pix = QPixmap()
-            pix.loadFromData(data, 'PNG')
-            self._pixmaps.append(pix)
+        # normalize_frames 已经把画布撑成角色的最大包围盒；实际尺寸以 PNG 为准。
+        try:
+            self._w, self._h = Image.open(io.BytesIO(frames[0])).size
+        except (OSError, ValueError):
+            self._w, self._h = w, h
         self._preview_i = 0
-        self._render_frames()
-        self._start_preview()
+        self._set_bases(frames, auto=True)
         if len(self._pixmaps) > 1:
             self._say('已裁成 %d×%d · %d 帧 · %.1ffps 循环'
                       % (w, h, len(frames), self._fps))
@@ -902,16 +1046,15 @@ class UploadDialog(QDialog):
             self.move_h.blockSignals(False)
             self.move_d.blockSignals(False)
             self._move_labels()
-        self._frames = list(frames)
-        self._pixmaps = []
+        # 老动作的帧可能只有紧贴人物的画布；先补到角色的最大包围盒，
+        # 这样「人物大小」往上调时不会一放大就裁头。
+        self._base_frames = [_pad_frame(bytes(f), int(self.max_w),
+                                        int(self.max_h)) for f in frames]
         self._paths = []
         # 预载帧只有图片字节、没有文件路径。落到临时目录当文件用，
-        # 「＋」加图、去白底重算才有统一的输入。
+        # 「＋」加图、去白底重算才有统一的输入（写基准帧，不写缩放后的）。
         self._tmp_dir = tempfile.mkdtemp(prefix='petclub-dlg-')
-        for i, data in enumerate(self._frames):
-            pix = QPixmap()
-            pix.loadFromData(data, 'PNG')
-            self._pixmaps.append(pix)
+        for i, data in enumerate(self._base_frames):
             try:
                 path = os.path.join(self._tmp_dir, 'preset-%d.png' % i)
                 with open(path, 'wb') as f:
@@ -919,9 +1062,12 @@ class UploadDialog(QDialog):
                 self._paths.append(path)
             except OSError:
                 pass
-        if self._pixmaps:
-            self._w = self._pixmaps[0].width()
-            self._h = self._pixmaps[0].height()
+        if self._base_frames:
+            try:
+                self._w, self._h = Image.open(
+                    io.BytesIO(self._base_frames[0])).size
+            except (OSError, ValueError):
+                self._w = self._h = 0
         if fps is not None:
             try:
                 self._fps = max(2.0, min(24.0, float(fps)))
@@ -932,8 +1078,8 @@ class UploadDialog(QDialog):
         self.fps_slider.blockSignals(False)
         self.fps_val.setText('%.1f' % self._fps)
         self._preview_i = 0
-        self._render_frames()
-        self._start_preview()
+        # 编辑已有动作时不再自动放大：传进来的帧已经是用户上次确认过的样子。
+        self._set_bases(self._base_frames, auto=False)
         self.ok.setEnabled(bool(self._pixmaps))
         self.alt_text.setText(
             '当前动作：%d 帧 · %.1ffps。可以删帧或重新选图。'
@@ -1031,15 +1177,13 @@ class UploadDialog(QDialog):
 
     def _move_frame(self, src, dst):
         """拖动排序：把第 src 帧挪到 dst 的位置。"""
-        n = len(self._frames)
+        n = len(self._base_frames)
         if src == dst or not (0 <= src < n) or not (0 <= dst < n):
             return
         self._user_picked = True
-        self._frames.insert(dst, self._frames.pop(src))
-        self._pixmaps.insert(dst, self._pixmaps.pop(src))
+        self._base_frames.insert(dst, self._base_frames.pop(src))
         self._preview_i = dst
-        self._render_frames()
-        self._start_preview()
+        self._apply_scale()
         self._say('顺序已调整。')
 
     def _pick_add(self):
@@ -1051,11 +1195,11 @@ class UploadDialog(QDialog):
 
     def _append_paths(self, paths):
         """追加新帧：输出和现有帧同尺寸、脚底对齐，服务端尺寸校验才过得去。"""
-        if not self._frames:
+        if not self._base_frames:
             self._paths = list(paths)[:16]
             self._load()
             return
-        room = 16 - len(self._frames)
+        room = 16 - len(self._base_frames)
         if room <= 0:
             self._say('最多 16 帧', bad=True)
             return
@@ -1063,50 +1207,33 @@ class UploadDialog(QDialog):
         added = 0
         for path in list(paths)[:room]:
             try:
-                pngs, ow, oh = upload.normalize_frames(
+                pngs, _ow, _oh = upload.normalize_frames(
                     [path], self._w, self._h, keyout=keyout)
             except Exception:
                 continue
-            try:
-                part = Image.open(io.BytesIO(pngs[0])).convert('RGBA')
-            except OSError:
-                continue
-            out = Image.new('RGBA', (self._w, self._h), (0, 0, 0, 0))
-            out.paste(part, ((self._w - ow) // 2, self._h - oh))
-            buf = io.BytesIO()
-            out.save(buf, 'PNG', optimize=True)
-            data = buf.getvalue()
-            self._frames.append(data)
-            pix = QPixmap()
-            pix.loadFromData(data, 'PNG')
-            self._pixmaps.append(pix)
+            # normalize_frames 出来的已经是 (self._w × self._h) 的画布。
+            self._base_frames.append(pngs[0])
             self._paths.append(path)
             added += 1
         if not added:
             self._say('新加的图读不出来，换几张吧', bad=True)
             return
         self._user_picked = True
-        self._preview_i = max(0, min(self._preview_i,
-                                    len(self._pixmaps) - 1))
-        self._render_frames()
-        self._start_preview()
+        self._apply_scale()
         self.ok.setEnabled(True)
         self._say('已加到 %d 帧' % len(self._frames))
 
     def _remove_frame(self, index):
-        if not (0 <= index < len(self._frames)):
+        if not (0 <= index < len(self._base_frames)):
             return
         self._user_picked = True
-        del self._frames[index]
-        del self._pixmaps[index]
+        del self._base_frames[index]
         if self._preview_i > index:
             self._preview_i -= 1
         self._preview_i = max(0, min(self._preview_i,
-                                    len(self._pixmaps) - 1))
-        self._render_frames()
+                                    len(self._base_frames) - 1))
+        self._apply_scale()
         if self._pixmaps:
-            self.stage.set_pixmap(self._pixmaps[self._preview_i])
-            self._start_preview()
             self.ok.setEnabled(True)
             self._say('还剩 %d 帧' % len(self._frames))
         else:
@@ -1191,6 +1318,7 @@ class UploadDialog(QDialog):
             self.move_h.blockSignals(False)
             self.move_d.blockSignals(False)
             self._move_labels()
+        self._base_frames = []
         self._frames = []
         self._pixmaps = []
         self._paths = []
@@ -1199,6 +1327,11 @@ class UploadDialog(QDialog):
         self._preview_timer.stop()
         self._loaded_key = key
         self._user_picked = False
+        self._scale = 1.0
+        self.scale_slider.blockSignals(True)
+        self.scale_slider.setValue(100)
+        self.scale_slider.blockSignals(False)
+        self.scale_val.setText('100%')
         self._render_frames()
         self.stage.set_pixmap(None)
         self.ok.setEnabled(False)
@@ -1211,8 +1344,9 @@ class UploadDialog(QDialog):
         custom = is_new or bool(tile is not None and tile.badge == '新增')
         self.ok.setText('上传' if is_new else '换这张')
         self.name_row.setVisible(is_new or custom)
-        # 时长只对自定义动作开放：内置姿势的时长是语义的一部分。
+        # 时长、大小只对自定义动作开放：内置姿势的时长/比例是语义的一部分。
         self.dur_row.setVisible(custom)
+        self.scale_row.setVisible(custom)
         # 说明文字和网页同一句，并且固定在「移动」下面、按钮左边。
         self.alt.setVisible(True)
         if is_new:
