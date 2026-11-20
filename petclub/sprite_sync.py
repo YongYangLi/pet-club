@@ -19,7 +19,7 @@ import struct
 import urllib.request
 
 TIMEOUT = 6.0
-MAX_BYTES = 3 * 1024 * 1024      # 单张上限。服务端限制 200×240，这里是兜底
+MAX_BYTES = 3 * 1024 * 1024      # 单张上限。服务端限制 260×240，这里是兜底
 MAX_SIDE = 512                   # 像素上限：挡住「几 KB 的 PNG 解出几 GB」的炸弹
 
 

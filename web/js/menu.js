@@ -84,7 +84,16 @@ export function showMenu(x, y, role, handlers) {
   // 菜单出现在鼠标旁边；靠边时换另一侧。桌面版还会避开角色，
   // 网页里按「点哪儿出哪儿、不盖住鼠标」处理就够了。
   const margin = 8;
-  const rect = root.getBoundingClientRect();
+  root.style.maxHeight = '';
+  root.style.overflowY = '';
+  let rect = root.getBoundingClientRect();
+  // 动作攒多了菜单会比窗口还高 —— 先限高 + 自己滚，否则 clamp 出来的 top
+  // 是负的，最后几条（「换一个身份」「退出」）会被切在屏幕外。
+  if (rect.height > window.innerHeight - margin * 2) {
+    root.style.maxHeight = `${window.innerHeight - margin * 2}px`;
+    root.style.overflowY = 'auto';
+    rect = root.getBoundingClientRect();
+  }
   let left = x + 14;
   let top = y + 8;
   if (left + rect.width > window.innerWidth - margin) left = x - rect.width - 14;

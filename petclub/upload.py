@@ -22,7 +22,7 @@ from PIL import Image
 
 CAP = 600          # 分析用工作尺寸：够精细，又不是几百万像素
 TOL = 34           # 去背容差（RGB 每通道）
-MAX_W = 200        # 和 custom.py 的上限对齐：超了服务端也会拒
+MAX_W = 260        # 和 custom.py 的上限对齐：超了服务端也会拒
 MAX_H = 240
 TIMEOUT = 20.0      # 多帧动作一次可能好几 MB，给足上传时间
 

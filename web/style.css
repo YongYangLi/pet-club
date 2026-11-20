@@ -1245,6 +1245,9 @@ body[data-pet-size="large"] { --pet-space: 330px; }
   background: #ffffff;
   box-shadow: 0 14px 40px rgba(17, 24, 39, .16);
   font-size: 13px;
+  /* 限高由 chat.js 的 placeFlyout 按说话时的视口算，这里只兜住滚轮：
+     滚到菜单尽头别把后面的消息流一起滚了 */
+  overscroll-behavior: contain;
 }
 .ctx-submenu.left { left: auto; right: calc(100% + 2px); }
 /* 只认直接子级：三级菜单嵌在二级菜单里，用后代选择器会让所有三级同时展开 */

@@ -32,13 +32,14 @@ from PIL import Image
 
 from . import motion, upload
 from .config import ROLE_NAME
-from .custom import norm_label
+from .custom import MAX_FRAMES, norm_label
 from .theme import (ACCENT, ACCENT_DOWN, ACCENT_EDGE, ACCENT_SOFT, BORDER,
                     CARD_BG, ERR, FG, LINE, MUTED, SUB, font)
 
 THUMB_H = 48        # 格子里缩略图的高度，和网页 .pose-thumb 一致
 TILE_W = 72
 TILE_H = 78
+TILE_MIN = 64       # 列宽下限：再窄名字就要被省略号吃掉
 COLS = 5
 FRAME_COLS = 9      # 帧条一行几格（38px + 8 间距正好塞进 432 内容宽，和网页一致）
 FRAME_GAP = 8
@@ -642,9 +643,11 @@ class UploadDialog(QDialog):
         grid_host = QWidget()
         grid_host.setStyleSheet('background: #ffffff;')
         grid = QGridLayout(grid_host)
-        grid.setContentsMargins(2, 2, 2, 2)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(6)
         grid.setVerticalSpacing(6)
+        self._grid = grid
+        self._targets = list(targets)
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self.tiles = {}
@@ -656,18 +659,20 @@ class UploadDialog(QDialog):
             tile.clicked.connect(lambda _c=False, k=key: self._on_tile(k))
             self._group.addButton(tile)
             self.tiles[key] = tile
-            grid.addWidget(tile, i // COLS, i % COLS, Qt.AlignHCenter)
-        for c in range(COLS):
-            grid.setColumnStretch(c, 1)
         rows = max(1, (len(targets) + COLS - 1) // COLS)
-        need = rows * TILE_H + max(0, rows - 1) * 6 + 4
+        need = rows * TILE_H + max(0, rows - 1) * 6
         self.scroll = QScrollArea()
         self.scroll.setObjectName('poses')
         self.scroll.setWidget(grid_host)
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.scroll.setFixedHeight(min(178, need))
+        # 高度按整行取：178 会露出第三行的 12px 边，看着像被裁掉半截。
+        vis_h = min(2 * TILE_H + 6, need)
+        self.scroll.setFixedHeight(vis_h)
+        # 滚动条会吃掉 8px 视口：要不要出现先定死，格子宽度才算得准。
+        self.scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAlwaysOn if need > vis_h else Qt.ScrollBarAlwaysOff)
         self.scroll.viewport().setAutoFillBackground(False)
         self.scroll.viewport().setStyleSheet('background: #ffffff;')
         # 「动作」这一列和网页一致：40px 标签 + 右边缩略图网格。
@@ -859,8 +864,52 @@ class UploadDialog(QDialog):
         self._sync_mode()
         if preset_frames:
             self._load_preset(preset_frames, preset_fps, preset_key)
-        self.resize(496, self.panel.sizeHint().height() + 36)
+        self._fit_height()
         self._center()
+        QTimer.singleShot(0, self._relayout_tiles)
+
+    # ---- 动作网格 ----
+
+    def _relayout_tiles(self):
+        """按滚动区实际宽度排格子。
+
+        原来写死 5 列 × 72px = 388，滚动条一出现视口只剩 376，第 5 列被裁掉
+        半截。这里先量视口再决定列宽：放得下就 5 列 × 72，放不下就把格子压到
+        最小 64px；再窄就退到 4 列，宁可换行也不裁。
+        """
+        vw = self.scroll.viewport().width()
+        if vw < TILE_MIN:
+            return
+        gap = 6
+        cols = max(1, min(COLS, (vw + gap) // (TILE_MIN + gap)))
+        tw = min(TILE_W, (vw - (cols - 1) * gap) // cols)
+        while self._grid.count():
+            self._grid.takeAt(0)
+        for i, t in enumerate(self._targets):
+            tile = self.tiles[t.get('key') or '']
+            if tile.width() != tw:
+                tile.setFixedSize(tw, TILE_H)
+            self._grid.addWidget(tile, i // cols, i % cols, Qt.AlignHCenter)
+        for c in range(COLS):
+            self._grid.setColumnStretch(c, 1 if c < cols else 0)
+
+    def _fit_height(self):
+        """按内容收放窗口高度。
+
+        直接读 panel.sizeHint() 会拿到旧值：显隐刚变过时布局还没重算，
+        而且窗口的 minimumSizeHint 也跟着滞后，resize 会被它钳住 ——
+        切到内置动作后窗口不缩，底下留一大片白。两层布局都 invalidate 之后再量。
+        """
+        for lay in (self.panel.layout(), self.layout()):
+            if lay is not None:
+                lay.invalidate()
+                lay.activate()
+        self.resize(496, self.panel.sizeHint().height() + 36)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._relayout_tiles()
+        self._fit_height()
 
     # ---- 样式 ----
 
@@ -926,7 +975,7 @@ class UploadDialog(QDialog):
             self, '选一张或多张图（多张会按 8fps 循环）', '',
             '图片 (*.png *.jpg *.jpeg *.webp *.bmp)')
         if paths:
-            self._paths = list(paths[:16])
+            self._paths = list(paths[:MAX_FRAMES])
             self._load()
 
     def _reload(self, *_a):
@@ -1188,7 +1237,7 @@ class UploadDialog(QDialog):
 
     def _pick_add(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, '再加几张图（最多 16 帧）', '',
+            self, '再加几张图（最多 %d 帧）' % MAX_FRAMES, '',
             '图片 (*.png *.jpg *.jpeg *.webp *.bmp)')
         if paths:
             self._append_paths(paths)
@@ -1196,12 +1245,12 @@ class UploadDialog(QDialog):
     def _append_paths(self, paths):
         """追加新帧：输出和现有帧同尺寸、脚底对齐，服务端尺寸校验才过得去。"""
         if not self._base_frames:
-            self._paths = list(paths)[:16]
+            self._paths = list(paths)[:MAX_FRAMES]
             self._load()
             return
-        room = 16 - len(self._base_frames)
+        room = MAX_FRAMES - len(self._base_frames)
         if room <= 0:
-            self._say('最多 16 帧', bad=True)
+            self._say('最多 %d 帧' % MAX_FRAMES, bad=True)
             return
         keyout = self.keyout.isChecked()
         added = 0
@@ -1374,7 +1423,8 @@ class UploadDialog(QDialog):
         self.move_box.setVisible(custom)
         if self.isVisible():
             # 内置动作没有时长/轨迹这两块，窗口收回去，别留空白。
-            self.resize(496, self.panel.sizeHint().height() + 36)
+            # 放到下一轮事件里量：显隐刚变过，布局还没重算完。
+            QTimer.singleShot(0, self._fit_height)
 
     def _restore(self):
         key = self._key()

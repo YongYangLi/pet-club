@@ -15,7 +15,7 @@ import { LOOSE_POSES, loosePose, normName } from './actions.js';
 
 const CAP = 600;      // 分析用工作尺寸：够精细，又不是几百万像素
 const TOL = 34;       // 去背容差（RGB 每通道）
-const MAX_FRAMES = 16;  // 和服务端 custom.MAX_FRAMES 对齐
+const MAX_FRAMES = 48;  // 和服务端 custom.MAX_FRAMES 对齐
 
 let box = null;       // { role, frames, previews, b64, w, h, onDone, files, mode }
 let root = null;

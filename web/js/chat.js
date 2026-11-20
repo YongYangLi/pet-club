@@ -15,6 +15,33 @@ const EMOJI_CHARS = ['😀', '😄', '😅', '😂', '😊', '😉', '😍', '�
   '😜', '😳', '😭', '😡', '😱', '😴', '🙄', '👍', '👏', '🙏'];
 const STICKER_POSES = ['idle', 'wave', 'drink', 'heart', 'jump', 'sleep', 'knock', 'drag'];
 
+// 二级 / 三级浮层默认贴着父行顶边往下排（CSS 的 top:-5px）。父行一靠屏幕
+// 底部，整块就掉到窗口外面去了 —— 「我的动作」这种越攒越长的列表尤其明显。
+// 所以展示前先量一次：放不下就整块上移；一屏都装不下才限高 + 自己滚。
+// ⚠️ overflow 只在限高的时候才设：三级菜单是二级菜单的绝对定位子元素，
+// 二级一旦成了滚动容器，三级就会被它裁掉。
+function placeFlyout(sub) {
+  const box = sub.querySelector(':scope > .ctx-submenu');
+  if (!box) return;
+  box.style.maxHeight = '';
+  box.style.overflowY = '';
+  box.style.top = '-5px';
+  const h = box.offsetHeight;
+  if (!h) return;                       // display:none，位置交给 CSS
+  const gap = 8;
+  const row = sub.getBoundingClientRect();
+  const room = window.innerHeight - gap * 2;
+  if (h > room) {
+    box.style.maxHeight = `${room}px`;
+    box.style.overflowY = 'auto';
+    box.style.top = `${gap - row.top}px`;
+    return;
+  }
+  const top = Math.max(gap, Math.min(row.top - 5, window.innerHeight - gap - h));
+  box.style.top = `${top - row.top}px`;
+}
+
+
 export class ChatUI {
   constructor({ onSend, onAction, onLeave, onQuit, onRemote, onMedia, onPetSize, onGame, onFx, onToy, onReminder, reminderState, onPoseAdd, onPoseEdit, onPoseReset }) {
     this.onSend = onSend;
@@ -1213,12 +1240,19 @@ export class ChatUI {
         sub.classList.add('left');
       });
     }
+    // 每次鼠标进到一行（「桌宠大小」「我的动作」，以及它们里面每个动作）之前
+    // 先把浮层摆进视口 —— 这些行可能贴着屏幕底边，浮层会整块掉出去。
+    menu.querySelectorAll('.ctx-sub').forEach((sub) => {
+      sub.addEventListener('pointerenter', () => placeFlyout(sub));
+    });
 
     menu.querySelectorAll('.ctx-item').forEach((btn) => {
       btn.addEventListener('click', () => {
         // 「桌宠大小」只是二级悬浮框的入口，不关菜单
         if (btn.classList.contains('ctx-parent')) {
-          btn.parentElement.classList.toggle('open');
+          const sub = btn.parentElement;
+          sub.classList.toggle('open');
+          placeFlyout(sub);             // 触屏没有 hover，点开时自己摆一次
           return;
         }
         const cmd = btn.dataset.cmd;

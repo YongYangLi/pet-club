@@ -65,8 +65,11 @@ def test_normalize():
     out = _open(png)
     chk('白底被去掉、只留人物', (w, h) == (60, 170), (w, h))
     chk('输出尺寸不超过角色包围盒', w <= 81 and h <= 210, (w, h))
-    chk('小图不放大（比例和原图一致）', out.width == 60 and out.height == 170,
-        out.size)
+    # 1.9.4 起画布一律撑成角色包围盒（内容底部居中），所以「有没有被放大」
+    # 要看内容的包围盒，而不是整张画布。
+    cw, ch = out.getbbox()[2] - out.getbbox()[0], out.getbbox()[3] - out.getbbox()[1]
+    chk('小图不放大（比例和原图一致）', (cw, ch) == (60, 170) and out.size == (81, 210),
+        (out.size, (cw, ch)))
 
     # 人物内部的白色（眼睛高光、白衣服）连不到边缘，不能被清掉
     im = _white_block(x0=100, x1=200, y0=100, y1=300)

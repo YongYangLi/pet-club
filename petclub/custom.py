@@ -36,9 +36,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, 'data', 'custom')
 
 MAX_BYTES = 2 * 1024 * 1024      # 单帧体积上限（base64 解码后）
-MAX_W = 200                      # 和现有素材同量级：p1 最宽 158、最高 234
+MAX_W = 260                      # 和现有素材同量级：p1 最宽 158、最高 234；
+                                 # 钢管舞那类「道具 + 大甩臂」的横构图要 242 宽
 MAX_H = 240
-MAX_FRAMES = 16                  # 一个动作最多几帧：够做小动画，又不至于把上传撑爆
+MAX_FRAMES = 48                  # 一个动作最多几帧：40 帧 12fps 够跑 3 秒的连贯小动画，
+                                 # 再往上总体积会先被 MAX_TOTAL 挡住
 MAX_TOTAL = 6 * 1024 * 1024      # 一次上传所有帧的总体积上限
 FPS = 8                          # 多帧动作的默认帧率
 MIN_FPS = 2
